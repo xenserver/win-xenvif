@@ -1,0 +1,76 @@
+; Copyright 2011 Citrix Systems Inc. All rights reserved.
+; Use is subject to license terms.
+; 
+ 
+[Version] 
+Signature="$Windows NT$" 
+Class=System
+ClassGUID={4d36e97d-e325-11ce-bfc1-08002be10318}
+Provider=%Citrix% 
+CatalogFile=xenvif.cat
+DriverVer=01/01/1900,0.0.0.0
+
+[DestinationDirs] 
+DefaultDestDir=12 
+CoInst_CopyFiles=11
+
+[SourceDisksNames]
+0=%DiskDesc%
+
+[SourceDisksFiles]
+xenvif.sys=0,,
+xenvif_coinst.dll=0,,
+
+[CoInst_CopyFiles]
+xenvif_coinst_@MAJOR_VERSION@_@MINOR_VERSION@_@MICRO_VERSION@_@BUILD_NUMBER@.dll,xenvif_coinst.dll
+
+[Manufacturer] 
+%Citrix%=Citrix,NT$ARCH$
+
+[Citrix.NT$ARCH$]
+%DriverDesc%=XenVif_Inst,XENBUS\CLASS_VIF&REV_02
+
+[XenVif_Inst] 
+CopyFiles=XenVif_Copyfiles
+
+[XenVif_Copyfiles]
+xenvif.sys
+
+[XenVif_Inst.Services] 
+AddService=xenvif,0x02,XenVif_Service,
+
+[XenVif_Service] 
+ServiceType=%SERVICE_KERNEL_DRIVER% 
+StartType=%SERVICE_DEMAND_START% 
+ErrorControl=%SERVICE_ERROR_NORMAL% 
+ServiceBinary=%12%\xenvif.sys 
+LoadOrderGroup="NDIS"
+AddReg = XenVif_Parameters
+
+[XenVif_Parameters]
+HKR,"Parameters","ReceiverMaximumProtocol",0x00010001,0x00000000
+
+[XenVif_Inst.CoInstallers]
+CopyFiles=CoInst_CopyFiles
+AddReg=CoInst_AddReg
+
+[CoInst_AddReg]
+HKR,,CoInstallers32,0x00010000,"xenvif_coinst_@MAJOR_VERSION@_@MINOR_VERSION@_@MICRO_VERSION@_@BUILD_NUMBER@.dll,Entry"
+
+[Strings] 
+
+Citrix="Citrix Systems Inc." 
+DiskDesc="Citrix Tools for Virtual Machines" 
+DriverDesc="Citrix VIF Class"
+
+SERVICE_BOOT_START=0x0 
+SERVICE_SYSTEM_START=0x1 
+SERVICE_AUTO_START=0x2 
+SERVICE_DEMAND_START=0x3 
+SERVICE_DISABLED=0x4 
+
+SERVICE_KERNEL_DRIVER=0x1 
+SERVICE_ERROR_IGNORE=0x0 
+SERVICE_ERROR_NORMAL=0x1 
+SERVICE_ERROR_SEVERE=0x2 
+SERVICE_ERROR_CRITICAL=0x3 

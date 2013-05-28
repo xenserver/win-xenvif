@@ -1,0 +1,279 @@
+/* Copyright (c) Citrix Systems Inc.
+ * All rights reserved.
+ * 
+ * Redistribution and use in source and binary forms, 
+ * with or without modification, are permitted provided 
+ * that the following conditions are met:
+ * 
+ * *   Redistributions of source code must retain the above 
+ *     copyright notice, this list of conditions and the 
+ *     following disclaimer.
+ * *   Redistributions in binary form must reproduce the above 
+ *     copyright notice, this list of conditions and the 
+ *     following disclaimer in the documentation and/or other 
+ *     materials provided with the distribution.
+ * 
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND 
+ * CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, 
+ * INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF 
+ * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE 
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR 
+ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, 
+ * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, 
+ * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR 
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS 
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, 
+ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING 
+ * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE 
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF 
+ * SUCH DAMAGE.
+ */
+
+#ifndef _UTIL_H
+#define _UTIL_H
+
+#include <ntddk.h>
+
+#include "assert.h"
+
+#define	P2ROUNDUP(_x, _a)   \
+        (-(-(_x) & -(_a)))
+
+static FORCEINLINE LONG
+__ffs(
+    IN  unsigned long long  mask
+    )
+{
+    unsigned char           *array = (unsigned char *)&mask;
+    unsigned int            byte;
+    unsigned int            bit;
+    unsigned char           val;
+
+    val = 0;
+
+    byte = 0;
+    while (byte < 8) {
+        val = array[byte];
+
+        if (val != 0)
+            break;
+
+        byte++;
+    }
+    if (byte == 8)
+        return -1;
+
+    bit = 0;
+    while (bit < 8) {
+        if (val & 0x01)
+            break;
+
+        val >>= 1;
+        bit++;
+    }
+
+    return (byte * 8) + bit;
+}
+
+#define __ffu(_mask)  \
+        __ffs(~(_mask))
+
+static FORCEINLINE LONG
+__InterlockedAdd(
+    IN  LONG    *Value,
+    IN  LONG    Delta
+    )
+{
+    LONG        New;
+    LONG        Old;
+
+    do {
+        Old = *Value;
+        New = Old + Delta;
+    } while (InterlockedCompareExchange(Value, New, Old) != Old);
+
+    return New;
+}
+
+static FORCEINLINE LONG
+__InterlockedSubtract(
+    IN  LONG    *Value,
+    IN  LONG    Delta
+    )
+{
+    LONG        New;
+    LONG        Old;
+
+    do {
+        Old = *Value;
+        New = Old - Delta;
+    } while (InterlockedCompareExchange(Value, New, Old) != Old);
+
+    return New;
+}
+
+typedef struct _NON_PAGED_BUFFER_HEADER {
+    SIZE_T  Length;
+    ULONG   Tag;
+} NON_PAGED_BUFFER_HEADER, *PNON_PAGED_BUFFER_HEADER;
+
+typedef struct _NON_PAGED_BUFFER_TRAILER {
+    ULONG   Tag;
+} NON_PAGED_BUFFER_TRAILER, *PNON_PAGED_BUFFER_TRAILER;
+
+static FORCEINLINE PVOID
+__AllocateNonPagedPoolWithTag(
+    IN  SIZE_T                  Length,
+    IN  ULONG                   Tag
+    )
+{
+    PUCHAR                      Buffer;
+    PNON_PAGED_BUFFER_HEADER    Header;
+    PNON_PAGED_BUFFER_TRAILER   Trailer;
+
+    ASSERT(Length != 0);
+
+    Buffer = ExAllocatePoolWithTag(NonPagedPool,
+                                   sizeof (NON_PAGED_BUFFER_HEADER) +
+                                   Length +
+                                   sizeof (NON_PAGED_BUFFER_TRAILER),
+                                   Tag);
+    if (Buffer == NULL)
+        goto done;
+
+    RtlZeroMemory(Buffer, 
+                  sizeof (NON_PAGED_BUFFER_HEADER) +
+                  Length +
+                  sizeof (NON_PAGED_BUFFER_TRAILER));
+
+    Header = (PNON_PAGED_BUFFER_HEADER)Buffer;
+    Header->Length = Length;
+    Header->Tag = Tag;
+
+    Buffer += sizeof (NON_PAGED_BUFFER_HEADER);
+
+    Trailer = (PNON_PAGED_BUFFER_TRAILER)(Buffer + Length);
+    Trailer->Tag = Tag;
+
+done:
+    return Buffer;
+}
+
+static FORCEINLINE VOID
+__FreePoolWithTag(
+    IN  PVOID                   _Buffer,
+    IN  ULONG                   Tag
+    )
+{
+    PUCHAR                      Buffer = _Buffer;
+    SIZE_T                      Length;
+    PNON_PAGED_BUFFER_HEADER    Header;
+    PNON_PAGED_BUFFER_TRAILER   Trailer;
+
+    ASSERT(Buffer != NULL);
+
+    Buffer -= sizeof (NON_PAGED_BUFFER_HEADER);
+
+    Header = (PNON_PAGED_BUFFER_HEADER)Buffer;
+    ASSERT3U(Tag, ==, Header->Tag);
+    Length = Header->Length;
+
+    Buffer += sizeof (NON_PAGED_BUFFER_HEADER);
+
+    Trailer = (PNON_PAGED_BUFFER_TRAILER)(Buffer + Length);
+    ASSERT3U(Tag, ==, Trailer->Tag);
+
+    Buffer -= sizeof (NON_PAGED_BUFFER_HEADER);
+
+    RtlFillMemory(Buffer, 
+                  sizeof (NON_PAGED_BUFFER_HEADER) +
+                  Length +
+                  sizeof (NON_PAGED_BUFFER_TRAILER),
+                  0xAA);
+
+    ExFreePoolWithTag(Buffer, Tag);
+}
+
+static FORCEINLINE PMDL
+__AllocatePage(
+    VOID
+    )
+{
+    PHYSICAL_ADDRESS    LowAddress;
+    PHYSICAL_ADDRESS    HighAddress;
+    LARGE_INTEGER       SkipBytes;
+    SIZE_T              TotalBytes;
+    PMDL                Mdl;
+    PUCHAR              MdlMappedSystemVa;
+    NTSTATUS            status;
+
+    LowAddress.QuadPart = 0ull;
+    HighAddress.QuadPart = ~0ull;
+    SkipBytes.QuadPart = 0ull;
+    TotalBytes = (SIZE_T)PAGE_SIZE;
+
+    Mdl = MmAllocatePagesForMdlEx(LowAddress,
+                                  HighAddress,
+                                  SkipBytes,
+                                  TotalBytes,
+                                  MmCached,
+                                  0);
+
+    status = STATUS_NO_MEMORY;
+    if (Mdl == NULL)
+        goto fail1;
+
+    ASSERT((Mdl->MdlFlags & (MDL_MAPPED_TO_SYSTEM_VA |
+                             MDL_PARTIAL_HAS_BEEN_MAPPED |
+                             MDL_PARTIAL |
+                             MDL_PARENT_MAPPED_SYSTEM_VA |
+                             MDL_SOURCE_IS_NONPAGED_POOL |
+                             MDL_IO_SPACE)) == 0);
+
+    MdlMappedSystemVa = MmMapLockedPagesSpecifyCache(Mdl,
+                                                     KernelMode,
+						                             MmCached,   
+						                             NULL,
+						                             FALSE,
+						                             NormalPagePriority);
+
+    status = STATUS_UNSUCCESSFUL;
+    if (MdlMappedSystemVa == NULL)
+        goto fail2;
+
+    ASSERT3P(MdlMappedSystemVa, ==, Mdl->MappedSystemVa);
+
+    RtlZeroMemory(MdlMappedSystemVa, PAGE_SIZE);
+
+    return Mdl;
+
+fail2:
+    Error("fail2\n");
+
+    MmFreePagesFromMdl(Mdl);
+    ExFreePool(Mdl);
+
+fail1:
+    Error("fail1 (%08x)\n", status);
+
+    return NULL;
+}
+
+static FORCEINLINE VOID
+__FreePage(
+    IN	PMDL	Mdl
+    )
+{
+    PUCHAR	MdlMappedSystemVa;
+
+    ASSERT(Mdl->MdlFlags & MDL_MAPPED_TO_SYSTEM_VA);
+    MdlMappedSystemVa = Mdl->MappedSystemVa;
+
+    RtlFillMemory(MdlMappedSystemVa, PAGE_SIZE, 0xAA);
+    
+    MmUnmapLockedPages(MdlMappedSystemVa, Mdl);
+
+    MmFreePagesFromMdl(Mdl);
+}
+
+#endif  // _UTIL_H
