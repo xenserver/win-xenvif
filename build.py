@@ -277,9 +277,9 @@ if __name__ == '__main__':
 
     print("BUILD_NUMBER=%s" % os.environ['BUILD_NUMBER'])
 
-    if 'MERCURIAL_REVISION' in os.environ.keys():
+    if 'GIT_REVISION' in os.environ.keys():
         revision = open('revision', 'w')
-        print(os.environ['MERCURIAL_REVISION'], file=revision)
+        print(os.environ['GIT_REVISION'], file=revision)
         revision.close()
 
     make_header()
@@ -294,7 +294,7 @@ if __name__ == '__main__':
     symstore_add(driver, 'x86', debug[sys.argv[1]])
     symstore_add(driver, 'x64', debug[sys.argv[1]])
 
-    listfile = callfnout(['hg','manifest'])   
+    listfile = callfnout(['git','ls-tree', '-r', '--name-only', 'HEAD'])   
     archive(driver + '\\source.tgz', listfile.splitlines(), tgz=True)
     archive(driver + '.tar', [driver,'revision'])
 
