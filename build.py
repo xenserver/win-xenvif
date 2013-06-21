@@ -134,8 +134,8 @@ def get_configuration_name(debug):
 def get_target_path(arch, debug):
     configuration = get_configuration_name(debug)
 
-    target = { 'x86': 'proj', 'x64': os.sep.join(['proj', 'x64']) }
-    target_path = os.sep.join([target[arch], configuration])
+    target = { 'x86': os.sep.join([configuration, 'Win32']), 'x64': os.sep.join([configuration, 'x64']) }
+    target_path = os.sep.join(['proj', target[arch]])
 
     return target_path
 
@@ -162,8 +162,6 @@ def msbuild(name, arch, debug):
     cwd = os.getcwd()
     configuration = get_configuration(debug)
 
-    os.environ['SOLUTION'] = name
-
     if arch == 'x86':
         os.environ['PLATFORM'] = 'Win32'
     elif arch == 'x64':
@@ -171,6 +169,8 @@ def msbuild(name, arch, debug):
 
     os.environ['CONFIGURATION'] = configuration
     os.environ['TARGET'] = 'Build'
+    os.environ['BUILD_ARGS'] = '/p:SignMode="ProductionSign"'
+    os.environ['BUILD_FILE'] = name + '.sln'
 
     os.chdir('proj')
     status = shell('msbuild.bat')

@@ -374,7 +374,7 @@ MacConnect(
     if (Mtu < ETHERNET_MIN)
         goto fail1;
 
-    Mac->MaximumFrameSize = (ULONG)Mtu + sizeof (ETHERNET_UNTAGGED_HEADER);
+    Mac->MaximumFrameSize = (ULONG)Mtu + sizeof (ETHERNET_TAGGED_HEADER);
 
     status = STORE(Read,
                    Mac->StoreInterface,

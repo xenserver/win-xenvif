@@ -2443,6 +2443,7 @@ FdoQueryEvtchnInterface(
 
     KeInitializeEvent(&Event, NotificationEvent, FALSE);
     RtlZeroMemory(&StatusBlock, sizeof(IO_STATUS_BLOCK));
+    RtlZeroMemory(&Interface, sizeof(INTERFACE));
 
     Irp = IoBuildSynchronousFsdRequest(IRP_MJ_PNP,
                                        Fdo->LowerDeviceObject,
@@ -2515,6 +2516,7 @@ FdoQueryDebugInterface(
 
     KeInitializeEvent(&Event, NotificationEvent, FALSE);
     RtlZeroMemory(&StatusBlock, sizeof(IO_STATUS_BLOCK));
+    RtlZeroMemory(&Interface, sizeof(INTERFACE));
 
     Irp = IoBuildSynchronousFsdRequest(IRP_MJ_PNP,
                                        Fdo->LowerDeviceObject,
@@ -2587,6 +2589,7 @@ FdoQueryStoreInterface(
 
     KeInitializeEvent(&Event, NotificationEvent, FALSE);
     RtlZeroMemory(&StatusBlock, sizeof(IO_STATUS_BLOCK));
+    RtlZeroMemory(&Interface, sizeof(INTERFACE));
 
     Irp = IoBuildSynchronousFsdRequest(IRP_MJ_PNP,
                                        Fdo->LowerDeviceObject,
@@ -2659,6 +2662,7 @@ FdoQueryGnttabInterface(
 
     KeInitializeEvent(&Event, NotificationEvent, FALSE);
     RtlZeroMemory(&StatusBlock, sizeof(IO_STATUS_BLOCK));
+    RtlZeroMemory(&Interface, sizeof(INTERFACE));
 
     Irp = IoBuildSynchronousFsdRequest(IRP_MJ_PNP,
                                        Fdo->LowerDeviceObject,
@@ -2731,6 +2735,7 @@ FdoQuerySuspendInterface(
 
     KeInitializeEvent(&Event, NotificationEvent, FALSE);
     RtlZeroMemory(&StatusBlock, sizeof(IO_STATUS_BLOCK));
+    RtlZeroMemory(&Interface, sizeof(INTERFACE));
 
     Irp = IoBuildSynchronousFsdRequest(IRP_MJ_PNP,
                                        Fdo->LowerDeviceObject,
@@ -2803,6 +2808,7 @@ FdoQueryEmulatedInterface(
 
     KeInitializeEvent(&Event, NotificationEvent, FALSE);
     RtlZeroMemory(&StatusBlock, sizeof(IO_STATUS_BLOCK));
+    RtlZeroMemory(&Interface, sizeof(INTERFACE));
 
     Irp = IoBuildSynchronousFsdRequest(IRP_MJ_PNP,
                                        Fdo->LowerDeviceObject,

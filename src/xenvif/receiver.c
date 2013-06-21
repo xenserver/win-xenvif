@@ -224,6 +224,7 @@ ReceiverPacketCtor(
 	goto fail1;
 
     StartVa = MmGetSystemAddressForMdlSafe(Mdl, NormalPagePriority);
+    ASSERT(StartVa != NULL);
     RtlFillMemory(StartVa, PAGE_SIZE, 0xAA);
 
     ASSERT3U(Mdl->ByteOffset, ==, 0);
@@ -347,6 +348,7 @@ PacketProcessTag(
     PayloadLength = Packet->Length - Info->Length;
 
     StartVa = MmGetSystemAddressForMdlSafe(&Packet->Mdl, NormalPagePriority);
+    ASSERT(StartVa != NULL);
     StartVa += Packet->Offset;
 
     ASSERT(Info->EthernetHeader.Length != 0);
@@ -387,6 +389,7 @@ PacketProcessTag(
     Info->Length -= sizeof (ETHERNET_TAG);
 
     StartVa = MmGetSystemAddressForMdlSafe(&Packet->Mdl, NormalPagePriority);
+    ASSERT(StartVa != NULL);
     StartVa += Packet->Offset;
 
     EthernetHeader = (PETHERNET_HEADER)(StartVa + Info->EthernetHeader.Offset);
@@ -413,9 +416,17 @@ PacketProcessChecksum(
 
     Info = &Packet->Info;
 
-    Payload.Mdl = Packet->Mdl.Next;
-    Payload.Offset = 0;
+    Payload.Mdl = &Packet->Mdl;
+    Payload.Offset = Info->Length;
     Payload.Length = Packet->Length - Info->Length;
+
+    ASSERT3U(Payload.Offset, <=, Payload.Mdl->ByteCount);
+
+    // The payload may be in a separate fragment
+    if (Payload.Offset == Payload.Mdl->ByteCount) {
+        Payload.Mdl = Payload.Mdl->Next;
+        Payload.Offset = 0;
+    }
 
     flags = (uint16_t)(ULONG_PTR)Packet->Cookie;
 
@@ -423,6 +434,7 @@ PacketProcessChecksum(
         return;
 
     StartVa = MmGetSystemAddressForMdlSafe(&Packet->Mdl, NormalPagePriority);
+    ASSERT(StartVa != NULL);
     StartVa += Packet->Offset;
 
     IpHeader = (PIP_HEADER)(StartVa + Info->IpHeader.Offset);
@@ -816,6 +828,36 @@ fail1:
     return FALSE;
 }
 
+static FORCEINLINE VOID
+__RingPullupPacket(
+    IN  PRECEIVER_RING          Ring,
+    IN  PXENVIF_RECEIVER_PACKET Packet
+    )
+{
+    PUCHAR                      StartVa;
+    XENVIF_PACKET_PAYLOAD       Payload;
+    ULONG                       Length;
+
+    StartVa = MmGetSystemAddressForMdlSafe(&Packet->Mdl, NormalPagePriority);
+    ASSERT(StartVa != NULL);
+
+    Payload.Mdl = Packet->Mdl.Next;
+    Payload.Offset = 0;
+    Payload.Length = Packet->Length - Packet->Mdl.ByteCount;
+
+    Length = __min(Payload.Length, PAGE_SIZE - Packet->Mdl.ByteCount);
+
+    Packet->Mdl.Next = NULL;
+
+    (VOID) ReceiverPullup(Ring, StartVa + Packet->Mdl.ByteCount, &Payload, Length);
+    Packet->Mdl.ByteCount += Length;
+
+    if (Payload.Length != 0) {
+        ASSERT(Payload.Mdl != NULL);
+        Packet->Mdl.Next = Payload.Mdl;
+    }
+}
+
 static FORCEINLINE PXENVIF_RECEIVER_PACKET
 __RingBuildSegment(
     IN  PRECEIVER_RING          Ring,
@@ -837,6 +879,7 @@ __RingBuildSegment(
     Info = &Packet->Info;
 
     InfoVa = MmGetSystemAddressForMdlSafe(&Packet->Mdl, NormalPagePriority);
+    ASSERT(InfoVa != NULL);
     InfoVa += Packet->Offset;
 
     Segment = __RingGetPacket(Ring, TRUE);
@@ -850,6 +893,7 @@ __RingBuildSegment(
     Mdl = &Segment->Mdl;
 
     StartVa = MmGetSystemAddressForMdlSafe(Mdl, NormalPagePriority);
+    ASSERT(StartVa != NULL);
     StartVa += Segment->Offset;
 
     Mdl->ByteCount = Segment->Offset;
@@ -935,11 +979,12 @@ __RingBuildSegment(
 
         Mdl = Mdl->Next;
         StartVa = MmGetSystemAddressForMdlSafe(Mdl, NormalPagePriority);
+        ASSERT(StartVa != NULL);
 
         Length = __min(SegmentSize - Segment->Length, PAGE_SIZE);
         ASSERT(Length != 0);
 
-        ReceiverPullup(Ring, StartVa, Payload, Length);
+        (VOID) ReceiverPullup(Ring, StartVa, Payload, Length);
         Mdl->ByteCount += Length;
         Segment->Length += Length;
 
@@ -1015,6 +1060,7 @@ __RingProcessLargePacket(
     Packet->Mdl.Next = NULL;
 
     InfoVa = MmGetSystemAddressForMdlSafe(&Packet->Mdl, NormalPagePriority);
+    ASSERT(InfoVa != NULL);
     InfoVa += Packet->Offset;
 
     IpHeader = (PIP_HEADER)(InfoVa + Info->IpHeader.Offset);
@@ -1119,6 +1165,9 @@ __RingProcessLargePacket(
         if (Payload.Length < Packet->MaximumSegmentSize)
             Packet->MaximumSegmentSize = 0;
 
+        if (DriverParameters.ReceiverAlwaysPullup != 0)
+            __RingPullupPacket(Ring, Packet);
+
         ASSERT(IsZeroMemory(&Packet->ListEntry, sizeof (LIST_ENTRY)));
         InsertTailList(List, &Packet->ListEntry);
     } else {
@@ -1203,6 +1252,7 @@ __RingProcessPacket(
     Packet->Cookie = Cookie;
 
     StartVa = MmGetSystemAddressForMdlSafe(&Packet->Mdl, NormalPagePriority);
+    ASSERT(StartVa != NULL);
     StartVa += Packet->Offset;
 
     Packet->Mdl.ByteCount = Packet->Offset;
@@ -1219,28 +1269,9 @@ __RingProcessPacket(
 
     Packet->Mdl.ByteCount += Info->Length;
 
-    // Certain HCK tests (e.g. the NDISTest 2c_Priority test) are sufficiently brain-dead
-    // that they cannot cope with multi-fragment packets, or at least packets where
-    // headers are in different fragments. All these tests seem to use IPX packets and,
-    // in practice, little else uses LLC so pull up all LLC packets into a single fragment.
-    if (Info->LLCSnapHeader.Length != 0) {
-        ULONG   PayloadLength = Payload.Length;
-
-        ASSERT3U(Packet->Length, <=, PAGE_SIZE);
-
-        status = ReceiverPullup(Ring, StartVa + Info->Length, &Payload, PayloadLength);
-        ASSERT(NT_SUCCESS(status));
-
-        ASSERT3U(Payload.Length, ==, 0);
-        Packet->Mdl.ByteCount += PayloadLength;
-    }
-
     if (Payload.Length != 0) {
-        PMDL    Mdl = Payload.Mdl;
-
-        ASSERT(Mdl != NULL);
-
-        Packet->Mdl.Next = Mdl;
+        ASSERT(Payload.Mdl != NULL);
+        Packet->Mdl.Next = Payload.Mdl;
     }
 
     ASSERT(Info->EthernetHeader.Length != 0);
@@ -1279,6 +1310,16 @@ __RingProcessPacket(
     if (Packet->MaximumSegmentSize != 0) {
         __RingProcessLargePacket(Ring, Packet, List);
     } else {
+        // Certain HCK tests (e.g. the NDISTest 2c_Priority test) are
+        // sufficiently brain-dead that they cannot cope with
+        // multi-fragment packets, or at least packets where headers are
+        // in different fragments. All these tests seem to use IPX packets
+        // and, in practice, little else uses LLC so pull up all LLC
+        // packets into a single fragment.
+        if (Info->LLCSnapHeader.Length != 0 ||
+            DriverParameters.ReceiverAlwaysPullup != 0)
+            __RingPullupPacket(Ring, Packet);
+
         ASSERT(IsZeroMemory(&Packet->ListEntry, sizeof (LIST_ENTRY)));
         InsertTailList(List, &Packet->ListEntry);
     }

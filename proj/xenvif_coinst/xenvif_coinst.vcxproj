@@ -1,177 +1,73 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
-  <ItemGroup Label="ProjectConfigurations">
-    <ProjectConfiguration Include="Windows Developer Preview Debug|Win32">
-      <Configuration>Windows Developer Preview Debug</Configuration>
-      <Platform>Win32</Platform>
-    </ProjectConfiguration>
-    <ProjectConfiguration Include="Windows Developer Preview Release|Win32">
-      <Configuration>Windows Developer Preview Release</Configuration>
-      <Platform>Win32</Platform>
-    </ProjectConfiguration>
-    <ProjectConfiguration Include="Windows 7 Debug|Win32">
-      <Configuration>Windows 7 Debug</Configuration>
-      <Platform>Win32</Platform>
-    </ProjectConfiguration>
-    <ProjectConfiguration Include="Windows 7 Release|Win32">
-      <Configuration>Windows 7 Release</Configuration>
-      <Platform>Win32</Platform>
-    </ProjectConfiguration>
-    <ProjectConfiguration Include="Windows Vista Debug|Win32">
-      <Configuration>Windows Vista Debug</Configuration>
-      <Platform>Win32</Platform>
-    </ProjectConfiguration>
-    <ProjectConfiguration Include="Windows Vista Release|Win32">
-      <Configuration>Windows Vista Release</Configuration>
-      <Platform>Win32</Platform>
-    </ProjectConfiguration>
-    <ProjectConfiguration Include="Windows Developer Preview Debug|x64">
-      <Configuration>Windows Developer Preview Debug</Configuration>
-      <Platform>x64</Platform>
-    </ProjectConfiguration>
-    <ProjectConfiguration Include="Windows Developer Preview Release|x64">
-      <Configuration>Windows Developer Preview Release</Configuration>
-      <Platform>x64</Platform>
-    </ProjectConfiguration>
-    <ProjectConfiguration Include="Windows 7 Debug|x64">
-      <Configuration>Windows 7 Debug</Configuration>
-      <Platform>x64</Platform>
-    </ProjectConfiguration>
-    <ProjectConfiguration Include="Windows 7 Release|x64">
-      <Configuration>Windows 7 Release</Configuration>
-      <Platform>x64</Platform>
-    </ProjectConfiguration>
-    <ProjectConfiguration Include="Windows Vista Debug|x64">
-      <Configuration>Windows Vista Debug</Configuration>
-      <Platform>x64</Platform>
-    </ProjectConfiguration>
-    <ProjectConfiguration Include="Windows Vista Release|x64">
-      <Configuration>Windows Vista Release</Configuration>
-      <Platform>x64</Platform>
-    </ProjectConfiguration>
-  </ItemGroup>
-  <PropertyGroup Label="Globals">
-    <ProjectGuid>{2BFAC7E6-3420-47A5-A092-BDC5C9D78A44}</ProjectGuid>
-    <TargetFrameworkVersion>v4.5</TargetFrameworkVersion>
-    <MinimumVisualStudioVersion>11.0</MinimumVisualStudioVersion>
-    <ProjectName>xenvif_coinst</ProjectName>
-  </PropertyGroup>
-  <PropertyGroup Label="PropertySheets">
-    <PlatformToolset>WindowsApplicationForDrivers8.0</PlatformToolset>
-    <ConfigurationType>DynamicLibrary</ConfigurationType>
-    <DriverType>WDM</DriverType>
-    <Configuration>Windows Developer Preview Debug</Configuration>
-  </PropertyGroup>
-  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Windows Developer Preview Debug|Win32'" Label="Configuration">
-    <TargetVersion>Windows8</TargetVersion>
-    <UseDebugLibraries>true</UseDebugLibraries>
-  </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Windows Developer Preview Release|Win32'" Label="Configuration">
-    <TargetVersion>Windows8</TargetVersion>
-    <UseDebugLibraries>false</UseDebugLibraries>
-  </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Windows 7 Debug|Win32'" Label="Configuration">
-    <TargetVersion>Windows7</TargetVersion>
-    <UseDebugLibraries>true</UseDebugLibraries>
-  </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Windows 7 Release|Win32'" Label="Configuration">
-    <TargetVersion>Windows7</TargetVersion>
-    <UseDebugLibraries>false</UseDebugLibraries>
-  </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Windows Vista Debug|Win32'" Label="Configuration">
-    <TargetVersion>Vista</TargetVersion>
-    <UseDebugLibraries>true</UseDebugLibraries>
-  </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Windows Vista Release|Win32'" Label="Configuration">
-    <TargetVersion>Vista</TargetVersion>
-    <UseDebugLibraries>false</UseDebugLibraries>
-  </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Windows Developer Preview Debug|x64'" Label="Configuration">
-    <TargetVersion>Windows8</TargetVersion>
-    <UseDebugLibraries>true</UseDebugLibraries>
-  </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Windows Developer Preview Release|x64'" Label="Configuration">
-    <TargetVersion>Windows8</TargetVersion>
-    <UseDebugLibraries>false</UseDebugLibraries>
-  </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Windows 7 Debug|x64'" Label="Configuration">
-    <TargetVersion>Windows7</TargetVersion>
-    <UseDebugLibraries>true</UseDebugLibraries>
-  </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Windows 7 Release|x64'" Label="Configuration">
-    <TargetVersion>Windows7</TargetVersion>
-    <UseDebugLibraries>false</UseDebugLibraries>
-  </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Windows Vista Debug|x64'" Label="Configuration">
-    <TargetVersion>Vista</TargetVersion>
-    <UseDebugLibraries>true</UseDebugLibraries>
-  </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Windows Vista Release|x64'" Label="Configuration">
-    <TargetVersion>Vista</TargetVersion>
-    <UseDebugLibraries>false</UseDebugLibraries>
-  </PropertyGroup>
-  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
-  <ImportGroup Label="PropertySheets">
-    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
-  </ImportGroup>
-  <PropertyGroup Label="UserMacros" />
-  <PropertyGroup>
-    <DebuggerFlavor>DbgengKernelDebugger</DebuggerFlavor>
-  </PropertyGroup>
-  <PropertyGroup>
-    <IncludePath>$(IncludePath)</IncludePath>
-    <RunCodeAnalysis>true</RunCodeAnalysis>
-    <EnableInf2cat>false</EnableInf2cat>
-  </PropertyGroup>
-  <ItemDefinitionGroup Condition="'$(Platform)'=='Win32'">
-    <ClCompile>
-      <AdditionalIncludeDirectories>$(SolutionDir)..\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>__i386__;__MODULE__="XENVIF_COINST";%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <WarningLevel>EnableAllWarnings</WarningLevel>
-      <DisableSpecificWarnings>4548;4820;4668;4255;6001;6054;28196;%(DisableSpecificWarnings)</DisableSpecificWarnings>
-      <MultiProcessorCompilation>true</MultiProcessorCompilation>
-      <EnablePREfast>true</EnablePREfast>
-      <RuntimeLibrary Condition="'$(UseDebugLibraries)'=='true'">MultiThreadedDebug</RuntimeLibrary>
-      <RuntimeLibrary Condition="'$(UseDebugLibraries)'=='false'">MultiThreaded</RuntimeLibrary>
-    </ClCompile>
-    <Link>
-      <ModuleDefinitionFile>../../src/coinst/xenvif_coinst.def</ModuleDefinitionFile>
-      <AdditionalDependencies>setupapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
-    </Link>
-    <ResourceCompile>
-      <AdditionalIncludeDirectories>$(SolutionDir)..\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-    </ResourceCompile>
-  </ItemDefinitionGroup>
-  <ItemDefinitionGroup Condition="'$(Platform)'=='x64'">
-    <ClCompile>
-      <AdditionalIncludeDirectories>$(SolutionDir)..\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>__x86_64__;__MODULE__="XENVIF_COINST";%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <WarningLevel>EnableAllWarnings</WarningLevel>
-      <DisableSpecificWarnings>4548;4820;4668;4255;6001;6054;28196;%(DisableSpecificWarnings)</DisableSpecificWarnings>
-      <MultiProcessorCompilation>true</MultiProcessorCompilation>
-      <EnablePREfast>true</EnablePREfast>
-      <RuntimeLibrary Condition="'$(UseDebugLibraries)'=='true'">MultiThreadedDebug</RuntimeLibrary>
-      <RuntimeLibrary Condition="'$(UseDebugLibraries)'=='false'">MultiThreaded</RuntimeLibrary>
-    </ClCompile>
-    <Link>
-      <ModuleDefinitionFile>../../src/coinst/xenvif_coinst.def</ModuleDefinitionFile>
-      <AdditionalDependencies>setupapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
-    </Link>
-    <ResourceCompile>
-      <AdditionalIncludeDirectories>$(SolutionDir)..\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-    </ResourceCompile>
-  </ItemDefinitionGroup>
-  <ItemGroup>
-    <FilesToPackage Include="$(TargetPath)" />
-    <FilesToPackage Include="$(OutDir)$(TargetName).pdb" />
-    <FilesToPackage Include="@(Inf->'%(CopyOutput)')" Condition="'@(Inf)'!=''" />
-  </ItemGroup>
-  <ItemGroup>
-    <ClCompile Include="..\..\src\coinst\coinst.c" />
-  </ItemGroup>
-  <ItemGroup>
-    <None Include="..\..\src\coinst\xenvif_coinst.def" />
-  </ItemGroup>
-  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+	<Import Project="..\configs.props" />
+	
+	<PropertyGroup Label="PropertySheets">
+	    <DriverType>WDM</DriverType> 
+		<PlatformToolset>WindowsApplicationForDrivers8.0</PlatformToolset>
+		<ConfigurationType>DynamicLibrary</ConfigurationType>
+		<DriverType>WDM</DriverType>
+	</PropertyGroup>
+	<PropertyGroup Label="Globals">
+		<Configuration>Windows Vista Debug</Configuration>
+		<Platform Condition="'$(Platform)' == ''">Win32</Platform> 
+		<DebuggerFlavor>DbgengKernelDebugger</DebuggerFlavor> 
+	</PropertyGroup>
+	
+	<Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+	
+	<PropertyGroup Label="Globals">
+		<ProjectGuid>{2BFAC7E6-3420-47A5-A092-BDC5C9D78A44}</ProjectGuid>
+	</PropertyGroup>
+	
+	<Import Project="..\targets.props" />
+	<Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" /> 
+
+	<PropertyGroup>
+		<DebuggerFlavor>DbgengKernelDebugger</DebuggerFlavor>
+		<IncludePath>..\..\include;$(IncludePath)</IncludePath>
+		<RunCodeAnalysis>true</RunCodeAnalysis>
+		<EnableInf2cat>false</EnableInf2cat>
+		<IntDir>..\$(ProjectName)\$(ConfigurationName)\$(Platform)</IntDir>
+		<OutDir>..\$(ConfigurationName)\$(Platform)</OutDir>
+	</PropertyGroup>
+	
+	<ItemDefinitionGroup>
+		<ClCompile>
+			<PreprocessorDefinitions>__MODULE__="XENVIF_COINST";%(PreprocessorDefinitions)</PreprocessorDefinitions>
+			<WarningLevel>EnableAllWarnings</WarningLevel>
+			<DisableSpecificWarnings>4548;4820;4668;4255;6001;6054;28196;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+			<MultiProcessorCompilation>true</MultiProcessorCompilation>
+			<EnablePREfast>true</EnablePREfast>
+			<RuntimeLibrary Condition="'$(UseDebugLibraries)'=='true'">MultiThreadedDebug</RuntimeLibrary>
+			<RuntimeLibrary Condition="'$(UseDebugLibraries)'=='false'">MultiThreaded</RuntimeLibrary>
+		</ClCompile>
+		<Link>
+			<ModuleDefinitionFile>../../src/coinst/xenvif_coinst.def</ModuleDefinitionFile>
+			<AdditionalDependencies>setupapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
+		</Link>
+	</ItemDefinitionGroup>
+	<ItemDefinitionGroup Condition="'$(Platform)'=='Win32'">
+		<ClCompile>
+			<PreprocessorDefinitions>__i386__;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+		</ClCompile>
+	</ItemDefinitionGroup>
+	<ItemDefinitionGroup Condition="'$(Platform)'=='x64'">
+		<ClCompile>
+			<PreprocessorDefinitions>__x86_64__;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+		</ClCompile>
+	</ItemDefinitionGroup>
+  
+	<ItemGroup>
+		<FilesToPackage Include="$(TargetPath)" />
+		<FilesToPackage Include="$(OutDir)$(TargetName).pdb" />
+		<FilesToPackage Include="@(Inf->'%(CopyOutput)')" Condition="'@(Inf)'!=''" />
+	</ItemGroup>
+	<ItemGroup>
+		<ClCompile Include="..\..\src\coinst\coinst.c" />
+	</ItemGroup>
+	<ItemGroup>
+		<None Include="..\..\src\coinst\xenvif_coinst.def" />
+	</ItemGroup>
+	<Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

@@ -209,6 +209,12 @@ DriverEntry(
             DriverParameters.ReceiverIpAlignOffset = 0;
 
         status = RegistryQueryDwordValue(Key,
+                                         "ReceiverAlwaysPullup",
+                                         &DriverParameters.ReceiverAlwaysPullup);
+        if (!NT_SUCCESS(status))
+            DriverParameters.ReceiverAlwaysPullup = 0;
+
+        status = RegistryQueryDwordValue(Key,
                                          "CreatePDOs",
                                          &DriverParameters.CreatePDOs);
         if (!NT_SUCCESS(status))

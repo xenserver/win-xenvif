@@ -46,6 +46,7 @@ typedef struct _XENVIF_PARAMETERS {
     ULONG           ReceiverCalculateChecksums;
     ULONG           ReceiverAllowGsoPackets;
     ULONG           ReceiverIpAlignOffset;
+    ULONG           ReceiverAlwaysPullup;
     ULONG           CreatePDOs;
 } XENVIF_PARAMETERS, *PXENVIF_PARAMETERS;
 

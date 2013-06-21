@@ -200,6 +200,7 @@ TransmitterBufferCtor(
 	goto fail1;
 
     MdlMappedSystemVa = MmGetSystemAddressForMdlSafe(Mdl, NormalPagePriority);
+    ASSERT(MdlMappedSystemVa != NULL);
     RtlFillMemory(MdlMappedSystemVa, PAGE_SIZE, 0xAA);
 
     Mdl->ByteCount = 0;
@@ -1142,13 +1143,20 @@ __RingPrepareHeader(
         if (State->Send.MaximumSegmentSize == Payload->Length)
             State->Send.OffloadOptions.OffloadIpVersion6LargePacket = 0;
     }
-    
+
     // Non-GSO packets must not exceed MTU
     if (!State->Send.OffloadOptions.OffloadIpVersion4LargePacket &&
-        !State->Send.OffloadOptions.OffloadIpVersion6LargePacket &&
-        Tag->Length > MacGetMaximumFrameSize(Mac)) {
-        status = STATUS_INVALID_PARAMETER;
-        goto fail3;
+        !State->Send.OffloadOptions.OffloadIpVersion6LargePacket) {
+        ULONG   MaximumFrameSize;
+
+        MaximumFrameSize = MacGetMaximumFrameSize(Mac);
+        
+        if (Tag->Length > MaximumFrameSize) {
+            Warning("OVERSIZE PACKET (%u > %u)\n", Tag->Length, MaximumFrameSize);
+
+            status = STATUS_INVALID_PARAMETER;
+            goto fail3;
+        }
     }
 
     if (State->Send.OffloadOptions.OffloadIpVersion4HeaderChecksum) {
