@@ -269,7 +269,7 @@ if __name__ == '__main__':
     driver = 'xenvif'
 
     os.environ['MAJOR_VERSION'] = '7'
-    os.environ['MINOR_VERSION'] = '0'
+    os.environ['MINOR_VERSION'] = '1'
     os.environ['MICRO_VERSION'] = '0'
 
     if 'BUILD_NUMBER' not in os.environ.keys():
