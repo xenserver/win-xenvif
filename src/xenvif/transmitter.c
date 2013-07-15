@@ -2864,7 +2864,7 @@ __RingUpdateAddressTable(
 
     // Re-advertize if we were part way through
     if (Ring->AddressIndex != 0)
-        Ring->AddressIndex = Ring->AddressCount;
+        Ring->AddressIndex = Ring->AddressCount * 3;
 
 done:
     __RingReleaseLock(Ring);
@@ -2885,7 +2885,7 @@ __RingAdvertizeAddresses(
     )
 {
     __RingAcquireLock(Ring);
-    Ring->AddressIndex = Ring->AddressCount;
+    Ring->AddressIndex = Ring->AddressCount * 3;
     __RingReleaseLock(Ring);
 }
 
