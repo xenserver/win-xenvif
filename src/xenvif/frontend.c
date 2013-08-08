@@ -1613,8 +1613,15 @@ FrontendInitialize(
                                           *Frontend,
                                           TRUE,
                                           &(*Frontend)->Handle);
-    if (!NT_SUCCESS(status))
-        goto fail12;
+    if (!NT_SUCCESS(status)) {
+        if (status == STATUS_NOT_SUPPORTED) {
+            // If IP Helper isn't available (As in Windows PE)
+            // NotifyUnicastIpAddressChange is not supported
+            Warning("Cannot record or update Network info to XAPI %x\n", 
+                    status);
+        }
+        else goto fail12;
+    }
 
     Trace("<====\n");
 
