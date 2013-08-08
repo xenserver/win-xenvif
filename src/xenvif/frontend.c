@@ -1613,8 +1613,15 @@ FrontendInitialize(
                                           *Frontend,
                                           TRUE,
                                           &(*Frontend)->Handle);
-    if (!NT_SUCCESS(status))
-        goto fail12;
+    if (!NT_SUCCESS(status)) {
+        if (status != STATUS_NOT_SUPPORTED) 
+            goto fail12;
+        
+        // If IP Helper isn't available (As in Windows PE)
+        // NotifyUnicastIpAddressChange is not supported
+        Warning("Cannot record or update network info to XAPI %x\n", status);
+        (*Frontend)->Handle = NULL;
+    }
 
     Trace("<====\n");
 
@@ -1706,10 +1713,12 @@ FrontendTeardown(
     ASSERT(Frontend->State != FRONTEND_ENABLED);
     ASSERT(Frontend->State != FRONTEND_CONNECTED);
 
-    if (Frontend->State == FRONTEND_PREPARED) {
-        ASSERT(Frontend->Handle != NULL);
+    if (Frontend->Handle != NULL) {
         CancelMibChangeNotify2(Frontend->Handle);
         Frontend->Handle = NULL;
+    }
+
+    if (Frontend->State == FRONTEND_PREPARED) {
 
         ASSERT(Frontend->Watch != NULL);
         (VOID) STORE(Unwatch,
@@ -1730,10 +1739,6 @@ FrontendTeardown(
     }
 
     ASSERT3U(Frontend->State, ==, FRONTEND_CLOSED);
-
-    ASSERT(Frontend->Handle != NULL);
-    CancelMibChangeNotify2(Frontend->Handle);
-    Frontend->Handle = NULL;
 
     ThreadAlert(Frontend->MibThread);
     ThreadJoin(Frontend->MibThread);
