@@ -666,85 +666,6 @@ PdoS3ToS4(
     Trace("(%s) <====\n", __PdoGetName(Pdo));
 }
 
-static DECLSPEC_NOINLINE VOID
-PdoParseResources(
-    IN  PXENVIF_PDO             Pdo,
-    IN  PCM_RESOURCE_LIST       RawResourceList,
-    IN  PCM_RESOURCE_LIST       TranslatedResourceList
-    )
-{
-    PCM_PARTIAL_RESOURCE_LIST   RawPartialList;
-    PCM_PARTIAL_RESOURCE_LIST   TranslatedPartialList;
-    ULONG                       Index;
-
-    UNREFERENCED_PARAMETER(Pdo);
-
-    ASSERT3U(RawResourceList->Count, ==, 1);
-    RawPartialList = &RawResourceList->List[0].PartialResourceList;
-
-    ASSERT3U(RawPartialList->Version, ==, 1);
-    ASSERT3U(RawPartialList->Revision, ==, 1);
-
-    ASSERT3U(TranslatedResourceList->Count, ==, 1);
-    TranslatedPartialList = &TranslatedResourceList->List[0].PartialResourceList;
-
-    ASSERT3U(TranslatedPartialList->Version, ==, 1);
-    ASSERT3U(TranslatedPartialList->Revision, ==, 1);
-
-    for (Index = 0; Index < TranslatedPartialList->Count; Index++) {
-        PCM_PARTIAL_RESOURCE_DESCRIPTOR RawPartialDescriptor;
-        PCM_PARTIAL_RESOURCE_DESCRIPTOR TranslatedPartialDescriptor;
-
-        RawPartialDescriptor = &RawPartialList->PartialDescriptors[Index];
-        TranslatedPartialDescriptor = &TranslatedPartialList->PartialDescriptors[Index];
-
-        Info("%s: [%d] %02x:%s\n",
-             __PdoGetName(Pdo),
-             Index,
-             TranslatedPartialDescriptor->Type,
-             PartialResourceDescriptorTypeName(TranslatedPartialDescriptor->Type));
-
-        switch (TranslatedPartialDescriptor->Type) {
-        case CmResourceTypeMemory:
-            Info("RAW: SharedDisposition=%02x Flags=%04x Start = %08x.%08x Length = %08x\n",
-                 RawPartialDescriptor->ShareDisposition,
-                 RawPartialDescriptor->Flags,
-                 RawPartialDescriptor->u.Memory.Start.HighPart,
-                 RawPartialDescriptor->u.Memory.Start.LowPart,
-                 RawPartialDescriptor->u.Memory.Length);
-
-            Info("TRANSLATED: SharedDisposition=%02x Flags=%04x Start = %08x.%08x Length = %08x\n",
-                 TranslatedPartialDescriptor->ShareDisposition,
-                 TranslatedPartialDescriptor->Flags,
-                 TranslatedPartialDescriptor->u.Memory.Start.HighPart,
-                 TranslatedPartialDescriptor->u.Memory.Start.LowPart,
-                 TranslatedPartialDescriptor->u.Memory.Length);
-            break;
-
-        case CmResourceTypeInterrupt:
-            Info("RAW: SharedDisposition=%02x Flags=%04x MessageCount=%04x Vector = %08x Affinity = %p\n",
-                 RawPartialDescriptor->ShareDisposition,
-                 RawPartialDescriptor->Flags,
-                 RawPartialDescriptor->u.MessageInterrupt.Raw.MessageCount,
-                 RawPartialDescriptor->u.MessageInterrupt.Raw.Vector,
-                 (PVOID)RawPartialDescriptor->u.MessageInterrupt.Raw.Affinity);
-
-            Info("TRANSLATED: SharedDisposition=%02x Flags=%04x Level = %08x Vector = %08x Affinity = %p\n",
-                 TranslatedPartialDescriptor->ShareDisposition,
-                 TranslatedPartialDescriptor->Flags,
-                 TranslatedPartialDescriptor->u.MessageInterrupt.Translated.Level,
-                 TranslatedPartialDescriptor->u.MessageInterrupt.Translated.Vector,
-                 (PVOID)TranslatedPartialDescriptor->u.MessageInterrupt.Translated.Affinity);
-            break;
-
-        default:
-            break;
-        }
-    }
-
-    Trace("<====\n");
-}
-
 static DECLSPEC_NOINLINE NTSTATUS
 PdoStartDevice(
     IN  PXENVIF_PDO     Pdo,
@@ -757,10 +678,6 @@ PdoStartDevice(
     NTSTATUS            status;
 
     StackLocation = IoGetCurrentIrpStackLocation(Irp);
-
-    PdoParseResources(Pdo,
-                      StackLocation->Parameters.StartDevice.AllocatedResources,
-                      StackLocation->Parameters.StartDevice.AllocatedResourcesTranslated);
 
     status = RegistryOpenSoftwareKey(__PdoGetDeviceObject(Pdo),
                                      KEY_READ,
@@ -1235,79 +1152,11 @@ PdoQueryResourceRequirements(
     IN  PIRP                        Irp
     )
 {
-    IO_RESOURCE_DESCRIPTOR          Memory;
-    IO_RESOURCE_DESCRIPTOR          Interrupt;
-    ULONG                           Count;
-    ULONG                           Size;
-    PIO_RESOURCE_REQUIREMENTS_LIST  Requirements;
-    PIO_RESOURCE_LIST               List;
-    NTSTATUS                        status;
-
     UNREFERENCED_PARAMETER(Pdo);
 
-    RtlZeroMemory(&Memory, sizeof (IO_RESOURCE_DESCRIPTOR));
-    Memory.Type = CmResourceTypeMemory;
-    Memory.ShareDisposition = CmResourceShareDeviceExclusive;
-    Memory.Flags = CM_RESOURCE_MEMORY_READ_WRITE |
-                   CM_RESOURCE_MEMORY_PREFETCHABLE |
-                   CM_RESOURCE_MEMORY_CACHEABLE;
-
-    Memory.u.Memory.Length = PAGE_SIZE;
-    Memory.u.Memory.Alignment = PAGE_SIZE;
-    Memory.u.Memory.MinimumAddress.QuadPart = 0;
-    Memory.u.Memory.MaximumAddress.QuadPart = -1;
-
-    RtlZeroMemory(&Interrupt, sizeof (IO_RESOURCE_DESCRIPTOR));
-    Interrupt.Type = CmResourceTypeInterrupt;
-    Interrupt.ShareDisposition = CmResourceShareDeviceExclusive;
-    Interrupt.Flags = CM_RESOURCE_INTERRUPT_MESSAGE;
-
-    Count = 1; // Hard-code for now
-
-    Interrupt.u.Interrupt.MinimumVector = (ULONG)CM_RESOURCE_INTERRUPT_MESSAGE_TOKEN - Count + 1;
-    Interrupt.u.Interrupt.MaximumVector = (ULONG)CM_RESOURCE_INTERRUPT_MESSAGE_TOKEN;
-    Interrupt.u.Interrupt.AffinityPolicy = IrqPolicyOneCloseProcessor;
-    Interrupt.u.Interrupt.PriorityPolicy = IrqPriorityUndefined;
-
-    Size = sizeof (IO_RESOURCE_DESCRIPTOR) * 2;
-    Size += FIELD_OFFSET(IO_RESOURCE_LIST, Descriptors);
-    Size += FIELD_OFFSET(IO_RESOURCE_REQUIREMENTS_LIST, List);
-
-    Requirements = ExAllocatePoolWithTag(PagedPool, Size, 'FIV');
-
-    status = STATUS_NO_MEMORY;
-    if (Requirements == NULL)
-        goto fail1;
-
-    RtlZeroMemory(Requirements, Size);
-
-    Requirements->ListSize = Size;
-    Requirements->InterfaceType = PNPBus;
-    Requirements->BusNumber = 0;
-    Requirements->SlotNumber = 0;
-    Requirements->AlternativeLists = 1;
-
-    List = &Requirements->List[0];
-    List->Version = 1;
-    List->Revision = 1;
-    List->Count = 2;
-    List->Descriptors[0] = Memory;
-    List->Descriptors[1] = Interrupt;
-
-    Irp->IoStatus.Information = (ULONG_PTR)Requirements;
-
-    Irp->IoStatus.Status = STATUS_SUCCESS;
     IoCompleteRequest(Irp, IO_NO_INCREMENT);
 
     return STATUS_SUCCESS;
-
-fail1:
-    Error("fail1 (%08x)\n", status);
-
-    Irp->IoStatus.Status = status;
-    IoCompleteRequest(Irp, IO_NO_INCREMENT);
-
-    return status;
 }
 
 #define MAXTEXTLEN  128
