@@ -1146,19 +1146,6 @@ done:
     return status;
 }
 
-static DECLSPEC_NOINLINE NTSTATUS
-PdoQueryResourceRequirements(
-    IN  PXENVIF_PDO                 Pdo,
-    IN  PIRP                        Irp
-    )
-{
-    UNREFERENCED_PARAMETER(Pdo);
-
-    IoCompleteRequest(Irp, IO_NO_INCREMENT);
-
-    return STATUS_SUCCESS;
-}
-
 #define MAXTEXTLEN  128
 
 static DECLSPEC_NOINLINE NTSTATUS
@@ -1560,10 +1547,6 @@ PdoDispatchPnp(
 
     case IRP_MN_QUERY_CAPABILITIES:
         status = PdoQueryCapabilities(Pdo, Irp);
-        break;
-
-    case IRP_MN_QUERY_RESOURCE_REQUIREMENTS:
-        status = PdoQueryResourceRequirements(Pdo, Irp);
         break;
 
     case IRP_MN_QUERY_DEVICE_TEXT:
