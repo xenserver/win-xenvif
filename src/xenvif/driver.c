@@ -38,35 +38,94 @@
 #include "pdo.h"
 #include "receiver.h"
 #include "driver.h"
-#include "log.h"
+#include "dbg_print.h"
 #include "assert.h"
 
 extern PULONG       InitSafeBootMode;
 
-PDRIVER_OBJECT      DriverObject;
+typedef struct _XENVIF_DRIVER {
+    PDRIVER_OBJECT      DriverObject;
+    HANDLE              ParametersKey;
+} XENVIF_DRIVER, *PXENVIF_DRIVER;
 
-XENVIF_PARAMETERS   DriverParameters;
+static XENVIF_DRIVER    Driver;
+
+static FORCEINLINE VOID
+__DriverSetDriverObject(
+    IN  PDRIVER_OBJECT  DriverObject
+    )
+{
+    Driver.DriverObject = DriverObject;
+}
+
+static FORCEINLINE PDRIVER_OBJECT
+__DriverGetDriverObject(
+    VOID
+    )
+{
+    return Driver.DriverObject;
+}
+
+PDRIVER_OBJECT
+DriverGetDriverObject(
+    VOID
+    )
+{
+    return __DriverGetDriverObject();
+}
+
+static FORCEINLINE VOID
+__DriverSetParametersKey(
+    IN  HANDLE  Key
+    )
+{
+    Driver.ParametersKey = Key;
+}
+
+static FORCEINLINE HANDLE
+__DriverGetParametersKey(
+    VOID
+    )
+{
+    return Driver.ParametersKey;
+}
+
+HANDLE
+DriverGetParametersKey(
+    VOID
+    )
+{
+    return __DriverGetParametersKey();
+}
 
 DRIVER_UNLOAD       DriverUnload;
 
 VOID
 DriverUnload(
-    IN  PDRIVER_OBJECT  _DriverObject
+    IN  PDRIVER_OBJECT  DriverObject
     )
 {
-    ASSERT3P(_DriverObject, ==, DriverObject);
+    HANDLE              ParametersKey;
+
+    ASSERT3P(DriverObject, ==, __DriverGetDriverObject());
 
     Trace("====>\n");
 
     if (*InitSafeBootMode > 0)
         goto done;
 
-    RegistryFreeSzValue(DriverParameters.UnsupportedDevices);
+    ParametersKey = __DriverGetParametersKey();
+    if (ParametersKey != NULL) {
+        RegistryCloseKey(ParametersKey);
+        __DriverSetParametersKey(NULL);
+    }
 
     RegistryTeardown();
 
 done:
-    DriverObject = NULL;
+    __DriverSetDriverObject(NULL);
+
+    ASSERT(IsZeroMemory(&Driver, sizeof (XENVIF_DRIVER)));
 
     Trace("<====\n");
 }
@@ -75,13 +134,13 @@ DRIVER_ADD_DEVICE   AddDevice;
 
 NTSTATUS
 AddDevice(
-    IN  PDRIVER_OBJECT  _DriverObject,
+    IN  PDRIVER_OBJECT  DriverObject,
     IN  PDEVICE_OBJECT  DeviceObject
     )
 {
     NTSTATUS            status;
 
-    ASSERT3P(_DriverObject, ==, DriverObject);
+    ASSERT3P(DriverObject, ==, __DriverGetDriverObject());
 
     status = FdoCreate(DeviceObject);
     if (!NT_SUCCESS(status))
@@ -148,80 +207,52 @@ DRIVER_INITIALIZE   DriverEntry;
 
 NTSTATUS
 DriverEntry(
-    IN  PDRIVER_OBJECT  _DriverObject,
+    IN  PDRIVER_OBJECT  DriverObject,
     IN  PUNICODE_STRING RegistryPath
     )
 {
-    HANDLE              Key;
+    HANDLE              ServiceKey;
+    HANDLE              ParametersKey;
     ULONG               Index;
     NTSTATUS            status;
 
-    ASSERT3P(DriverObject, ==, NULL);
+    ASSERT3P(__DriverGetDriverObject(), ==, NULL);
 
     ExInitializeDriverRuntime(DrvRtPoolNxOptIn);
 
+    __DbgPrintEnable();
+
     Trace("====>\n");
 
-    Info("%s (%s)\n",
-         MAJOR_VERSION_STR "." MINOR_VERSION_STR "." MICRO_VERSION_STR "." BUILD_NUMBER_STR,
-         DAY_STR "/" MONTH_STR "/" YEAR_STR);
-
-    DriverObject = _DriverObject;
-    DriverObject->DriverUnload = DriverUnload;
+    __DriverSetDriverObject(DriverObject);
 
     if (*InitSafeBootMode > 0)
         goto done;
+
+    Driver.DriverObject->DriverUnload = DriverUnload;
+
+    Info("XENVIF %d.%d.%d (%d) (%02d.%02d.%04d)\n",
+         MAJOR_VERSION,
+         MINOR_VERSION,
+         MICRO_VERSION,
+         BUILD_NUMBER,
+         DAY,
+         MONTH,
+         YEAR);
 
     status = RegistryInitialize(RegistryPath);
     if (!NT_SUCCESS(status))
         goto fail1;
 
-    status = RegistryOpenSubKey("Parameters", KEY_READ, &Key);
-    if (NT_SUCCESS(status)) {
-        status = RegistryQuerySzValue(Key,
-                                      "UnsupportedDevices",
-                                      &DriverParameters.UnsupportedDevices);
-        if (!NT_SUCCESS(status))
-            DriverParameters.UnsupportedDevices = NULL;
+    status = RegistryOpenServiceKey(KEY_READ, &ServiceKey);
+    if (!NT_SUCCESS(status))
+        goto fail2;
 
-        status = RegistryQueryDwordValue(Key,
-                                         "ReceiverMaximumProtocol",
-                                         &DriverParameters.ReceiverMaximumProtocol);
-        if (!NT_SUCCESS(status))
-            DriverParameters.ReceiverMaximumProtocol = 0;
+    status = RegistryOpenSubKey(ServiceKey, "Parameters", KEY_READ, &ParametersKey);
+    if (NT_SUCCESS(status))
+        __DriverSetParametersKey(ParametersKey);
 
-        status = RegistryQueryDwordValue(Key,
-                                         "ReceiverCalculateChecksums",
-                                         &DriverParameters.ReceiverCalculateChecksums);
-        if (!NT_SUCCESS(status))
-            DriverParameters.ReceiverCalculateChecksums = 0;
-
-        status = RegistryQueryDwordValue(Key,
-                                         "ReceiverAllowGsoPackets",
-                                         &DriverParameters.ReceiverAllowGsoPackets);
-        if (!NT_SUCCESS(status))
-            DriverParameters.ReceiverAllowGsoPackets = 1;
-
-        status = RegistryQueryDwordValue(Key,
-                                         "ReceiverIpAlignOffset",
-                                         &DriverParameters.ReceiverIpAlignOffset);
-        if (!NT_SUCCESS(status))
-            DriverParameters.ReceiverIpAlignOffset = 0;
-
-        status = RegistryQueryDwordValue(Key,
-                                         "ReceiverAlwaysPullup",
-                                         &DriverParameters.ReceiverAlwaysPullup);
-        if (!NT_SUCCESS(status))
-            DriverParameters.ReceiverAlwaysPullup = 0;
-
-        status = RegistryQueryDwordValue(Key,
-                                         "CreatePDOs",
-                                         &DriverParameters.CreatePDOs);
-        if (!NT_SUCCESS(status))
-            DriverParameters.CreatePDOs = 1;
-
-        RegistryCloseKey(Key);
-    }
+    RegistryCloseKey(ServiceKey);
 
     DriverObject->DriverExtension->AddDevice = AddDevice;
 
@@ -236,8 +267,17 @@ done:
 
     return STATUS_SUCCESS;
 
+fail2:
+    Error("fail2\n");
+
+    RegistryTeardown();
+
 fail1:
     Error("fail1 (%08x)\n", status);
+
+    __DriverSetDriverObject(NULL);
+
+    ASSERT(IsZeroMemory(&Driver, sizeof (XENVIF_DRIVER)));
 
     return status;
 }

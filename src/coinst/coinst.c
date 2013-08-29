@@ -178,375 +178,6 @@ FunctionName(
 #undef  _NAME
 }
 
-static BOOLEAN
-InstallClass(
-    IN  PTCHAR  Class
-    )
-{
-    HKEY        Key;
-    DWORD       OldLength;
-    DWORD       NewLength;
-    DWORD       Type;
-    LONG        Error;
-    PTCHAR      Classes;
-    ULONG       Offset;
-
-    Error = RegCreateKeyEx(HKEY_LOCAL_MACHINE,
-                           PARAMETERS_KEY(XENFILT),
-                           0,
-                           NULL,
-                           REG_OPTION_NON_VOLATILE,
-                           KEY_ALL_ACCESS,
-                           NULL,
-                           &Key,
-                           NULL);
-    if (Error != ERROR_SUCCESS) {
-        SetLastError(Error);
-        goto fail1;
-    }
-
-    OldLength = 0;
-    Error = RegQueryValueEx(Key,
-                            "UnplugClasses",
-                            NULL,
-                            &Type,
-                            NULL,
-                            &OldLength);
-    if (Error != ERROR_SUCCESS) {
-        if (Error != ERROR_FILE_NOT_FOUND) {
-            SetLastError(Error);
-            goto fail2;
-        }
-
-        OldLength = sizeof (TCHAR);
-        Type = REG_MULTI_SZ;
-    }
-
-    if (Type != REG_MULTI_SZ) {
-        SetLastError(ERROR_BAD_FORMAT);
-        goto fail3;
-    }
-
-    NewLength = OldLength + (DWORD)((strlen(Class) + 1) * sizeof (TCHAR));
-
-    Classes = malloc(NewLength);
-    if (Classes == NULL)
-        goto fail4;
-
-    memset(Classes, 0, NewLength);
-
-    Offset = 0;
-    if (OldLength != sizeof (TCHAR)) {
-        Error = RegQueryValueEx(Key,
-                                "UnplugClasses",
-                                NULL,
-                                NULL,
-                                (PBYTE)Classes,
-                                &OldLength);
-        if (Error != ERROR_SUCCESS) {
-            SetLastError(Error);
-            goto fail5;
-        }
-
-        while (Classes[Offset] != '\0') {
-            ULONG   ClassLength;
-
-            ClassLength = (ULONG)strlen(&Classes[Offset]) / sizeof (TCHAR);
-
-            if (_stricmp(&Classes[Offset], Class) == 0) {
-                Log("%s already present", Class);
-                goto done;
-            }
-
-            Offset += ClassLength + 1;
-        }
-    }
-
-    memmove(&Classes[Offset], Class, strlen(Class));
-    Log("added %s", Class);
-
-    Error = RegSetValueEx(Key,
-                          "UnplugClasses",
-                          0,
-                          Type,
-                          (PBYTE)Classes,
-                          NewLength);
-    if (Error != ERROR_SUCCESS) {
-        SetLastError(Error);
-        goto fail6;
-    }
-
-done:
-    free(Classes);
-
-    RegCloseKey(Key);
-
-    return TRUE;
-
-fail6:
-fail5:
-    free(Classes);
-
-fail4:
-fail3:
-fail2:
-    RegCloseKey(Key);
-
-fail1:
-    return FALSE;
-}
-
-static BOOLEAN
-RemoveClass(
-    IN  PTCHAR  Class
-    )
-{
-    HKEY        Key;
-    DWORD       OldLength;
-    DWORD       NewLength;
-    DWORD       Type;
-    LONG        Error;
-    PTCHAR      Classes;
-    ULONG       Offset;
-    ULONG       ClassLength;
-
-    Error = RegOpenKeyEx(HKEY_LOCAL_MACHINE,
-                         PARAMETERS_KEY(XENFILT),
-                         0,
-                         KEY_ALL_ACCESS,
-                         &Key);
-    if (Error != ERROR_SUCCESS) {
-        SetLastError(Error);
-        goto fail1;
-    }
-
-    OldLength = 0;
-    Error = RegQueryValueEx(Key,
-                            "UnplugClasses",
-                            NULL,
-                            &Type,
-                            NULL,
-                            &OldLength);
-    if (Error != ERROR_SUCCESS) {
-        if (Error != ERROR_FILE_NOT_FOUND) {
-            SetLastError(Error);
-            goto fail2;
-        }
-
-        goto done;
-    }
-
-    if (Type != REG_MULTI_SZ) {
-        SetLastError(ERROR_BAD_FORMAT);
-        goto fail3;
-    }
-
-    Classes = malloc(OldLength);
-    if (Classes == NULL)
-        goto fail4;
-
-    memset(Classes, 0, OldLength);
-
-    Error = RegQueryValueEx(Key,
-                            "UnplugClasses",
-                            NULL,
-                            NULL,
-                            (PBYTE)Classes,
-                            &OldLength);
-    if (Error != ERROR_SUCCESS) {
-        SetLastError(Error);
-        goto fail5;
-    }
-
-    Offset = 0;
-    ClassLength = 0;
-    while (Classes[Offset] != '\0') {
-        ClassLength = (ULONG)strlen(&Classes[Offset]) / sizeof (TCHAR);
-
-        if (_stricmp(&Classes[Offset], Class) == 0)
-            goto remove;
-
-        Offset += ClassLength + 1;
-    }
-
-    free(Classes);
-    goto done;
-
-remove:
-    NewLength = OldLength - ((ClassLength + 1) * sizeof (TCHAR));
-
-    memmove(&Classes[Offset],
-            &Classes[Offset + ClassLength + 1],
-            (NewLength - Offset) * sizeof (TCHAR));
-            
-    Log("removed %s", Class);
-
-    if (NewLength == 1) {
-        Error = RegDeleteValue(Key,
-                               "UnplugClasses");
-    } else {
-        Error = RegSetValueEx(Key,
-                              "UnplugClasses",
-                              0,
-                              Type,
-                              (PBYTE)Classes,
-                              NewLength);
-    }
-    if (Error != ERROR_SUCCESS) {
-        SetLastError(Error);
-        goto fail6;
-    }
-
-    free(Classes);
-
-done:
-    RegCloseKey(Key);
-
-    return TRUE;
-
-fail6:
-fail5:
-    free(Classes);
-
-fail4:
-fail3:
-fail2:
-    RegCloseKey(Key);
-
-fail1:
-    return FALSE;
-}
-
-static BOOLEAN
-IsClassEmulated(
-    IN  PTCHAR      Class,
-    OUT PBOOLEAN    Present
-    )
-{
-    HKEY            Key;
-    DWORD           Length;
-    DWORD           Type;
-    LONG            Error;
-    PTCHAR          Devices;
-    ULONG           Count;
-    ULONG           Offset;
-
-    Error = RegOpenKeyEx(HKEY_LOCAL_MACHINE,
-                         STATUS_KEY(XENFILT),
-                         0,
-                         KEY_READ,
-                         &Key);
-    if (Error != ERROR_SUCCESS) {
-        if (Error == ERROR_FILE_NOT_FOUND)
-            goto done;
-
-        SetLastError(Error);
-        goto fail1;
-    }
-
-    Length = 0;
-    Error = RegQueryValueEx(Key,
-                            Class,
-                            NULL,
-                            &Type,
-                            NULL,
-                            &Length);
-    if (Error != ERROR_SUCCESS) {
-        if (Error == ERROR_FILE_NOT_FOUND) {
-            RegCloseKey(Key);
-            goto done;
-        }
-
-        SetLastError(Error);
-        goto fail2;
-    }
-
-    if (Type != REG_MULTI_SZ) {
-        SetLastError(ERROR_BAD_FORMAT);
-        goto fail3;
-    }
-
-    Devices = malloc(Length);
-    if (Devices == NULL)
-        goto fail4;
-
-    memset(Devices, 0, Length);
-
-    Error = RegQueryValueEx(Key,
-                            Class,
-                            NULL,
-                            NULL,
-                            (PBYTE)Devices,
-                            &Length);
-    if (Error != ERROR_SUCCESS) {
-        SetLastError(Error);
-        goto fail5;
-    }
-
-    Count = 0;
-
-    Offset = 0;
-    while (Devices[Offset] != '\0') {
-        ULONG   DeviceLength;
-
-        DeviceLength = (ULONG)strlen(&Devices[Offset]) / sizeof (TCHAR);
-
-        Count++;
-        Offset += DeviceLength + 1;
-    }
-
-    *Present = (Count != 0) ? TRUE : FALSE;
-
-    free(Devices);
-
-    RegCloseKey(Key);
-
-done:
-    return TRUE;
-
-fail5:
-    free(Devices);
-
-fail4:
-fail3:
-fail2:
-    RegCloseKey(Key);
-
-fail1:
-    return FALSE;
-}
-
-static BOOLEAN
-RequestReboot(
-    IN  HDEVINFO            DeviceInfoSet,
-    IN  PSP_DEVINFO_DATA    DeviceInfoData
-    )
-{
-    SP_DEVINSTALL_PARAMS    DeviceInstallParams;
-
-    DeviceInstallParams.cbSize = sizeof (DeviceInstallParams);
-
-    if (!SetupDiGetDeviceInstallParams(DeviceInfoSet,
-                                       DeviceInfoData,
-                                       &DeviceInstallParams))
-        goto fail1;
-
-    DeviceInstallParams.Flags |= DI_NEEDREBOOT;
-
-    Log("Flags = %08x", DeviceInstallParams.Flags);
-
-    if (!SetupDiSetDeviceInstallParams(DeviceInfoSet,
-                                       DeviceInfoData,
-                                       &DeviceInstallParams))
-        goto fail2;
-
-    return TRUE;
-
-fail2:
-fail1:
-    return FALSE;
-}
-
 static FORCEINLINE HRESULT
 __DifInstallPreProcess(
     IN  HDEVINFO                    DeviceInfoSet,
@@ -571,8 +202,9 @@ __DifInstallPostProcess(
     )
 {
     HRESULT                         Error;
-    BOOLEAN                         Present;
-    BOOLEAN                         Success;
+
+    UNREFERENCED_PARAMETER(DeviceInfoSet);
+    UNREFERENCED_PARAMETER(DeviceInfoData);
 
     Log("====>");
 
@@ -582,34 +214,9 @@ __DifInstallPostProcess(
         goto fail1;
     }
 
-    Success = InstallClass("VIF");
-    if (!Success)
-        goto fail2;
-
-    Success = IsClassEmulated("VIF", &Present);
-    if (!Success)
-        goto fail3;
-
-    if (!Present)
-        goto done;
-
-    Success = RequestReboot(DeviceInfoSet, DeviceInfoData);
-    if (!Success)
-        goto fail4;
-
-done:
     Log("<====");
 
     return NO_ERROR;
-
-fail4:
-    Log("fail4");
-
-fail3:
-    Log("fail3");
-
-fail2:
-    Log("fail2");
 
 fail1:
     Error = GetLastError();
@@ -688,7 +295,9 @@ __DifRemovePostProcess(
     )
 {
     HRESULT                         Error;
-    BOOLEAN                         Success;
+
+    UNREFERENCED_PARAMETER(DeviceInfoSet);
+    UNREFERENCED_PARAMETER(DeviceInfoData);
 
     Log("====>");
 
@@ -698,23 +307,9 @@ __DifRemovePostProcess(
         goto fail1;
     }
 
-    Success = RemoveClass("VIF");
-    if (!Success)
-        goto fail2;
-
-    Success = RequestReboot(DeviceInfoSet, DeviceInfoData);
-    if (!Success)
-        goto fail3;
-
     Log("<====");
 
     return NO_ERROR;
-
-fail3:
-    Log("fail3");
-
-fail2:
-    Log("fail2");
 
 fail1:
     Error = GetLastError();

@@ -50,7 +50,7 @@
 #include "mac.h"
 #include "vif.h"
 #include "thread.h"
-#include "log.h"
+#include "dbg_print.h"
 #include "assert.h"
 
 #define TRANSMITTER_POOL    'NART'

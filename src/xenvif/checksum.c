@@ -38,7 +38,7 @@
 #include <vif_interface.h>
 
 #include "checksum.h"
-#include "log.h"
+#include "dbg_print.h"
 #include "assert.h"
 
 static FORCEINLINE VOID

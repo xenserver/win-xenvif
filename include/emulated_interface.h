@@ -32,26 +32,35 @@
 #ifndef _XENFILT_EMULATED_INTERFACE_H
 #define _XENFILT_EMULATED_INTERFACE_H
 
-#define DEFINE_EMULATED_OPERATIONS                                  \
-        EMULATED_OPERATION(VOID,                                    \
-                           Acquire,                                 \
-                           (                                        \
-                           IN  PXENFILT_EMULATED_CONTEXT Context    \
-                           )                                        \
-                           )                                        \
-        EMULATED_OPERATION(VOID,                                    \
-                           Release,                                 \
-                           (                                        \
-                           IN  PXENFILT_EMULATED_CONTEXT Context    \
-                           )                                        \
-                           )                                        \
-        EMULATED_OPERATION(BOOLEAN,                                 \
-                           IsPresent,                               \
-                           (                                        \
-                           IN  PXENFILT_EMULATED_CONTEXT Context,   \
-                           IN  PCHAR                     Class,     \
-                           IN  PCHAR                     Device     \
-                           )                                        \
+#define DEFINE_EMULATED_OPERATIONS                                      \
+        EMULATED_OPERATION(VOID,                                        \
+                           Acquire,                                     \
+                           (                                            \
+                           IN  PXENFILT_EMULATED_CONTEXT Context        \
+                           )                                            \
+                           )                                            \
+        EMULATED_OPERATION(VOID,                                        \
+                           Release,                                     \
+                           (                                            \
+                           IN  PXENFILT_EMULATED_CONTEXT Context        \
+                           )                                            \
+                           )                                            \
+        EMULATED_OPERATION(BOOLEAN,                                     \
+                           IsDevicePresent,                             \
+                           (                                            \
+                           IN  PXENFILT_EMULATED_CONTEXT Context,       \
+                           IN  PCHAR                     DeviceID,      \
+                           IN  PCHAR                     InstanceID     \
+                           )                                            \
+                           )                                            \
+        EMULATED_OPERATION(BOOLEAN,                                     \
+                           IsDiskPresent,                               \
+                           (                                            \
+                           IN  PXENFILT_EMULATED_CONTEXT Context,       \
+                           IN  ULONG                     Controller,    \
+                           IN  ULONG                     Target,        \
+                           IN  ULONG                     Lun            \
+                           )                                            \
                            )
 
 typedef struct _XENFILT_EMULATED_CONTEXT    XENFILT_EMULATED_CONTEXT, *PXENFILT_EMULATED_CONTEXT;
@@ -81,7 +90,7 @@ DEFINE_GUID(GUID_EMULATED_INTERFACE,
             0xe9,
             0x77);
 
-#define EMULATED_INTERFACE_VERSION    3
+#define EMULATED_INTERFACE_VERSION    4
 
 #define EMULATED_OPERATIONS(_Interface) \
         (PXENFILT_EMULATED_OPERATIONS *)((ULONG_PTR)(_Interface))

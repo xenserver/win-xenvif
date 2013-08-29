@@ -29,28 +29,24 @@
  * SUCH DAMAGE.
  */
 
-#include <windows.h>
-#include <ntverp.h>
+#ifndef _XENVIF_BUS_H
+#define _XENVIF_BUS_H
 
+#include <ntddk.h>
+#include <xen.h>
 
-#undef VER_COMPANYNAME_STR
-#undef VER_PRODUCTNAME_STR
-#undef VER_PRODUCTVERSION
-#undef VER_PRODUCTVERSION_STR
+#include "pdo.h"
 
-#define	VER_COMPANYNAME_STR         "Citrix Systems Inc."
-#define VER_LEGALCOPYRIGHT_STR      "Copyright " YEAR_STR VER_COMPANYNAME_STR
+extern NTSTATUS
+BusInitialize(
+    IN  PXENVIF_PDO             Pdo,
+    OUT PBUS_INTERFACE_STANDARD Interface
+    );
 
-#include <version.h>
+extern VOID
+BusTeardown(
+    IN OUT  PBUS_INTERFACE_STANDARD Interface
+    );
 
-#define VER_PRODUCTNAME_STR         "XENVIF"
-#define VER_PRODUCTVERSION          MAJOR_VERSION,MINOR_VERSION,MICRO_VERSION,BUILD_NUMBER
-#define VER_PRODUCTVERSION_STR      MAJOR_VERSION_STR "." MINOR_VERSION_STR "." MICRO_VERSION_STR "." BUILD_NUMBER_STR
+#endif  // _XENVIF_BUS_H
 
-#define VER_INTERNALNAME_STR        "XENVIF.SYS"
-#define VER_FILEDESCRIPTION_STR     "XENVIF"
-
-#define VER_FILETYPE                VFT_DRV
-#define VER_FILESUBTYPE             VFT2_DRV_SYSTEM
-
-#include <common.ver>

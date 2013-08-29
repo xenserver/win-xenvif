@@ -36,17 +36,17 @@
 
 #include "assert.h"
 
-typedef struct _XENVIF_MUTEX {
-    PKTHREAD        Owner;
-    KEVENT          Event;
-} XENVIF_MUTEX, *PXENVIF_MUTEX;
+typedef struct _MUTEX {
+    PKTHREAD    Owner;
+    KEVENT      Event;
+} MUTEX, *PMUTEX;
 
 static FORCEINLINE VOID
 InitializeMutex(
-    IN  PXENVIF_MUTEX   Mutex
+    IN  PMUTEX  Mutex
     )
 {
-    RtlZeroMemory(Mutex, sizeof (XENVIF_MUTEX));
+    RtlZeroMemory(Mutex, sizeof (MUTEX));
 
     KeInitializeEvent(&Mutex->Event, SynchronizationEvent, TRUE);
 }
@@ -54,7 +54,7 @@ InitializeMutex(
 static FORCEINLINE VOID
 __drv_maxIRQL(PASSIVE_LEVEL)
 AcquireMutex(
-    IN  PXENVIF_MUTEX   Mutex
+    IN  PMUTEX  Mutex
     )
 {
     (VOID) KeWaitForSingleObject(&Mutex->Event,
@@ -70,7 +70,7 @@ AcquireMutex(
 static FORCEINLINE VOID
 __drv_maxIRQL(PASSIVE_LEVEL)
 ReleaseMutex(
-    IN  PXENVIF_MUTEX   Mutex
+    IN  PMUTEX  Mutex
     )
 {
     ASSERT3P(Mutex->Owner, ==, KeGetCurrentThread());

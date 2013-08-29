@@ -34,10 +34,10 @@
 
 #include <ntddk.h>
 
-#include "log.h"
+#include "dbg_print.h"
 
 static FORCEINLINE VOID
-__BugCheck(
+__Bug(
     IN  ULONG       Code,
     IN  ULONG_PTR   Parameter1,
     IN  ULONG_PTR   Parameter2,
@@ -62,11 +62,11 @@ __BugCheck(
             ULONG       _Line = __LINE__;                       \
                                                                 \
             Error("BUG: " _TEXT "\n");                          \
-            __BugCheck(ASSERTION_FAILURE,                       \
-                       (ULONG_PTR)_Text,                        \
-                       (ULONG_PTR)_File,                        \
-                       (ULONG_PTR)_Line,                        \
-                       0);                                      \
+            __Bug(ASSERTION_FAILURE,                            \
+                  (ULONG_PTR)_Text,                             \
+                  (ULONG_PTR)_File,                             \
+                  (ULONG_PTR)_Line,                             \
+                  0);                                           \
         } while (FALSE)
 
 #define BUG_ON(_EXP)                \
@@ -171,4 +171,3 @@ _IsZeroMemory(
 #define EQUIV(_X, _Y)   (IMPLY((_X), (_Y)) && IMPLY((_Y), (_X)))
 
 #endif  // _XENVIF_ASSERT_H
-

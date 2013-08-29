@@ -35,8 +35,6 @@
 #include <ntddk.h>
 #include <xen.h>
 
-#include "types.h"
-
 static FORCEINLINE const CHAR *
 PowerTypeName(
     IN  POWER_STATE_TYPE    Type
@@ -156,35 +154,6 @@ PowerMinorFunctionName(
 }
 
 static FORCEINLINE const CHAR *
-PnpDeviceStateName(
-    IN  DEVICE_PNP_STATE    State
-    )
-{
-#define _PNP_DEVICE_STATE_NAME(_State) \
-    case  _State:               \
-        return #_State;
-
-    switch (State) {
-    _PNP_DEVICE_STATE_NAME(Invalid);
-    _PNP_DEVICE_STATE_NAME(Present);
-    _PNP_DEVICE_STATE_NAME(Enumerated);
-    _PNP_DEVICE_STATE_NAME(Added);
-    _PNP_DEVICE_STATE_NAME(Started);
-    _PNP_DEVICE_STATE_NAME(StopPending);
-    _PNP_DEVICE_STATE_NAME(Stopped);
-    _PNP_DEVICE_STATE_NAME(RemovePending);
-    _PNP_DEVICE_STATE_NAME(SurpriseRemovePending);
-    _PNP_DEVICE_STATE_NAME(Deleted);
-    default:
-        break;
-    }
-
-    return "UNKNOWN";
-
-#undef  _STATE_NAME
-}
-
-static FORCEINLINE const CHAR *
 PnpMinorFunctionName(
     IN  ULONG   Function
     )
@@ -256,6 +225,115 @@ PartialResourceDescriptorTypeName(
 #undef  _PARTIAL_RESOURCE_DESCRIPTOR_TYPE_NAME
 }
 
+static FORCEINLINE const CHAR *
+DeviceUsageTypeName(
+    IN  DEVICE_USAGE_NOTIFICATION_TYPE  Type
+    )
+{
+#define _DEVICE_USAGE_TYPE_NAME(_Type)  \
+    case DeviceUsageType ## _Type:      \
+        return #_Type;
+
+    switch (Type) {
+    _DEVICE_USAGE_TYPE_NAME(Paging);
+    _DEVICE_USAGE_TYPE_NAME(Hibernation);
+    _DEVICE_USAGE_TYPE_NAME(DumpFile);
+    default:
+        break;
+    }
+
+    return "UNKNOWN";
+
+#undef  _DEVICE_USAGE_TYPE_NAME
+}
+
+static FORCEINLINE const CHAR *
+InterfaceTypeName(
+    IN  INTERFACE_TYPE  Type
+    )
+{
+#define _INTERFACE_TYPE_NAME(_Type) \
+    case _Type:                     \
+        return #_Type;
+
+    switch (Type) {
+    _INTERFACE_TYPE_NAME(InterfaceTypeUndefined);
+    _INTERFACE_TYPE_NAME(Internal);
+    _INTERFACE_TYPE_NAME(Isa);
+    _INTERFACE_TYPE_NAME(Eisa);
+    _INTERFACE_TYPE_NAME(MicroChannel);
+    _INTERFACE_TYPE_NAME(TurboChannel);
+    _INTERFACE_TYPE_NAME(PCIBus);
+    _INTERFACE_TYPE_NAME(VMEBus);
+    _INTERFACE_TYPE_NAME(NuBus);
+    _INTERFACE_TYPE_NAME(PCMCIABus);
+    _INTERFACE_TYPE_NAME(CBus);
+    _INTERFACE_TYPE_NAME(MPIBus);
+    _INTERFACE_TYPE_NAME(MPSABus);
+    _INTERFACE_TYPE_NAME(ProcessorInternal);
+    _INTERFACE_TYPE_NAME(InternalPowerBus);
+    _INTERFACE_TYPE_NAME(PNPISABus);
+    _INTERFACE_TYPE_NAME(PNPBus);
+    _INTERFACE_TYPE_NAME(Vmcs);
+    _INTERFACE_TYPE_NAME(ACPIBus);
+    default:
+        break;
+    }
+
+    return "UNKNOWN";
+
+#undef  _INTERFACE_TYPE_NAME
+}
+
+static FORCEINLINE const CHAR *
+DmaWidthName(
+    IN  DMA_WIDTH   Width
+    )
+{
+#define _DMA_WIDTH_NAME(_Width) \
+    case Width ## _Width:       \
+        return #_Width;
+
+    switch (Width) {
+    _DMA_WIDTH_NAME(8Bits);
+    _DMA_WIDTH_NAME(16Bits);
+    _DMA_WIDTH_NAME(32Bits);
+    _DMA_WIDTH_NAME(64Bits);
+    _DMA_WIDTH_NAME(NoWrap);
+    default:
+        break;
+    }
+
+    return "UNKNOWN";
+
+#undef  _DMA_WIDTH_NAME
+}
+
+static FORCEINLINE const CHAR *
+DmaSpeedName(
+    IN  DMA_SPEED   Speed
+    )
+{
+#define _DMA_SPEED_NAME(_Speed) \
+    case _Speed:                \
+        return #_Speed;
+
+    switch (Speed) {
+    _DMA_SPEED_NAME(Compatible);
+    _DMA_SPEED_NAME(TypeA);
+    _DMA_SPEED_NAME(TypeB);
+    _DMA_SPEED_NAME(TypeC);
+    _DMA_SPEED_NAME(TypeF);
+    _DMA_SPEED_NAME(MaximumDmaSpeed);
+    default:
+        break;
+    }
+
+    return "UNKNOWN";
+
+#undef  _DMA_SPEED_NAME
+}
+
 static FORCEINLINE const PCHAR
 XenbusStateName(
     IN  XenbusState   State
@@ -282,28 +360,6 @@ XenbusStateName(
     return "INVALID";
 
 #undef  _STATE_NAME
-}
-
-static FORCEINLINE const CHAR *
-DeviceUsageTypeName(
-    IN  DEVICE_USAGE_NOTIFICATION_TYPE  Type
-    )
-{
-#define _DEVICE_USAGE_TYPE_NAME(_Type)  \
-    case DeviceUsageType ## _Type:      \
-        return #_Type;
-
-    switch (Type) {
-    _DEVICE_USAGE_TYPE_NAME(Paging);
-    _DEVICE_USAGE_TYPE_NAME(Hibernation);
-    _DEVICE_USAGE_TYPE_NAME(DumpFile);
-    default:
-        break;
-    }
-
-    return "UNKNOWN";
-
-#undef  _DEVICE_USAGE_TYPE_NAME
 }
 
 #endif // _XENVIF_NAMES_H_

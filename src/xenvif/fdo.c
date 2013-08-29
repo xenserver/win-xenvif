@@ -52,7 +52,7 @@
 #include "mutex.h"
 #include "frontend.h"
 #include "names.h"
-#include "log.h"
+#include "dbg_print.h"
 #include "assert.h"
 
 #define FDO_POOL 'ODF'
@@ -75,6 +75,7 @@ struct _XENVIF_FDO {
     PDEVICE_OBJECT              LowerDeviceObject;
     PDEVICE_OBJECT              PhysicalDeviceObject;
     DEVICE_CAPABILITIES         LowerDeviceCapabilities;
+    BUS_INTERFACE_STANDARD      LowerBusInterface;
     ULONG                       Usage[DeviceUsageTypeDumpFile + 1];
     BOOLEAN                     NotDisableable;
 
@@ -83,10 +84,12 @@ struct _XENVIF_FDO {
     PXENVIF_THREAD              DevicePowerThread;
     PIRP                        DevicePowerIrp;
 
+    CHAR                        VendorName[MAXNAMELEN];
+
     PXENVIF_THREAD              ScanThread;
     KEVENT                      ScanEvent;
     PXENBUS_STORE_WATCH         ScanWatch;
-    XENVIF_MUTEX                Mutex;
+    MUTEX                       Mutex;
     ULONG                       References;
 
     FDO_RESOURCE                Resource[RESOURCE_COUNT];
@@ -212,39 +215,126 @@ FdoGetPhysicalDeviceObject(
     return __FdoGetPhysicalDeviceObject(Fdo);
 }
 
-static FORCEINLINE NTSTATUS
-__FdoSetName(
+PDMA_ADAPTER
+FdoGetDmaAdapter(
+    IN  PXENVIF_FDO         Fdo,
+    IN  PDEVICE_DESCRIPTION DeviceDescriptor,
+    OUT PULONG              NumberOfMapRegisters
+    )
+{
+    PBUS_INTERFACE_STANDARD LowerBusInterface;
+
+    LowerBusInterface = &Fdo->LowerBusInterface;
+
+    return LowerBusInterface->GetDmaAdapter(LowerBusInterface->Context,
+                                            DeviceDescriptor,
+                                            NumberOfMapRegisters);
+}
+
+BOOLEAN
+FdoTranslateBusAddress(
+    IN      PXENVIF_FDO         Fdo,
+    IN      PHYSICAL_ADDRESS    BusAddress,
+    IN      ULONG               Length,
+    IN OUT  PULONG              AddressSpace,
+    OUT     PPHYSICAL_ADDRESS   TranslatedAddress
+    )
+{
+    PBUS_INTERFACE_STANDARD LowerBusInterface;
+
+    LowerBusInterface = &Fdo->LowerBusInterface;
+
+    return LowerBusInterface->TranslateBusAddress(LowerBusInterface->Context,
+                                                  BusAddress,
+                                                  Length,
+                                                  AddressSpace,
+                                                  TranslatedAddress);
+}
+
+ULONG
+FdoSetBusData(
+    IN  PXENVIF_FDO     Fdo,
+    IN  ULONG           DataType,
+    IN  PVOID           Buffer,
+    IN  ULONG           Offset,
+    IN  ULONG           Length
+    )
+{
+    PBUS_INTERFACE_STANDARD LowerBusInterface;
+
+    LowerBusInterface = &Fdo->LowerBusInterface;
+
+    return LowerBusInterface->SetBusData(LowerBusInterface->Context,
+                                         DataType,
+                                         Buffer,
+                                         Offset,
+                                         Length);
+}
+
+ULONG
+FdoGetBusData(
+    IN  PXENVIF_FDO     Fdo,
+    IN  ULONG           DataType,
+    IN  PVOID           Buffer,
+    IN  ULONG           Offset,
+    IN  ULONG           Length
+    )
+{
+    PBUS_INTERFACE_STANDARD LowerBusInterface;
+
+    LowerBusInterface = &Fdo->LowerBusInterface;
+
+    return LowerBusInterface->GetBusData(LowerBusInterface->Context,
+                                         DataType,
+                                         Buffer,
+                                         Offset,
+                                         Length);
+}
+
+static FORCEINLINE VOID
+__FdoSetVendorName(
     IN  PXENVIF_FDO Fdo,
-    IN  PWCHAR      Name
+    IN  USHORT      DeviceID
+    )
+{
+    NTSTATUS        status;
+
+    status = RtlStringCbPrintfA(Fdo->VendorName,
+                                MAXNAMELEN,
+                                "XS%04X",
+                                DeviceID);
+    ASSERT(NT_SUCCESS(status));
+}
+
+static FORCEINLINE PCHAR
+__FdoGetVendorName(
+    IN  PXENVIF_FDO Fdo
+    )
+{
+    return Fdo->VendorName;
+}
+
+PCHAR
+FdoGetVendorName(
+    IN  PXENVIF_FDO Fdo
+    )
+{
+    return __FdoGetVendorName(Fdo);
+}
+
+static FORCEINLINE VOID
+__FdoSetName(
+    IN  PXENVIF_FDO Fdo
     )
 {
     PXENVIF_DX      Dx = Fdo->Dx;
-    UNICODE_STRING  Unicode;
-    ANSI_STRING     Ansi;
-    ULONG           Index;
     NTSTATUS        status;
 
-    RtlInitUnicodeString(&Unicode, Name);
-
-    Ansi.Buffer = Dx->Name;
-    Ansi.MaximumLength = sizeof (Dx->Name);
-    Ansi.Length = 0;
-
-    status = RtlUnicodeStringToAnsiString(&Ansi, &Unicode, FALSE);
-    if (!NT_SUCCESS(status))
-        goto fail1;
-    
-    for (Index = 0; Dx->Name[Index] != '\0'; Index++) {
-        if (!isalnum((UCHAR)Dx->Name[Index]))
-            Dx->Name[Index] = '_';
-    }
-
-    return STATUS_SUCCESS;
-
-fail1:
-    Error("fail1 (%08x)\n", status);
-
-    return status;
+    status = RtlStringCbPrintfA(Dx->Name,
+                                MAXNAMELEN,
+                                "%s XENVIF",
+                                __FdoGetVendorName(Fdo));
+    ASSERT(NT_SUCCESS(status));
 }
 
 static FORCEINLINE PCHAR
@@ -499,9 +589,6 @@ __FdoEnumerate(
 
     NeedInvalidate = FALSE;
 
-    if (DriverParameters.CreatePDOs == 0)
-        goto done;
-
     __FdoAcquireMutex(Fdo);
 
     ListEntry = Fdo->Dx->ListEntry.Flink;
@@ -512,13 +599,16 @@ __FdoEnumerate(
         PXENVIF_PDO     Pdo = Dx->Pdo;
         BOOLEAN         Missing;
 
+        Name = PdoGetName(Pdo);
         Missing = TRUE;
 
-        // If the PDO exists in the device list
-        // from xenstore then we don't want to remove it.
-
+        // If the PDO already exists ans its name is in the class list then
+        // we don't want to remove it.
         for (Index = 0; Devices[Index].Buffer != NULL; Index++) {
             PANSI_STRING Device = &Devices[Index];
+
+            if (Device->Length == 0)
+                continue;
 
             if (strcmp(Name, Device->Buffer) == 0) {
                 Missing = FALSE;
@@ -546,36 +636,12 @@ __FdoEnumerate(
         ListEntry = Next;
     }
 
-    // Check the device list from xenstore against the unsupported list
+    // Walk the class list and create PDOs for any new classes
     for (Index = 0; Devices[Index].Buffer != NULL; Index++) {
-        PANSI_STRING    Device = &Devices[Index];
-        ULONG           Entry;
-        BOOLEAN         Supported;
-
-        Supported = TRUE;
-
-        for (Entry = 0;
-             DriverParameters.UnsupportedDevices != NULL && DriverParameters.UnsupportedDevices[Entry].Buffer != NULL;
-             Entry++) {
-            if (strncmp(Device->Buffer,
-                        DriverParameters.UnsupportedDevices[Entry].Buffer,
-                        Device->Length) == 0) {
-                Supported = FALSE;
-                break;
-            }
-        }
-
-        if (!Supported)
-            Device->Length = 0;  // avoid creation
-    }
-
-    // Walk the device list and create PDOs for any new devices
-
-    for (Index = 0; Devices[Index].Buffer != NULL; Index++) {
-        PANSI_STRING    Device = &Devices[Index];
+        PANSI_STRING Device = &Devices[Index];
 
         if (Device->Length != 0) {
-            NTSTATUS        status;
+            NTSTATUS    status;
 
             status = PdoCreate(Fdo, Device);
             if (NT_SUCCESS(status))
@@ -585,7 +651,6 @@ __FdoEnumerate(
 
     __FdoReleaseMutex(Fdo);
 
-done:
     Trace("<====\n");
     return NeedInvalidate;
 }
@@ -675,19 +740,22 @@ FdoScan(
     )
 {
     PXENVIF_FDO         Fdo = Context;
-    BOOLEAN             NeedInvalidate;
     PKEVENT             Event;
+    HANDLE              ParametersKey;
+    NTSTATUS            status;
 
     Trace("====>\n");
 
-    NeedInvalidate = FALSE;
-
     Event = ThreadGetEvent(Self);
+
+    ParametersKey = DriverGetParametersKey();
 
     for (;;) {
         PCHAR           Buffer;
         PANSI_STRING    Devices;
-        NTSTATUS        status;
+        PANSI_STRING    UnsupportedDevices;
+        ULONG           Index;
+        BOOLEAN         NeedInvalidate;
 
         Trace("waiting...\n");
 
@@ -721,10 +789,49 @@ FdoScan(
               Fdo->StoreInterface,
               Buffer);
 
-        if (Devices != NULL) {
-            NeedInvalidate = __FdoEnumerate(Fdo, Devices);
-            __FdoFreeAnsi(Devices);
+        if (Devices == NULL)
+            goto loop;
+
+        if (ParametersKey != NULL) {
+            status = RegistryQuerySzValue(ParametersKey,
+                                          "UnsupportedDevices",
+                                          &UnsupportedDevices);
+            if (!NT_SUCCESS(status))
+                UnsupportedDevices = NULL;
+        } else {
+            UnsupportedDevices = NULL;
         }
+
+        // NULL out anything in the Devices list that is in the
+        // UnsupportedDevices list    
+        for (Index = 0; Devices[Index].Buffer != NULL; Index++) {
+            PANSI_STRING    Device = &Devices[Index];
+            ULONG           Entry;
+            BOOLEAN         Supported;
+
+            Supported = TRUE;
+
+            for (Entry = 0;
+                 UnsupportedDevices != NULL && UnsupportedDevices[Entry].Buffer != NULL;
+                 Entry++) {
+                if (strncmp(Device->Buffer,
+                            UnsupportedDevices[Entry].Buffer,
+                            Device->Length) == 0) {
+                    Supported = FALSE;
+                    break;
+                }
+            }
+
+            if (!Supported)
+                Device->Length = 0;
+        }
+
+        if (UnsupportedDevices != NULL)
+            RegistryFreeSzValue(UnsupportedDevices);
+
+        NeedInvalidate = __FdoEnumerate(Fdo, Devices);
+
+        __FdoFreeAnsi(Devices);
 
         if (NeedInvalidate) {
             NeedInvalidate = FALSE;
@@ -852,15 +959,11 @@ __FdoD3ToD0(
     IN  PXENVIF_FDO Fdo
     )
 {
-    POWER_STATE     PowerState;
     NTSTATUS        status;
 
     Trace("====>\n");
 
     ASSERT3U(KeGetCurrentIrql(), ==, DISPATCH_LEVEL);
-    ASSERT3U(__FdoGetDevicePowerState(Fdo), ==, PowerDeviceD3);
-
-    __FdoSetDevicePowerState(Fdo, PowerDeviceD0);
 
     STORE(Acquire, Fdo->StoreInterface);
 
@@ -873,11 +976,6 @@ __FdoD3ToD0(
     if (!NT_SUCCESS(status))
         goto fail1;
 
-    PowerState.DeviceState = PowerDeviceD0;
-    PoSetPowerState(Fdo->Dx->DeviceObject,
-                    DevicePowerState,
-                    PowerState);
-
     Trace("<====\n");
 
     return STATUS_SUCCESS;
@@ -887,8 +985,6 @@ fail1:
 
     STORE(Release, Fdo->StoreInterface);
 
-    __FdoSetDevicePowerState(Fdo, PowerDeviceD3);
-
     return status;
 }
 
@@ -897,19 +993,9 @@ __FdoD0ToD3(
     IN  PXENVIF_FDO Fdo
     )
 {
-    POWER_STATE     PowerState;
-
     Trace("====>\n");
 
     ASSERT3U(KeGetCurrentIrql(), ==, DISPATCH_LEVEL);
-    ASSERT3U(__FdoGetDevicePowerState(Fdo), ==, PowerDeviceD0);
-
-    PowerState.DeviceState = PowerDeviceD3;
-    PoSetPowerState(Fdo->Dx->DeviceObject,
-                    DevicePowerState,
-                    PowerState);
-
-    __FdoSetDevicePowerState(Fdo, PowerDeviceD3);
 
     (VOID) STORE(Unwatch,
                  Fdo->StoreInterface,
@@ -940,11 +1026,13 @@ FdoD3ToD0(
     IN  PXENVIF_FDO Fdo
     )
 {
+    POWER_STATE     PowerState;
     KIRQL           Irql;
     PLIST_ENTRY     ListEntry;
     NTSTATUS        status;
 
     ASSERT3U(KeGetCurrentIrql(), ==, PASSIVE_LEVEL);
+    ASSERT3U(__FdoGetDevicePowerState(Fdo), ==, PowerDeviceD3);
 
     KeRaiseIrql(DISPATCH_LEVEL, &Irql);
 
@@ -964,6 +1052,13 @@ FdoD3ToD0(
         goto fail2;
 
     KeLowerIrql(Irql);
+
+    __FdoSetDevicePowerState(Fdo, PowerDeviceD0);
+
+    PowerState.DeviceState = PowerDeviceD0;
+    PoSetPowerState(Fdo->Dx->DeviceObject,
+                    DevicePowerState,
+                    PowerState);
 
     __FdoAcquireMutex(Fdo);
 
@@ -1002,10 +1097,12 @@ FdoD0ToD3(
     IN  PXENVIF_FDO Fdo
     )
 {
+    POWER_STATE     PowerState;
     PLIST_ENTRY     ListEntry;
     KIRQL           Irql;
 
     ASSERT3U(KeGetCurrentIrql(), ==, PASSIVE_LEVEL);
+    ASSERT3U(__FdoGetDevicePowerState(Fdo), ==, PowerDeviceD0);
 
     __FdoAcquireMutex(Fdo);
 
@@ -1025,6 +1122,13 @@ FdoD0ToD3(
     }
 
     __FdoReleaseMutex(Fdo);
+
+    PowerState.DeviceState = PowerDeviceD3;
+    PoSetPowerState(Fdo->Dx->DeviceObject,
+                    DevicePowerState,
+                    PowerState);
+
+    __FdoSetDevicePowerState(Fdo, PowerDeviceD3);
 
     KeRaiseIrql(DISPATCH_LEVEL, &Irql);
 
@@ -2427,6 +2531,88 @@ FdoDispatch(
     return status;
 }
 
+static FORCEINLINE NTSTATUS
+__FdoAcquireLowerBusInterface(
+    IN  PXENVIF_FDO     Fdo
+    )
+{
+    KEVENT              Event;
+    IO_STATUS_BLOCK     StatusBlock;
+    PIRP                Irp;
+    PIO_STACK_LOCATION  StackLocation;
+    NTSTATUS            status;
+
+    ASSERT3U(KeGetCurrentIrql(), ==, PASSIVE_LEVEL);
+
+    KeInitializeEvent(&Event, NotificationEvent, FALSE);
+    RtlZeroMemory(&StatusBlock, sizeof(IO_STATUS_BLOCK));
+
+    Irp = IoBuildSynchronousFsdRequest(IRP_MJ_PNP,
+                                       Fdo->LowerDeviceObject,
+                                       NULL,
+                                       0,
+                                       NULL,
+                                       &Event,
+                                       &StatusBlock);
+
+    status = STATUS_UNSUCCESSFUL;
+    if (Irp == NULL)
+        goto fail1;
+
+    StackLocation = IoGetNextIrpStackLocation(Irp);
+    StackLocation->MinorFunction = IRP_MN_QUERY_INTERFACE;
+
+    StackLocation->Parameters.QueryInterface.InterfaceType = &GUID_BUS_INTERFACE_STANDARD;
+    StackLocation->Parameters.QueryInterface.Size = sizeof (BUS_INTERFACE_STANDARD);
+    StackLocation->Parameters.QueryInterface.Version = 1;
+    StackLocation->Parameters.QueryInterface.Interface = (PINTERFACE)&Fdo->LowerBusInterface;
+    
+    Irp->IoStatus.Status = STATUS_NOT_SUPPORTED;
+
+    status = IoCallDriver(Fdo->LowerDeviceObject, Irp);
+    if (status == STATUS_PENDING) {
+        (VOID) KeWaitForSingleObject(&Event,
+                                     Executive,
+                                     KernelMode,
+                                     FALSE,
+                                     NULL);
+        status = StatusBlock.Status;
+    }
+
+    if (!NT_SUCCESS(status))
+        goto fail2;
+
+    status = STATUS_INVALID_PARAMETER;
+    if (Fdo->LowerBusInterface.Version != 1)
+        goto fail3;
+
+    return STATUS_SUCCESS;
+
+fail3:
+    Error("fail3\n");
+
+fail2:
+    Error("fail2\n");
+
+fail1:
+    Error("fail1 (%08x)\n", status);
+
+    return status;
+}
+
+static FORCEINLINE VOID
+__FdoReleaseLowerBusInterface(
+    IN  PXENVIF_FDO         Fdo
+    )
+{
+    PBUS_INTERFACE_STANDARD BusInterface;
+
+    BusInterface = &Fdo->LowerBusInterface;
+    BusInterface->InterfaceDereference(BusInterface->Context);
+
+    RtlZeroMemory(BusInterface, sizeof (BUS_INTERFACE_STANDARD));
+}
+
 static NTSTATUS
 FdoQueryEvtchnInterface(
     IN  PXENVIF_FDO             Fdo
@@ -2867,18 +3053,18 @@ fail1:
 
 NTSTATUS
 FdoCreate(
-    IN  PDEVICE_OBJECT  PhysicalDeviceObject
+    IN  PDEVICE_OBJECT      PhysicalDeviceObject
     )
 {
-    PDEVICE_OBJECT      FunctionDeviceObject;
-    PXENVIF_DX          Dx;
-    PXENVIF_FDO         Fdo;
-    WCHAR               Name[MAXNAMELEN * sizeof (WCHAR)];
-    ULONG               Size;
-    NTSTATUS            status;
+    PDEVICE_OBJECT          FunctionDeviceObject;
+    PXENVIF_DX              Dx;
+    PXENVIF_FDO             Fdo;
+    PBUS_INTERFACE_STANDARD BusInterface;
+    USHORT                  DeviceID;
+    NTSTATUS                status;
 
 #pragma prefast(suppress:28197) // Possibly leaking memory 'FunctionDeviceObject'
-    status = IoCreateDevice(DriverObject,
+    status = IoCreateDevice(DriverGetDriverObject(),
                             sizeof (XENVIF_DX),
                             NULL,
                             FILE_DEVICE_BUS_EXTENDER,
@@ -2916,17 +3102,23 @@ FdoCreate(
     if (!NT_SUCCESS(status))
         goto fail4;
 
-    status = IoGetDeviceProperty(PhysicalDeviceObject,
-                                 DevicePropertyLocationInformation,
-                                 sizeof (Name),
-                                 Name,
-                                 &Size);
+    status = __FdoAcquireLowerBusInterface(Fdo);
     if (!NT_SUCCESS(status))
         goto fail5;
 
-    status = __FdoSetName(Fdo, Name);
-    if (!NT_SUCCESS(status))
+    BusInterface = &Fdo->LowerBusInterface;
+
+    status = STATUS_UNSUCCESSFUL;
+    if (BusInterface->GetBusData(BusInterface->Context,
+                                 PCI_WHICHSPACE_CONFIG,
+                                 &DeviceID,
+                                 FIELD_OFFSET(PCI_COMMON_HEADER, DeviceID),
+                                 FIELD_SIZE(PCI_COMMON_HEADER, DeviceID)) == 0)
         goto fail6;
+
+    __FdoSetVendorName(Fdo, DeviceID);
+
+    __FdoSetName(Fdo);
 
     status = FdoQueryEvtchnInterface(Fdo);
     if (!NT_SUCCESS(status))
@@ -2988,8 +3180,12 @@ fail8:
 fail7:
     Error("fail7\n");
 
+    RtlZeroMemory(Fdo->VendorName, MAXNAMELEN);
+
 fail6:
     Error("fail6\n");
+
+    __FdoReleaseLowerBusInterface(Fdo);
 
 fail5:
     Error("fail5\n");
@@ -3049,7 +3245,7 @@ FdoDestroy(
 
     Dx->Fdo = NULL;
 
-    RtlZeroMemory(&Fdo->Mutex, sizeof (XENVIF_MUTEX));
+    RtlZeroMemory(&Fdo->Mutex, sizeof (MUTEX));
 
     Fdo->EmulatedInterface = NULL;
     Fdo->SuspendInterface = NULL;
@@ -3057,6 +3253,10 @@ FdoDestroy(
     Fdo->StoreInterface = NULL;
     Fdo->DebugInterface = NULL;
     Fdo->EvtchnInterface = NULL;
+
+    RtlZeroMemory(Fdo->VendorName, MAXNAMELEN);
+
+    __FdoReleaseLowerBusInterface(Fdo);
 
     ThreadAlert(Fdo->DevicePowerThread);
     ThreadJoin(Fdo->DevicePowerThread);

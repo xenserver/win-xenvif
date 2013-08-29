@@ -45,20 +45,9 @@ RegistryTeardown(
     );
 
 extern NTSTATUS
-RegistryOpenSubKey(
-    IN  PCHAR       Name,
+RegistryOpenServiceKey(
     IN  ACCESS_MASK DesiredAccess,
     OUT PHANDLE     Key
-    );
-
-extern NTSTATUS
-RegistryCreateSubKey(
-    IN  PCHAR       Name
-    );
-
-extern NTSTATUS
-RegistryDeleteSubKey(
-    IN  PCHAR       Name
     );
 
 extern NTSTATUS
@@ -73,6 +62,40 @@ RegistryOpenHardwareKey(
     IN  PDEVICE_OBJECT  DeviceObject,
     IN  ACCESS_MASK     DesiredAccess,
     OUT PHANDLE         Key
+    );
+
+extern NTSTATUS
+RegistryOpenSubKey(
+    IN  HANDLE      Key,
+    IN  PCHAR       Name,
+    IN  ACCESS_MASK DesiredAccess,
+    OUT PHANDLE     SubKey
+    );
+
+extern NTSTATUS
+RegistryCreateSubKey(
+    IN  HANDLE      Key,
+    IN  PCHAR       Name
+    );
+
+extern NTSTATUS
+RegistryDeleteSubKey(
+    IN  HANDLE      Key,
+    IN  PCHAR       Name
+    );
+
+extern NTSTATUS
+RegistryEnumerateSubKeys(
+    IN  HANDLE      Key,
+    IN  NTSTATUS    (*Callback)(PVOID, HANDLE, PCHAR),
+    IN  PVOID       Context
+    );
+
+extern NTSTATUS
+RegistryEnumerateValues(
+    IN  HANDLE      Key,
+    IN  NTSTATUS    (*Callback)(PVOID, HANDLE, PCHAR),
+    IN  PVOID       Context
     );
 
 extern NTSTATUS
@@ -94,6 +117,12 @@ RegistryQuerySzValue(
     IN  HANDLE          Key,
     IN  PCHAR           Name,
     OUT PANSI_STRING    *Array
+    );
+
+extern NTSTATUS
+RegistryQuerySystemStartOption(
+    IN  PCHAR           Name,
+    OUT PANSI_STRING    *Option
     );
 
 extern VOID

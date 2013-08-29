@@ -51,7 +51,7 @@
 #include "tcpip.h"
 #include "receiver.h"
 #include "transmitter.h"
-#include "log.h"
+#include "dbg_print.h"
 #include "assert.h"
 
 struct _XENVIF_FRONTEND {

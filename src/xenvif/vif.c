@@ -39,7 +39,7 @@
 #include "vif.h"
 #include "mrsw.h"
 #include "thread.h"
-#include "log.h"
+#include "dbg_print.h"
 #include "assert.h"
 
 #define VIF_POOL   ' FIV'

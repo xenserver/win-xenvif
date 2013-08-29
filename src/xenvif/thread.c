@@ -33,7 +33,7 @@
 #include <util.h>
 
 #include "thread.h"
-#include "log.h"
+#include "dbg_print.h"
 #include "assert.h"
 
 #define THREAD_POOL 'ERHT'

@@ -55,7 +55,12 @@ xenvif_coinst_@MAJOR_VERSION@_@MINOR_VERSION@_@MICRO_VERSION@_@BUILD_NUMBER@.dll
 %Citrix%=Citrix,NT$ARCH$
 
 [Citrix.NT$ARCH$]
-%DriverDesc%=XenVif_Inst,XENBUS\CLASS_VIF&REV_02
+; DisplayName		Section		DeviceID
+; -----------		-------		--------
+
+%XenVifDesc%		=XenVif_Inst,	XENBUS\VEN_XSC000&DEV_VIF&REV_00000001
+%XenVifDesc%		=XenVif_Inst,	XENBUS\VEN_XS0001&DEV_VIF&REV_00000001
+%XenVifDesc%		=XenVif_Inst,	XENBUS\VEN_XS0002&DEV_VIF&REV_00000001
 
 [XenVif_Inst] 
 CopyFiles=XenVif_Copyfiles
@@ -75,7 +80,7 @@ LoadOrderGroup="NDIS"
 AddReg = XenVif_Parameters
 
 [XenVif_Parameters]
-HKR,"Parameters","ReceiverMaximumProtocol",0x00010001,0x00000000
+HKR,"Parameters",,0x00000010
 
 [XenVif_Inst.CoInstallers]
 CopyFiles=CoInst_CopyFiles
@@ -87,8 +92,8 @@ HKR,,CoInstallers32,0x00010000,"xenvif_coinst_@MAJOR_VERSION@_@MINOR_VERSION@_@M
 [Strings] 
 
 Citrix="Citrix Systems Inc." 
-DiskDesc="Citrix Tools for Virtual Machines" 
-DriverDesc="Citrix VIF Class"
+DiskDesc="XenServer Tools for Virtual Machines" 
+XenVifDesc="XenServer PV Network Class"
 
 SERVICE_BOOT_START=0x0 
 SERVICE_SYSTEM_START=0x1 

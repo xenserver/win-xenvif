@@ -78,6 +78,32 @@ __ffs(
 #define __ffu(_mask)  \
         __ffs(~(_mask))
 
+static FORCEINLINE VOID
+__CpuId(
+    IN  ULONG   Leaf,
+    OUT PULONG  EAX OPTIONAL,
+    OUT PULONG  EBX OPTIONAL,
+    OUT PULONG  ECX OPTIONAL,
+    OUT PULONG  EDX OPTIONAL
+    )
+{
+    ULONG       Value[4] = {0};
+
+    __cpuid(Value, Leaf);
+
+    if (EAX)
+        *EAX = Value[0];
+
+    if (EBX)
+        *EBX = Value[1];
+
+    if (ECX)
+        *ECX = Value[2];
+
+    if (EDX)
+        *EDX = Value[3];
+}
+
 static FORCEINLINE LONG
 __InterlockedAdd(
     IN  LONG    *Value,
@@ -274,6 +300,44 @@ __FreePage(
     MmUnmapLockedPages(MdlMappedSystemVa, Mdl);
 
     MmFreePagesFromMdl(Mdl);
+}
+
+static FORCEINLINE PWCHAR
+__wcstok_r(
+    IN      PWCHAR  Buffer,
+    IN      PWCHAR  Delimiter,
+    IN OUT  PWCHAR  *Context
+    )
+{
+    PWCHAR          Token;
+    PWCHAR          End;
+
+    if (Buffer != NULL)
+        *Context = Buffer;
+
+    Token = *Context;
+
+    if (Token == NULL)
+        return NULL;
+
+    while (*Token != L'\0' &&
+           wcschr(Delimiter, *Token) != NULL)
+        Token++;
+
+    if (*Token == L'\0')
+        return NULL;
+
+    End = Token + 1;
+    while (*End != L'\0' &&
+           wcschr(Delimiter, *End) == NULL)
+        End++;
+
+    if (*End != L'\0')
+        *End++ = L'\0';
+
+    *Context = End;
+
+    return Token;
 }
 
 #endif  // _UTIL_H

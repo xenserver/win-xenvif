@@ -39,7 +39,7 @@
 #include <vif_interface.h>
 
 #include "parse.h"
-#include "log.h"
+#include "dbg_print.h"
 #include "assert.h"
 
 static FORCEINLINE NTSTATUS

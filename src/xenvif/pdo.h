@@ -74,6 +74,40 @@ PdoGetDeviceObject(
     IN  PXENVIF_PDO Pdo
     );
 
+extern PDMA_ADAPTER
+PdoGetDmaAdapter(
+    IN  PXENVIF_PDO         Pdo,
+    IN  PDEVICE_DESCRIPTION DeviceDescriptor,
+    OUT PULONG              NumberOfMapRegisters
+    );
+
+extern BOOLEAN
+PdoTranslateBusAddress(
+    IN      PXENVIF_PDO         Pdo,
+    IN      PHYSICAL_ADDRESS    BusAddress,
+    IN      ULONG               Length,
+    IN OUT  PULONG              AddressSpace,
+    OUT     PPHYSICAL_ADDRESS   TranslatedAddress
+    );
+
+extern ULONG
+PdoSetBusData(
+    IN  PXENVIF_PDO     Pdo,
+    IN  ULONG           DataType,
+    IN  PVOID           Buffer,
+    IN  ULONG           Offset,
+    IN  ULONG           Length
+    );
+
+extern ULONG
+PdoGetBusData(
+    IN  PXENVIF_PDO     Pdo,
+    IN  ULONG           DataType,
+    IN  PVOID           Buffer,
+    IN  ULONG           Offset,
+    IN  ULONG           Length
+    );
+
 extern ULONG
 PdoGetLuidIndex(
     IN  PXENVIF_PDO Pdo

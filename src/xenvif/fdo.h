@@ -85,9 +85,38 @@ FdoGetPhysicalDeviceObject(
     IN  PXENVIF_FDO Fdo
     );
 
-extern VOID
-FdoReap(
-    IN  PXENVIF_FDO Fdo
+extern PDMA_ADAPTER
+FdoGetDmaAdapter(
+    IN  PXENVIF_FDO         Fdo,
+    IN  PDEVICE_DESCRIPTION DeviceDescriptor,
+    OUT PULONG              NumberOfMapRegisters
+    );
+
+extern BOOLEAN
+FdoTranslateBusAddress(
+    IN      PXENVIF_FDO         Fdo,
+    IN      PHYSICAL_ADDRESS    BusAddress,
+    IN      ULONG               Length,
+    IN OUT  PULONG              AddressSpace,
+    OUT     PPHYSICAL_ADDRESS   TranslatedAddress
+    );
+
+extern ULONG
+FdoSetBusData(
+    IN  PXENVIF_FDO     Fdo,
+    IN  ULONG           DataType,
+    IN  PVOID           Buffer,
+    IN  ULONG           Offset,
+    IN  ULONG           Length
+    );
+
+extern ULONG
+FdoGetBusData(
+    IN  PXENVIF_FDO     Fdo,
+    IN  ULONG           DataType,
+    IN  PVOID           Buffer,
+    IN  ULONG           Offset,
+    IN  ULONG           Length
     );
 
 extern NTSTATUS

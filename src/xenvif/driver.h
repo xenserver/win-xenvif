@@ -32,25 +32,21 @@
 #ifndef _XENVIF_DRIVER_H
 #define _XENVIF_DRIVER_H
 
+extern PDRIVER_OBJECT
+DriverGetDriverObject(
+    VOID
+    );
+
+extern HANDLE
+DriverGetParametersKey(
+    VOID
+    );
+
 typedef struct _XENVIF_PDO  XENVIF_PDO, *PXENVIF_PDO;
 typedef struct _XENVIF_FDO  XENVIF_FDO, *PXENVIF_FDO;
 
 #include "fdo.h"
 #include "pdo.h"
-
-extern PDRIVER_OBJECT   DriverObject;
-
-typedef struct _XENVIF_PARAMETERS {
-    PANSI_STRING    UnsupportedDevices;
-    ULONG           ReceiverMaximumProtocol;
-    ULONG           ReceiverCalculateChecksums;
-    ULONG           ReceiverAllowGsoPackets;
-    ULONG           ReceiverIpAlignOffset;
-    ULONG           ReceiverAlwaysPullup;
-    ULONG           CreatePDOs;
-} XENVIF_PARAMETERS, *PXENVIF_PARAMETERS;
-
-extern XENVIF_PARAMETERS    DriverParameters;
 
 #define MAX_DEVICE_ID_LEN   200
 

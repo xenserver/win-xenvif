@@ -40,7 +40,7 @@
 #include "frontend.h"
 #include "mac.h"
 #include "thread.h"
-#include "log.h"
+#include "dbg_print.h"
 #include "assert.h"
 
 struct _XENVIF_MAC {

@@ -43,28 +43,18 @@
 #include "names.h"
 #include "fdo.h"
 #include "pdo.h"
+#include "bus.h"
 #include "frontend.h"
 #include "vif.h"
 #include "driver.h"
 #include "registry.h"
 #include "thread.h"
-#include "log.h"
+#include "dbg_print.h"
 #include "assert.h"
 
 #define PDO_REVISION    0x02
 
 #define PDO_POOL 'ODP'
-
-typedef enum _PDO_RESOURCE_TYPE {
-    MEMORY_RESOURCE = 0,
-    INTERRUPT_RESOURCE,
-    RESOURCE_COUNT
-} PDO_RESOURCE_TYPE, *PPDO_RESOURCE_TYPE;
-
-typedef struct _PDO_RESOURCE {
-    CM_PARTIAL_RESOURCE_DESCRIPTOR Raw;
-    CM_PARTIAL_RESOURCE_DESCRIPTOR Translated;
-} PDO_RESOURCE, *PPDO_RESOURCE;
 
 struct _XENVIF_PDO {
     PXENVIF_DX                  Dx;
@@ -79,6 +69,8 @@ struct _XENVIF_PDO {
     const CHAR                  *Reason;
     ULONG                       LuidIndex;
     PCHAR                       Address;
+
+    BUS_INTERFACE_STANDARD      BusInterface;
 
     PXENVIF_FRONTEND            Frontend;
     XENVIF_VIF_INTERFACE        VifInterface;
@@ -244,7 +236,10 @@ __PdoSetName(
     PXENVIF_DX          Dx = Pdo->Dx;
     NTSTATUS            status;
 
-    status = RtlStringCbPrintfA(Dx->Name, MAX_DEVICE_ID_LEN, "%Z", Ansi);
+    status = RtlStringCbPrintfA(Dx->Name, 
+                                MAX_DEVICE_ID_LEN, 
+                                "%Z", 
+                                Ansi);
     ASSERT(NT_SUCCESS(status));
 }
 
@@ -461,6 +456,74 @@ PdoGetVifInterface(
     return __PdoGetVifInterface(Pdo);
 }
 
+PDMA_ADAPTER
+PdoGetDmaAdapter(
+    IN  PXENVIF_PDO         Pdo,
+    IN  PDEVICE_DESCRIPTION DeviceDescriptor,
+    OUT PULONG              NumberOfMapRegisters
+    )
+{
+    Trace("<===>\n");
+
+    return FdoGetDmaAdapter(__PdoGetFdo(Pdo),
+                            DeviceDescriptor,
+                            NumberOfMapRegisters);
+}
+
+BOOLEAN
+PdoTranslateBusAddress(
+    IN      PXENVIF_PDO         Pdo,
+    IN      PHYSICAL_ADDRESS    BusAddress,
+    IN      ULONG               Length,
+    IN OUT  PULONG              AddressSpace,
+    OUT     PPHYSICAL_ADDRESS   TranslatedAddress
+    )
+{
+    Trace("<===>\n");
+
+    return FdoTranslateBusAddress(__PdoGetFdo(Pdo),
+                                  BusAddress,
+                                  Length,
+                                  AddressSpace,
+                                  TranslatedAddress);
+}
+
+ULONG
+PdoSetBusData(
+    IN  PXENVIF_PDO     Pdo,
+    IN  ULONG           DataType,
+    IN  PVOID           Buffer,
+    IN  ULONG           Offset,
+    IN  ULONG           Length
+    )
+{
+    Trace("<===>\n");
+
+    return FdoSetBusData(__PdoGetFdo(Pdo),
+                         DataType,
+                         Buffer,
+                         Offset,
+                         Length);
+}
+
+ULONG
+PdoGetBusData(
+    IN  PXENVIF_PDO     Pdo,
+    IN  ULONG           DataType,
+    IN  PVOID           Buffer,
+    IN  ULONG           Offset,
+    IN  ULONG           Length
+    )
+{
+    Trace("<===>\n");
+
+    return FdoGetBusData(__PdoGetFdo(Pdo),
+                         DataType,
+                         Buffer,
+                         Offset,
+                         Length);
+}
+
 VOID
 PdoRequestEject(
     IN  PXENVIF_PDO Pdo
@@ -488,10 +551,10 @@ __PdoD3ToD0(
     if (EmulatedInterface != NULL) {
         EMULATED(Acquire, EmulatedInterface);
 
-        Present = EMULATED(IsPresent,
+        Present = EMULATED(IsDevicePresent,
                            EmulatedInterface,
-                           "VIF",
-                           __PdoGetName(Pdo));
+                           NULL,
+                           NULL);
 
         EMULATED(Release, EmulatedInterface);
     } else {
@@ -1959,7 +2022,7 @@ PdoCreate(
     NTSTATUS            status;
 
 #pragma prefast(suppress:28197) // Possibly leaking memory 'PhysicalDeviceObject'
-    status = IoCreateDevice(DriverObject,
+    status = IoCreateDevice(DriverGetDriverObject(),
                             sizeof(XENVIF_DX),
                             NULL,
                             FILE_DEVICE_UNKNOWN,
@@ -1996,13 +2059,17 @@ PdoCreate(
 
     __PdoSetName(Pdo, Name);
 
-    status = FrontendInitialize(Pdo, &Pdo->Frontend);
+    status = BusInitialize(Pdo, &Pdo->BusInterface);
     if (!NT_SUCCESS(status))
         goto fail5;
 
-    status = VifInitialize(Pdo, &Pdo->VifInterface);
+    status = FrontendInitialize(Pdo, &Pdo->Frontend);
     if (!NT_SUCCESS(status))
         goto fail6;
+
+    status = VifInitialize(Pdo, &Pdo->VifInterface);
+    if (!NT_SUCCESS(status))
+        goto fail7;
 
     Info("%p (XENVIF\\DEVICE&REV_%02X#%s)\n",
          PhysicalDeviceObject,
@@ -2016,11 +2083,17 @@ PdoCreate(
 
     return STATUS_SUCCESS;
 
-fail6:
-    Error("fail6\n");
+fail7:
+    Error("fail7\n");
 
     FrontendTeardown(Pdo->Frontend);
     Pdo->Frontend = NULL;    
+
+
+fail6:
+    Error("fail6\n");
+
+    BusTeardown(&Pdo->BusInterface);
 
 fail5:
     Error("fail5\n");
@@ -2083,6 +2156,8 @@ PdoDestroy(
 
     FrontendTeardown(__PdoGetFrontend(Pdo));
     Pdo->Frontend = NULL;    
+
+    BusTeardown(&Pdo->BusInterface);
 
     ThreadAlert(Pdo->DevicePowerThread);
     ThreadJoin(Pdo->DevicePowerThread);

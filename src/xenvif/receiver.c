@@ -46,6 +46,7 @@
 #include "ethernet.h"
 #include "tcpip.h"
 #include "pdo.h"
+#include "registry.h"
 #include "frontend.h"
 #include "pool.h"
 #include "checksum.h"
@@ -54,7 +55,7 @@
 #include "vif.h"
 #include "receiver.h"
 #include "driver.h"
-#include "log.h"
+#include "dbg_print.h"
 #include "assert.h"
 
 #define RECEIVER_POOL    'ECER'
@@ -175,6 +176,12 @@ struct _XENVIF_RECEIVER {
     LONG                        Loaned;
     LONG                        Returned;
     KEVENT                      Event;
+
+    ULONG                       MaximumProtocol;
+    ULONG                       CalculateChecksums;
+    ULONG                       AllowGsoPackets;
+    ULONG                       IpAlignOffset;
+    ULONG                       AlwaysPullup;
 
     PXENBUS_DEBUG_INTERFACE     DebugInterface;
     PXENBUS_STORE_INTERFACE     StoreInterface;
@@ -331,17 +338,16 @@ __RingPutMdl(
 }
 
 static DECLSPEC_NOINLINE VOID
-PacketProcessTag(
-    IN  PXENVIF_RECEIVER_PACKET         Packet,
-    IN  PXENVIF_OFFLOAD_OPTIONS         OffloadOptions,
-    IN  PRECEIVER_OFFLOAD_STATISTICS    OffloadStatistics
+RingProcessTag(
+    IN  PRECEIVER_RING           Ring,
+    IN  PXENVIF_RECEIVER_PACKET  Packet
     )
 {
-    PXENVIF_PACKET_INFO                 Info;
-    ULONG                               PayloadLength;
-    PUCHAR                              StartVa;
-    PETHERNET_HEADER                    EthernetHeader;
-    ULONG                               Offset;
+    PXENVIF_PACKET_INFO          Info;
+    ULONG                        PayloadLength;
+    PUCHAR                       StartVa;
+    PETHERNET_HEADER             EthernetHeader;
+    ULONG                        Offset;
 
     Info = &Packet->Info;
 
@@ -355,7 +361,7 @@ PacketProcessTag(
     EthernetHeader = (PETHERNET_HEADER)(StartVa + Info->EthernetHeader.Offset);
 
     if (!ETHERNET_HEADER_IS_TAGGED(EthernetHeader) ||
-        OffloadOptions->OffloadTagManipulation == 0)
+        Ring->OffloadOptions.OffloadTagManipulation == 0)
         return;
 
     Packet->TagControlInformation = NTOHS(EthernetHeader->Tagged.Tag.ControlInformation);
@@ -397,22 +403,24 @@ PacketProcessTag(
 
     ASSERT3U(PayloadLength, ==, Packet->Length - Info->Length);
 
-    OffloadStatistics->TagRemoved++;
+    Ring->OffloadStatistics.TagRemoved++;
 }
 
 static DECLSPEC_NOINLINE VOID
-PacketProcessChecksum(
-    IN  PXENVIF_RECEIVER_PACKET         Packet,
-    IN  PXENVIF_OFFLOAD_OPTIONS         OffloadOptions,
-    IN  PRECEIVER_OFFLOAD_STATISTICS    OffloadStatistics
+RingProcessChecksum(
+    IN  PRECEIVER_RING          Ring,
+    IN  PXENVIF_RECEIVER_PACKET Packet
     )
 {
-    PXENVIF_PACKET_INFO                 Info;
-    XENVIF_PACKET_PAYLOAD               Payload;
-    uint16_t                            flags;
-    PUCHAR                              StartVa;
-    PIP_HEADER                          IpHeader;
-    BOOLEAN                             IsAFragment;
+    PXENVIF_RECEIVER            Receiver;
+    PXENVIF_PACKET_INFO         Info;
+    XENVIF_PACKET_PAYLOAD       Payload;
+    uint16_t                    flags;
+    PUCHAR                      StartVa;
+    PIP_HEADER                  IpHeader;
+    BOOLEAN                     IsAFragment;
+
+    Receiver = Ring->Receiver;
 
     Info = &Packet->Info;
 
@@ -442,7 +450,7 @@ PacketProcessChecksum(
     if (IpHeader->Version == 4) {
         BOOLEAN OffloadChecksum;
 
-        if (OffloadOptions->OffloadIpVersion4HeaderChecksum)
+        if (Ring->OffloadOptions.OffloadIpVersion4HeaderChecksum)
             OffloadChecksum = TRUE;
         else
             OffloadChecksum = FALSE;
@@ -456,22 +464,22 @@ PacketProcessChecksum(
             Embedded = IpHeader->Version4.Checksum;
 
             Calculated = ChecksumIpVersion4Header(StartVa, Info);
-            OffloadStatistics->IpVersion4HeaderChecksumCalculated++;
+            Ring->OffloadStatistics.IpVersion4HeaderChecksumCalculated++;
 
             if (Embedded == Calculated) {
                 Packet->Flags.IpChecksumSucceeded = 1;
-                OffloadStatistics->IpVersion4HeaderChecksumSucceeded++;
+                Ring->OffloadStatistics.IpVersion4HeaderChecksumSucceeded++;
             } else {
                 Packet->Flags.IpChecksumFailed = 1;
-                OffloadStatistics->IpVersion4HeaderChecksumFailed++;
+                Ring->OffloadStatistics.IpVersion4HeaderChecksumFailed++;
             }
         }
 
         if (!OffloadChecksum ||
-            OffloadOptions->NeedChecksumValue ||
-            DriverParameters.ReceiverCalculateChecksums) {  // Checksum must be present
+            Ring->OffloadOptions.NeedChecksumValue ||
+            Receiver->CalculateChecksums) { // Checksum must be present
             Packet->Flags.IpChecksumPresent = 1;
-            OffloadStatistics->IpVersion4HeaderChecksumPresent++;
+            Ring->OffloadStatistics.IpVersion4HeaderChecksumPresent++;
         } else {
             IpHeader->Version4.Checksum = 0;
         }
@@ -489,9 +497,9 @@ PacketProcessChecksum(
 
         TcpHeader = (PTCP_HEADER)(StartVa + Info->TcpHeader.Offset);
 
-        if (IpHeader->Version == 4 && OffloadOptions->OffloadIpVersion4TcpChecksum)
+        if (IpHeader->Version == 4 && Ring->OffloadOptions.OffloadIpVersion4TcpChecksum)
             OffloadChecksum = TRUE;
-        else if (IpHeader->Version == 6 && OffloadOptions->OffloadIpVersion6TcpChecksum)
+        else if (IpHeader->Version == 6 && Ring->OffloadOptions.OffloadIpVersion6TcpChecksum)
             OffloadChecksum = TRUE;
         else
             OffloadChecksum = FALSE;
@@ -501,9 +509,9 @@ PacketProcessChecksum(
                 Packet->Flags.TcpChecksumSucceeded = 1;
 
                 if (IpHeader->Version == 4)
-                    OffloadStatistics->IpVersion4TcpChecksumSucceeded++;
+                    Ring->OffloadStatistics.IpVersion4TcpChecksumSucceeded++;
                 else
-                    OffloadStatistics->IpVersion6TcpChecksumSucceeded++;
+                    Ring->OffloadStatistics.IpVersion6TcpChecksumSucceeded++;
 
             } else {                                // Checksum is present but is not validated
                 USHORT  Embedded;
@@ -517,42 +525,42 @@ PacketProcessChecksum(
                 Calculated = ChecksumTcpPacket(StartVa, Info, Calculated, &Payload);
 
                 if (IpHeader->Version == 4)
-                    OffloadStatistics->IpVersion4TcpChecksumCalculated++;
+                    Ring->OffloadStatistics.IpVersion4TcpChecksumCalculated++;
                 else
-                    OffloadStatistics->IpVersion6TcpChecksumCalculated++;
+                    Ring->OffloadStatistics.IpVersion6TcpChecksumCalculated++;
 
                 if (Embedded == Calculated) {
                     Packet->Flags.TcpChecksumSucceeded = 1;
 
                     if (IpHeader->Version == 4)
-                        OffloadStatistics->IpVersion4TcpChecksumSucceeded++;
+                        Ring->OffloadStatistics.IpVersion4TcpChecksumSucceeded++;
                     else
-                        OffloadStatistics->IpVersion6TcpChecksumSucceeded++;
+                        Ring->OffloadStatistics.IpVersion6TcpChecksumSucceeded++;
 
                 } else {
                     Packet->Flags.TcpChecksumFailed = 1;
 
                     if (IpHeader->Version == 4)
-                        OffloadStatistics->IpVersion4TcpChecksumFailed++;
+                        Ring->OffloadStatistics.IpVersion4TcpChecksumFailed++;
                     else
-                        OffloadStatistics->IpVersion6TcpChecksumFailed++;
+                        Ring->OffloadStatistics.IpVersion6TcpChecksumFailed++;
                 }
             }
         }
         
         if (!OffloadChecksum ||
-            OffloadOptions->NeedChecksumValue ||
-            DriverParameters.ReceiverCalculateChecksums) {  // Checksum must be present
-            if (flags & NETRXF_csum_blank) {                // Checksum is not present
+            Ring->OffloadOptions.NeedChecksumValue ||
+            Receiver->CalculateChecksums) {     // Checksum must be present
+            if (flags & NETRXF_csum_blank) {    // Checksum is not present
                 USHORT  Calculated;
 
                 Calculated = ChecksumPseudoHeader(StartVa, Info);
                 Calculated = ChecksumTcpPacket(StartVa, Info, Calculated, &Payload);
 
                 if (IpHeader->Version == 4)
-                    OffloadStatistics->IpVersion4TcpChecksumCalculated++;
+                    Ring->OffloadStatistics.IpVersion4TcpChecksumCalculated++;
                 else
-                    OffloadStatistics->IpVersion6TcpChecksumCalculated++;
+                    Ring->OffloadStatistics.IpVersion6TcpChecksumCalculated++;
 
                 TcpHeader->Checksum = Calculated;
             }
@@ -560,22 +568,21 @@ PacketProcessChecksum(
             Packet->Flags.TcpChecksumPresent = 1;
 
             if (IpHeader->Version == 4)
-                OffloadStatistics->IpVersion4TcpChecksumPresent++;
+                Ring->OffloadStatistics.IpVersion4TcpChecksumPresent++;
             else
-                OffloadStatistics->IpVersion6TcpChecksumPresent++;
+                Ring->OffloadStatistics.IpVersion6TcpChecksumPresent++;
         } else {
             TcpHeader->Checksum = 0;
         }
-
     } else if (Info->UdpHeader.Length != 0 && !IsAFragment) {
         PUDP_HEADER     UdpHeader;
         BOOLEAN         OffloadChecksum;
 
         UdpHeader = (PUDP_HEADER)(StartVa + Info->UdpHeader.Offset);
 
-        if (IpHeader->Version == 4 && OffloadOptions->OffloadIpVersion4UdpChecksum)
+        if (IpHeader->Version == 4 && Ring->OffloadOptions.OffloadIpVersion4UdpChecksum)
             OffloadChecksum = TRUE;
-        else if (IpHeader->Version == 6 && OffloadOptions->OffloadIpVersion6UdpChecksum)
+        else if (IpHeader->Version == 6 && Ring->OffloadOptions.OffloadIpVersion6UdpChecksum)
             OffloadChecksum = TRUE;
         else
             OffloadChecksum = FALSE;
@@ -585,9 +592,9 @@ PacketProcessChecksum(
                 Packet->Flags.UdpChecksumSucceeded = 1;
 
                 if (IpHeader->Version == 4)
-                    OffloadStatistics->IpVersion4UdpChecksumSucceeded++;
+                    Ring->OffloadStatistics.IpVersion4UdpChecksumSucceeded++;
                 else
-                    OffloadStatistics->IpVersion6UdpChecksumSucceeded++;
+                    Ring->OffloadStatistics.IpVersion6UdpChecksumSucceeded++;
 
             } else {                                // Checksum is present but is not validated
                 USHORT  Embedded;
@@ -601,44 +608,43 @@ PacketProcessChecksum(
                 Calculated = ChecksumUdpPacket(StartVa, Info, Calculated, &Payload);
 
                 if (IpHeader->Version == 4)
-                    OffloadStatistics->IpVersion4UdpChecksumCalculated++;
+                    Ring->OffloadStatistics.IpVersion4UdpChecksumCalculated++;
                 else
-                    OffloadStatistics->IpVersion6UdpChecksumCalculated++;
+                    Ring->OffloadStatistics.IpVersion6UdpChecksumCalculated++;
 
                 if (Embedded == Calculated) {
                     Packet->Flags.UdpChecksumSucceeded = 1;
 
                     if (IpHeader->Version == 4)
-                        OffloadStatistics->IpVersion4UdpChecksumSucceeded++;
+                        Ring->OffloadStatistics.IpVersion4UdpChecksumSucceeded++;
                     else
-                        OffloadStatistics->IpVersion6UdpChecksumSucceeded++;
+                        Ring->OffloadStatistics.IpVersion6UdpChecksumSucceeded++;
 
                 } else {
                     Packet->Flags.UdpChecksumFailed = 1;
 
                     if (IpHeader->Version == 4)
-                        OffloadStatistics->IpVersion4UdpChecksumFailed++;
+                        Ring->OffloadStatistics.IpVersion4UdpChecksumFailed++;
                     else
-                        OffloadStatistics->IpVersion6UdpChecksumFailed++;
+                        Ring->OffloadStatistics.IpVersion6UdpChecksumFailed++;
 
                 }
             }
-
         }
 
         if (!OffloadChecksum ||
-            OffloadOptions->NeedChecksumValue ||
-            DriverParameters.ReceiverCalculateChecksums) {  // Checksum must be present
-            if (flags & NETRXF_csum_blank) {                // Checksum is not present
+            Ring->OffloadOptions.NeedChecksumValue ||
+            Receiver->CalculateChecksums) {     // Checksum must be present
+            if (flags & NETRXF_csum_blank) {    // Checksum is not present
                 USHORT  Calculated;
 
                 Calculated = ChecksumPseudoHeader(StartVa, Info);
                 Calculated = ChecksumUdpPacket(StartVa, Info, Calculated, &Payload);
 
                 if (IpHeader->Version == 4)
-                    OffloadStatistics->IpVersion4UdpChecksumCalculated++;
+                    Ring->OffloadStatistics.IpVersion4UdpChecksumCalculated++;
                 else
-                    OffloadStatistics->IpVersion6UdpChecksumCalculated++;
+                    Ring->OffloadStatistics.IpVersion6UdpChecksumCalculated++;
 
                 UdpHeader->Checksum = Calculated;
             }
@@ -646,9 +652,9 @@ PacketProcessChecksum(
             Packet->Flags.UdpChecksumPresent = 1;
 
             if (IpHeader->Version == 4)
-                OffloadStatistics->IpVersion4UdpChecksumPresent++;
+                Ring->OffloadStatistics.IpVersion4UdpChecksumPresent++;
             else
-                OffloadStatistics->IpVersion6UdpChecksumPresent++;
+                Ring->OffloadStatistics.IpVersion6UdpChecksumPresent++;
         } else {
             UdpHeader->Checksum = 0;
         }
@@ -1038,6 +1044,7 @@ __RingProcessLargePacket(
     OUT PLIST_ENTRY             List
     )
 {
+    PXENVIF_RECEIVER            Receiver;
     BOOLEAN                     Offload;
     PXENVIF_PACKET_INFO         Info;
     uint16_t                    flags;
@@ -1046,6 +1053,8 @@ __RingProcessLargePacket(
     PIP_HEADER                  IpHeader;
     ULONG                       Length;
     NTSTATUS                    status;
+
+    Receiver = Ring->Receiver;
 
     Info = &Packet->Info;
     
@@ -1165,7 +1174,7 @@ __RingProcessLargePacket(
         if (Payload.Length < Packet->MaximumSegmentSize)
             Packet->MaximumSegmentSize = 0;
 
-        if (DriverParameters.ReceiverAlwaysPullup != 0)
+        if (Receiver->AlwaysPullup != 0)
             __RingPullupPacket(Ring, Packet);
 
         ASSERT(IsZeroMemory(&Packet->ListEntry, sizeof (LIST_ENTRY)));
@@ -1246,7 +1255,7 @@ __RingProcessPacket(
     }
 
     // Copy in the extracted metadata
-    Packet->Offset = DriverParameters.ReceiverIpAlignOffset;
+    Packet->Offset = Receiver->IpAlignOffset;
     Packet->Length = Length;
     Packet->MaximumSegmentSize = MaximumSegmentSize;
     Packet->Cookie = Cookie;
@@ -1317,7 +1326,7 @@ __RingProcessPacket(
         // and, in practice, little else uses LLC so pull up all LLC
         // packets into a single fragment.
         if (Info->LLCSnapHeader.Length != 0 ||
-            DriverParameters.ReceiverAlwaysPullup != 0)
+            Receiver->AlwaysPullup != 0)
             __RingPullupPacket(Ring, Packet);
 
         ASSERT(IsZeroMemory(&Packet->ListEntry, sizeof (LIST_ENTRY)));
@@ -1380,13 +1389,8 @@ RingProcessPackets(
 
         Packet = CONTAINING_RECORD(ListEntry, XENVIF_RECEIVER_PACKET, ListEntry);
 
-        PacketProcessTag(Packet,
-                         &Ring->OffloadOptions,
-                         &Ring->OffloadStatistics);
-
-        PacketProcessChecksum(Packet,
-                              &Ring->OffloadOptions,
-                              &Ring->OffloadStatistics);
+        RingProcessTag(Ring, Packet);
+        RingProcessChecksum(Ring, Packet);
 
         Packet->Cookie = Ring;
 
@@ -3516,6 +3520,7 @@ ReceiverInitialize(
     OUT PXENVIF_RECEIVER    *Receiver
     )
 {
+    HANDLE                  ParametersKey;
     ULONG                   Done;
     NTSTATUS                status;
 
@@ -3524,6 +3529,52 @@ ReceiverInitialize(
     status = STATUS_NO_MEMORY;
     if (*Receiver == NULL)
         goto fail1;
+
+    ParametersKey = DriverGetParametersKey();
+
+    (*Receiver)->MaximumProtocol = 0;
+    (*Receiver)->CalculateChecksums = 1;
+    (*Receiver)->AllowGsoPackets = 1;
+    (*Receiver)->IpAlignOffset = 0;
+    (*Receiver)->AlwaysPullup = 0;
+
+    if (ParametersKey != NULL) {
+        ULONG   ReceiverMaximumProtocol;
+        ULONG   ReceiverCalculateChecksums;
+        ULONG   ReceiverAllowGsoPackets;
+        ULONG   ReceiverIpAlignOffset;
+        ULONG   ReceiverAlwaysPullup;
+
+        status = RegistryQueryDwordValue(ParametersKey,
+                                         "ReceiverMaximumProtocol",
+                                         &ReceiverMaximumProtocol);
+        if (NT_SUCCESS(status))
+            (*Receiver)->MaximumProtocol = ReceiverMaximumProtocol;
+
+        status = RegistryQueryDwordValue(ParametersKey,
+                                         "ReceiverCalculateChecksums",
+                                         &ReceiverCalculateChecksums);
+        if (NT_SUCCESS(status))
+            (*Receiver)->CalculateChecksums = ReceiverCalculateChecksums;
+
+        status = RegistryQueryDwordValue(ParametersKey,
+                                         "ReceiverAllowGsoPackets",
+                                         &ReceiverAllowGsoPackets);
+        if (NT_SUCCESS(status))
+            (*Receiver)->AllowGsoPackets = ReceiverAllowGsoPackets;
+
+        status = RegistryQueryDwordValue(ParametersKey,
+                                         "ReceiverIpAlignOffset",
+                                         &ReceiverIpAlignOffset);
+        if (NT_SUCCESS(status))
+            (*Receiver)->IpAlignOffset = ReceiverIpAlignOffset;
+
+        status = RegistryQueryDwordValue(ParametersKey,
+                                         "ReceiverAlwaysPullup",
+                                         &ReceiverAlwaysPullup);
+        if (NT_SUCCESS(status))
+            (*Receiver)->AlwaysPullup = ReceiverAlwaysPullup;
+    }
 
     InitializeListHead(&(*Receiver)->List);
     KeInitializeEvent(&(*Receiver)->Event, NotificationEvent, FALSE);
@@ -3566,6 +3617,12 @@ fail2:
 
     RtlZeroMemory(&(*Receiver)->Event, sizeof (KEVENT));
     RtlZeroMemory(&(*Receiver)->List, sizeof (LIST_ENTRY));
+
+    (*Receiver)->MaximumProtocol = 0;
+    (*Receiver)->CalculateChecksums = 0;
+    (*Receiver)->AllowGsoPackets = 0;
+    (*Receiver)->IpAlignOffset = 0;
+    (*Receiver)->AlwaysPullup = 0;
 
     ASSERT(IsZeroMemory(*Receiver, sizeof (XENVIF_RECEIVER)));
     __ReceiverFree(*Receiver);
@@ -3669,7 +3726,7 @@ ReceiverConnect(
     }
 
     MinimumProtocol = __max(MinimumProtocol, RECEIVER_MINIMUM_PROTOCOL);
-    MaximumProtocol = __min(MaximumProtocol, DriverParameters.ReceiverMaximumProtocol);
+    MaximumProtocol = __min(MaximumProtocol, Receiver->MaximumProtocol);
 
     status = STATUS_NOT_SUPPORTED;
     if (MaximumProtocol < MinimumProtocol)
@@ -3972,6 +4029,12 @@ ReceiverTeardown(
     RtlZeroMemory(&Receiver->Event, sizeof (KEVENT));
     RtlZeroMemory(&Receiver->List, sizeof (LIST_ENTRY));
 
+    Receiver->MaximumProtocol = 0;
+    Receiver->CalculateChecksums = 0;
+    Receiver->AllowGsoPackets = 0;
+    Receiver->IpAlignOffset = 0;
+    Receiver->AlwaysPullup = 0;
+
     ASSERT(IsZeroMemory(Receiver, sizeof (XENVIF_RECEIVER)));
     __ReceiverFree(Receiver);
 }
@@ -3984,7 +4047,7 @@ ReceiverSetOffloadOptions(
 {
     PLIST_ENTRY                 ListEntry;
 
-    if (DriverParameters.ReceiverAllowGsoPackets == 0) {
+    if (Receiver->AllowGsoPackets == 0) {
         Options.OffloadIpVersion4LargePacket = 0;
         Options.OffloadIpVersion6LargePacket = 0;
     }
