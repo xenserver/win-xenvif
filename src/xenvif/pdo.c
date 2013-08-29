@@ -35,6 +35,7 @@
 #include <wdmguid.h>
 #include <ntstrsafe.h>
 #include <stdlib.h>
+#include <netioapi.h>
 #include <util.h>
 #include <xen.h>
 #include <store_interface.h>
@@ -52,8 +53,6 @@
 #include "dbg_print.h"
 #include "assert.h"
 
-#define PDO_REVISION    0x02
-
 #define PDO_POOL 'ODP'
 
 struct _XENVIF_PDO {
@@ -67,8 +66,10 @@ struct _XENVIF_PDO {
     PXENVIF_FDO                 Fdo;
     BOOLEAN                     Missing;
     const CHAR                  *Reason;
-    ULONG                       LuidIndex;
-    PCHAR                       Address;
+
+    ETHERNET_ADDRESS            PermanentMacAddress;
+    NET_LUID                    NetLuid;
+    ETHERNET_ADDRESS            CurrentMacAddress;
 
     BUS_INTERFACE_STANDARD      BusInterface;
 
@@ -261,6 +262,16 @@ PdoGetName(
     return __PdoGetName(Pdo);
 }
 
+static FORCEINLINE ULONG
+__PdoGetRevision(
+    IN  PXENVIF_PDO Pdo
+    )
+{
+    UNREFERENCED_PARAMETER(Pdo);
+
+    return 0;
+}
+
 static FORCEINLINE PDEVICE_OBJECT
 __PdoGetDeviceObject(
     IN  PXENVIF_PDO Pdo
@@ -277,22 +288,6 @@ PdoGetDeviceObject(
     )
 {
     return __PdoGetDeviceObject(Pdo);
-}
-
-ULONG
-PdoGetLuidIndex(
-    IN  PXENVIF_PDO Pdo
-    )
-{
-    return Pdo->LuidIndex;
-}
-
-PCHAR
-PdoGetAddress(
-    IN  PXENVIF_PDO Pdo
-    )
-{
-    return Pdo->Address;
 }
 
 static FORCEINLINE VOID
@@ -326,6 +321,14 @@ __PdoGetFdo(
     )
 {
     return Pdo->Fdo;
+}
+
+static FORCEINLINE PCHAR
+__PdoGetVendorName(
+    IN  PXENVIF_PDO Pdo
+    )
+{
+    return FdoGetVendorName(__PdoGetFdo(Pdo));
 }
 
 static FORCEINLINE PXENVIF_FRONTEND
@@ -454,6 +457,277 @@ PdoGetVifInterface(
     )
 {
     return __PdoGetVifInterface(Pdo);
+}
+
+static FORCEINLINE NTSTATUS
+__PdoSetNetLuid(
+    IN  PXENVIF_PDO Pdo
+    )
+{
+    HANDLE          Key;
+    ULONG           IfType;
+    ULONG           NetLuidIndex;
+    NTSTATUS        status;
+
+    status = RegistryOpenSoftwareKey(__PdoGetDeviceObject(Pdo),
+                                     KEY_READ,
+                                     &Key);
+    if (!NT_SUCCESS(status))
+        goto fail1;
+
+    status = RegistryQueryDwordValue(Key, "*IfType", &IfType);
+    if (!NT_SUCCESS(status))
+        goto fail2;
+
+    status = RegistryQueryDwordValue(Key, "NetLuidIndex", &NetLuidIndex);
+    if (!NT_SUCCESS(status))
+        goto fail3;
+
+    Pdo->NetLuid.Info.IfType = IfType;
+    Pdo->NetLuid.Info.NetLuidIndex = NetLuidIndex;
+
+    RegistryCloseKey(Key);
+
+    return STATUS_SUCCESS;
+
+fail3:
+    Error("fail3\n");
+
+fail2:
+    Error("fail2\n");
+
+    RegistryCloseKey(Key);
+
+fail1:
+    Error("fail1 (%08x)\n", status);
+
+    return status;
+}
+
+static FORCEINLINE PNET_LUID
+__PdoGetNetLuid(
+    IN  PXENVIF_PDO Pdo
+    )
+{
+    return &Pdo->NetLuid;
+}
+
+PNET_LUID
+PdoGetNetLuid(
+    IN  PXENVIF_PDO Pdo
+    )
+{
+    return __PdoGetNetLuid(Pdo);
+}
+
+static FORCEINLINE NTSTATUS
+__PdoParseMacAddress(
+    IN  PCHAR               Buffer,
+    OUT PETHERNET_ADDRESS   Address
+    )
+{
+    ULONG                   Length;
+    NTSTATUS                status;
+
+    Length = 0;
+    for (;;) {
+        CHAR    Character;
+        UCHAR   Byte;
+
+        Character = *Buffer++;
+        if (Character == '\0')
+            break;
+
+        if (Character >= '0' && Character <= '9')
+            Byte = Character - '0';
+        else if (Character >= 'A' && Character <= 'F')
+            Byte = 0x0A + Character - 'A';
+        else if (Character >= 'a' && Character <= 'f')
+            Byte = 0x0A + Character - 'a';
+        else
+            break;
+
+        Byte <<= 4;
+
+        Character = *Buffer++;
+        if (Character == '\0')
+            break;
+
+        if (Character >= '0' && Character <= '9')
+            Byte += Character - '0';
+        else if (Character >= 'A' && Character <= 'F')
+            Byte += 0x0A + Character - 'A';
+        else if (Character >= 'a' && Character <= 'f')
+            Byte += 0x0A + Character - 'a';
+        else
+            break;
+
+        Address->Byte[Length++] = Byte;
+
+        // Skip over any separator
+        if (*Buffer == ':' || *Buffer == '-')
+            Buffer++;
+    }
+
+    status = STATUS_INVALID_PARAMETER;
+    if (Length != ETHERNET_ADDRESS_LENGTH)
+        goto fail1;
+
+    return STATUS_SUCCESS;
+
+fail1:
+    Error("fail1 (%08x)\n", status);
+
+    return status;
+}
+
+static FORCEINLINE NTSTATUS
+__PdoSetPermanentMacAddress(
+    IN  PXENVIF_PDO             Pdo,
+    IN  PXENBUS_STORE_INTERFACE StoreInterface
+    )
+{
+    PCHAR                       Buffer;
+    HANDLE                      DevicesKey;
+    ANSI_STRING                 Ansi;
+    ULONG                       Index;
+    NTSTATUS                    status;
+
+    STORE(Acquire, StoreInterface);
+
+    status = STORE(Read,
+                   StoreInterface,
+                   NULL,
+                   FrontendGetPath(__PdoGetFrontend(Pdo)),
+                   "mac",
+                   &Buffer);
+    if (!NT_SUCCESS(status))
+        goto fail1;
+
+    status = __PdoParseMacAddress(Buffer, &Pdo->PermanentMacAddress);
+    if (!NT_SUCCESS(status))
+        goto fail2;
+
+    DevicesKey = DriverGetDevicesKey();
+    ASSERT(DevicesKey != NULL);
+
+    RtlInitAnsiString(&Ansi, Buffer);
+    for (Index = 0; Index < Ansi.Length; Index++)
+        if (Ansi.Buffer[Index] == ':')
+            Ansi.Buffer[Index] = '-';
+    
+    status = RegistryUpdateSzValue(DevicesKey,
+                                   __PdoGetName(Pdo),
+                                   REG_SZ,
+                                   &Ansi);
+    if (!NT_SUCCESS(status))
+        goto fail3;
+
+    STORE(Free,
+          StoreInterface,
+          Buffer);
+
+    STORE(Release, StoreInterface);
+
+    return STATUS_SUCCESS;
+
+fail3:
+    Error("fail3\n");
+
+    RtlZeroMemory(&Pdo->PermanentMacAddress, sizeof (ETHERNET_ADDRESS));
+
+fail2:
+    Error("fail2\n");
+
+    STORE(Free,
+          StoreInterface,
+          Buffer);
+
+fail1:
+    Error("fail1 (%08x)\n", status);
+
+    STORE(Release, StoreInterface);
+
+    return status;
+}
+
+static FORCEINLINE PETHERNET_ADDRESS
+__PdoGetPermanentMacAddress(
+    IN  PXENVIF_PDO Pdo
+    )
+{
+    return &Pdo->PermanentMacAddress;
+}
+
+PETHERNET_ADDRESS
+PdoGetPermanentMacAddress(
+    IN  PXENVIF_PDO Pdo
+    )
+{
+    return __PdoGetPermanentMacAddress(Pdo);
+}
+
+static FORCEINLINE NTSTATUS
+__PdoSetCurrentMacAddress(
+    IN  PXENVIF_PDO Pdo
+    )
+{
+    HANDLE          SoftwareKey;
+    PANSI_STRING    Ansi;
+    NTSTATUS        status;
+
+    status = RegistryOpenSoftwareKey(__PdoGetDeviceObject(Pdo),
+                                     KEY_READ,
+                                     &SoftwareKey);
+    if (!NT_SUCCESS(status))
+        goto fail1;
+
+    status = RegistryQuerySzValue(SoftwareKey, "NetworkAddress", &Ansi);
+    if (!NT_SUCCESS(status)) {
+        RtlCopyMemory(&Pdo->CurrentMacAddress,
+                      &Pdo->PermanentMacAddress,
+                      sizeof (ETHERNET_ADDRESS));
+        goto done;
+    }
+
+    status = __PdoParseMacAddress(Ansi->Buffer, &Pdo->CurrentMacAddress);
+    if (!NT_SUCCESS(status))
+        goto fail2;
+
+    RegistryFreeSzValue(Ansi);
+
+done:
+    RegistryCloseKey(SoftwareKey);
+
+    return STATUS_SUCCESS;
+
+fail2:
+    Error("fail2\n");
+
+    RegistryFreeSzValue(Ansi);
+
+    RegistryCloseKey(SoftwareKey);
+
+fail1:
+    Error("fail1 (%08x)\n", status);
+
+    return status;
+}
+
+static FORCEINLINE PETHERNET_ADDRESS
+__PdoGetCurrentMacAddress(
+    IN  PXENVIF_PDO Pdo
+    )
+{
+    return &Pdo->CurrentMacAddress;
+}
+
+PETHERNET_ADDRESS
+PdoGetCurrentMacAddress(
+    IN  PXENVIF_PDO Pdo
+    )
+{
+    return __PdoGetCurrentMacAddress(Pdo);
 }
 
 PDMA_ADAPTER
@@ -729,6 +1003,53 @@ PdoS3ToS4(
     Trace("(%s) <====\n", __PdoGetName(Pdo));
 }
 
+static FORCEINLINE NTSTATUS
+__PdoCheckForAlias(
+    IN  PXENVIF_PDO     Pdo
+    )
+{
+    PMIB_IF_TABLE2      MibTable;
+    PETHERNET_ADDRESS   Address;
+    ULONG               Index;
+    NTSTATUS            status;
+
+    status = GetIfTable2(&MibTable);
+    if (!NT_SUCCESS(status))
+        goto fail1;
+
+    Address = __PdoGetPermanentMacAddress(Pdo);
+    for (Index = 0; Index < MibTable->NumEntries; Index++) {
+        PMIB_IF_ROW2    Row = &MibTable->Table[Index];
+
+        if (!(Row->InterfaceAndOperStatusFlags.HardwareInterface))
+            continue;
+
+        if (Row->PhysicalAddressLength != sizeof (ETHERNET_ADDRESS))
+            continue;
+
+        status = STATUS_OBJECTID_EXISTS;
+        if (RtlCompareMemory(Row->PhysicalAddress,
+                             Address,
+                             sizeof (ETHERNET_ADDRESS)) ==
+            sizeof (ETHERNET_ADDRESS))
+            goto fail2;
+    }
+
+    FreeMibTable(MibTable);
+
+    return STATUS_SUCCESS;
+
+fail2:
+    Error("fail2\n");
+
+    FreeMibTable(MibTable);
+
+fail1:
+    Error("fail1 (%08x)\n", status);
+
+    return status;
+}
+
 static DECLSPEC_NOINLINE NTSTATUS
 PdoStartDevice(
     IN  PXENVIF_PDO     Pdo,
@@ -736,34 +1057,21 @@ PdoStartDevice(
     )
 {
     PIO_STACK_LOCATION  StackLocation;
-    HANDLE              Key;
-    PANSI_STRING        Ansi;
     NTSTATUS            status;
 
-    StackLocation = IoGetCurrentIrpStackLocation(Irp);
-
-    status = RegistryOpenSoftwareKey(__PdoGetDeviceObject(Pdo),
-                                     KEY_READ,
-                                     &Key);
+    status = __PdoCheckForAlias(Pdo);
     if (!NT_SUCCESS(status))
         goto fail1;
 
-    status = RegistryQueryDwordValue(Key, "NetLuidIndex", &Pdo->LuidIndex);
+    status = __PdoSetCurrentMacAddress(Pdo);
     if (!NT_SUCCESS(status))
         goto fail2;
 
-    status = RegistryQuerySzValue(Key, "NetworkAddress", &Ansi);
-    if (NT_SUCCESS(status)) {
-        Pdo->Address = __PdoAllocate(Ansi[0].Length + sizeof (CHAR));
+    status = __PdoSetNetLuid(Pdo);
+    if (!NT_SUCCESS(status))
+        goto fail3;
 
-        status = STATUS_NO_MEMORY;
-        if (Pdo->Address == NULL)
-            goto fail3;
-
-        RtlCopyMemory(Pdo->Address, Ansi[0].Buffer, Ansi[0].Length);
-
-        RegistryFreeSzValue(Ansi);
-    }
+    StackLocation = IoGetCurrentIrpStackLocation(Irp);
 
     __PdoSetSystemPowerState(Pdo, PowerSystemHibernate);
     PdoS4ToS3(Pdo);
@@ -774,8 +1082,6 @@ PdoStartDevice(
         goto fail4;
 
     __PdoSetDevicePnpState(Pdo, Started);
-
-    RegistryCloseKey(Key);
 
     Irp->IoStatus.Status = STATUS_SUCCESS;
     IoCompleteRequest(Irp, IO_NO_INCREMENT);
@@ -789,19 +1095,18 @@ fail4:
     PdoS3ToS4(Pdo);
     __PdoSetSystemPowerState(Pdo, PowerSystemShutdown);
 
+    RtlZeroMemory(&Pdo->NetLuid, sizeof (NET_LUID));
+
 fail3:
     Error("fail3\n");
 
-    Pdo->LuidIndex = 0;
+    RtlZeroMemory(&Pdo->CurrentMacAddress, sizeof (ETHERNET_ADDRESS));
 
 fail2:
     Error("fail2\n");
 
-    RegistryCloseKey(Key);
-
 fail1:
     Error("fail1 (%08x)\n", status);
-
 
     Irp->IoStatus.Status = status;
     IoCompleteRequest(Irp, IO_NO_INCREMENT);
@@ -858,12 +1163,9 @@ PdoStopDevice(
     PdoS3ToS4(Pdo);
     __PdoSetSystemPowerState(Pdo, PowerSystemShutdown);
 
-    Pdo->LuidIndex = 0;
+    RtlZeroMemory(&Pdo->NetLuid, sizeof (NET_LUID));
 
-    if (Pdo->Address != NULL) {
-        __PdoFree(Pdo->Address);
-        Pdo->Address = NULL;
-    }
+    RtlZeroMemory(&Pdo->CurrentMacAddress, sizeof (ETHERNET_ADDRESS));
 
     __PdoSetDevicePnpState(Pdo, Stopped);
     status = STATUS_SUCCESS;
@@ -950,12 +1252,9 @@ PdoRemoveDevice(
     __PdoSetSystemPowerState(Pdo, PowerSystemShutdown);
 
 done:
-    Pdo->LuidIndex = 0;
+    RtlZeroMemory(&Pdo->NetLuid, sizeof (NET_LUID));
 
-    if (Pdo->Address != NULL) {
-        __PdoFree(Pdo->Address);
-        Pdo->Address = NULL;
-    }
+    RtlZeroMemory(&Pdo->CurrentMacAddress, sizeof (ETHERNET_ADDRESS));
 
     NeedInvalidate = FALSE;
 
@@ -1396,9 +1695,10 @@ PdoQueryId(
         Type = REG_SZ;
 
         status = RtlStringCbPrintfW(Buffer,
-                                    MAX_DEVICE_ID_LEN - 1,
-                                    L"XENVIF\\DEVICE&REV_%02X",
-                                    PDO_REVISION);
+                                    MAX_DEVICE_ID_LEN,
+                                    L"XENVIF\\VEN_%hs&DEV_NET&REV_%08X",
+                                    __PdoGetVendorName(Pdo),
+                                    __PdoGetRevision(Pdo));
         ASSERT(NT_SUCCESS(status));
 
         Buffer += wcslen(Buffer);
@@ -1413,9 +1713,10 @@ PdoQueryId(
 
         Length = MAX_DEVICE_ID_LEN;
         status = RtlStringCbPrintfW(Buffer,
-                                    Length,
-                                    L"XENVIF\\DEVICE&REV_%02X",
-                                    PDO_REVISION);
+                                    MAX_DEVICE_ID_LEN,
+                                    L"XENVIF\\VEN_%hs&DEV_NET&REV_%08X",
+                                    __PdoGetVendorName(Pdo),
+                                    __PdoGetRevision(Pdo));
         ASSERT(NT_SUCCESS(status));
 
         Buffer += wcslen(Buffer);
@@ -2067,13 +2368,16 @@ PdoCreate(
     if (!NT_SUCCESS(status))
         goto fail6;
 
-    status = VifInitialize(Pdo, &Pdo->VifInterface);
+    status = __PdoSetPermanentMacAddress(Pdo, FdoGetStoreInterface(Fdo));
     if (!NT_SUCCESS(status))
         goto fail7;
 
-    Info("%p (XENVIF\\DEVICE&REV_%02X#%s)\n",
+    status = VifInitialize(Pdo, &Pdo->VifInterface);
+    if (!NT_SUCCESS(status))
+        goto fail8;
+
+    Info("%p (%s)\n",
          PhysicalDeviceObject,
-         PDO_REVISION,
          __PdoGetName(Pdo));
 
     Dx->Pdo = Pdo;
@@ -2082,6 +2386,11 @@ PdoCreate(
     __PdoLink(Pdo, Fdo);
 
     return STATUS_SUCCESS;
+
+fail8:
+    Error("fail8\n");
+
+    RtlZeroMemory(&Pdo->PermanentMacAddress, sizeof (ETHERNET_ADDRESS));
 
 fail7:
     Error("fail7\n");
@@ -2141,18 +2450,20 @@ PdoDestroy(
     ASSERT(__PdoIsMissing(Pdo));
     Pdo->Missing = FALSE;
 
-    __PdoUnlink(Pdo);
-
-    Info("%p (XENVIF\\DEVICE&REV_%02X#%s) (%s)\n",
+    Info("%p (%s) (%s)\n",
          PhysicalDeviceObject,
-         PDO_REVISION,
          __PdoGetName(Pdo),
          Pdo->Reason);
+
     Pdo->Reason = NULL;
+
+    __PdoUnlink(Pdo);
 
     Dx->Pdo = NULL;
 
     VifTeardown(__PdoGetVifInterface(Pdo));
+
+    RtlZeroMemory(&Pdo->PermanentMacAddress, sizeof (ETHERNET_ADDRESS));
 
     FrontendTeardown(__PdoGetFrontend(Pdo));
     Pdo->Frontend = NULL;    

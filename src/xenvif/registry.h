@@ -75,7 +75,9 @@ RegistryOpenSubKey(
 extern NTSTATUS
 RegistryCreateSubKey(
     IN  HANDLE      Key,
-    IN  PCHAR       Name
+    IN  PCHAR       Name,
+    IN  ULONG       Options,
+    OUT PHANDLE     SubKey
     );
 
 extern NTSTATUS

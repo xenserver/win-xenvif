@@ -82,67 +82,6 @@ __MacFree(
     __FreePoolWithTag(Buffer, MAC_POOL);
 }
 
-static FORCEINLINE NTSTATUS
-__MacParseNetworkAddress(
-    IN  PCHAR               Buffer,
-    OUT PETHERNET_ADDRESS   Address
-    )
-{
-    ULONG                   Length;
-    NTSTATUS                status;
-
-    Length = 0;
-    for (;;) {
-        CHAR    Character;
-        UCHAR   Byte;
-
-        Character = *Buffer++;
-        if (Character == '\0')
-            break;
-
-        if (Character >= '0' && Character <= '9')
-            Byte = Character - '0';
-        else if (Character >= 'A' && Character <= 'F')
-            Byte = 0x0A + Character - 'A';
-        else if (Character >= 'a' && Character <= 'f')
-            Byte = 0x0A + Character - 'a';
-        else
-            break;
-
-        Byte <<= 4;
-
-        Character = *Buffer++;
-        if (Character == '\0')
-            break;
-
-        if (Character >= '0' && Character <= '9')
-            Byte += Character - '0';
-        else if (Character >= 'A' && Character <= 'F')
-            Byte += 0x0A + Character - 'A';
-        else if (Character >= 'a' && Character <= 'f')
-            Byte += 0x0A + Character - 'a';
-        else
-            break;
-
-        Address->Byte[Length++] = Byte;
-
-        // Skip over any separator
-        if (*Buffer == ':' || *Buffer == '-')
-            Buffer++;
-    }
-
-    status = STATUS_INVALID_PARAMETER;
-    if (Length != ETHERNET_ADDRESS_LENGTH)
-        goto fail1;
-
-    return STATUS_SUCCESS;
-
-fail1:
-    Error("fail1 (%08x)\n", status);
-
-    return status;
-}
-
 static FORCEINLINE VOID
 __MacSetPermanentAddress(
     IN  PXENVIF_MAC         Mac,
@@ -343,7 +282,6 @@ MacConnect(
     PXENVIF_FRONTEND    Frontend;
     PCHAR               Buffer;
     ULONG64             Mtu;
-    ETHERNET_ADDRESS    Address;
     NTSTATUS            status;
 
     Frontend = Mac->Frontend;
@@ -366,8 +304,6 @@ MacConnect(
         STORE(Free,
               Mac->StoreInterface,
               Buffer);
-
-        Buffer = NULL;
     }
 
     status = STATUS_INVALID_PARAMETER;
@@ -376,41 +312,8 @@ MacConnect(
 
     Mac->MaximumFrameSize = (ULONG)Mtu + sizeof (ETHERNET_TAGGED_HEADER);
 
-    status = STORE(Read,
-                   Mac->StoreInterface,
-                   NULL,
-                   FrontendGetPath(Frontend),
-                   "mac",
-                   &Buffer);
-    if (!NT_SUCCESS(status))
-        goto fail2;
-
-    status = __MacParseNetworkAddress(Buffer, &Address);
-    if (!NT_SUCCESS(status))
-        goto fail3;
-
-    STORE(Free,
-          Mac->StoreInterface,
-          Buffer);
-
-    Buffer = NULL;
-
-    __MacSetPermanentAddress(Mac, &Address);
-
-    Buffer = FrontendGetAddress(Frontend);
-    if (Buffer != NULL) {
-        status = __MacParseNetworkAddress(Buffer, &Address);
-        if (!NT_SUCCESS(status))
-            goto fail4;
-
-        if (Address.Byte[0] & 0x01)
-            Address = *__MacGetPermanentAddress(Mac);
-    } else {
-        Address = *__MacGetPermanentAddress(Mac);
-    }
-
-    __MacSetCurrentAddress(Mac, &Address);
-
+    __MacSetPermanentAddress(Mac, FrontendGetPermanentMacAddress(Frontend));
+    __MacSetCurrentAddress(Mac, FrontendGetCurrentMacAddress(Frontend));
     RtlFillMemory(Mac->BroadcastAddress.Byte, ETHERNET_ADDRESS_LENGTH, 0xFF);
 
     Mac->DebugInterface = FrontendGetDebugInterface(Frontend);
@@ -424,42 +327,22 @@ MacConnect(
                    Mac,
                    &Mac->DebugCallback);
     if (!NT_SUCCESS(status))
-        goto fail5;
+        goto fail2;
 
     ASSERT(!Mac->Connected);
     Mac->Connected = TRUE;
 
     return STATUS_SUCCESS;
 
-fail5:
-    Error("fail5\n");
+fail2:
+    Error("fail2\n");
 
     DEBUG(Release, Mac->DebugInterface);
     Mac->DebugInterface = NULL;
 
     RtlZeroMemory(Mac->BroadcastAddress.Byte, ETHERNET_ADDRESS_LENGTH);
     RtlZeroMemory(Mac->CurrentAddress.Byte, ETHERNET_ADDRESS_LENGTH);
-
-fail4:
-    Error("fail4\n");
-
-    Buffer = NULL;
-
     RtlZeroMemory(Mac->PermanentAddress.Byte, ETHERNET_ADDRESS_LENGTH);
-
-fail3:
-    Error("fail3\n");
-
-    if (Buffer != NULL) {
-        STORE(Free,
-              Mac->StoreInterface,
-              Buffer);
-
-        Buffer = NULL;
-    }
-
-fail2:
-    Error("fail2\n");
 
     Mac->MaximumFrameSize = 0;
 
@@ -467,7 +350,7 @@ fail1:
     Error("fail1 (%08x)\n");
 
     STORE(Release, Mac->StoreInterface);
-    Mac->StoreInterface = 0;
+    Mac->StoreInterface = NULL;
 
     return status;
 }
@@ -551,7 +434,7 @@ MacDisconnect(
     Mac->MaximumFrameSize = 0;
 
     STORE(Release, Mac->StoreInterface);
-    Mac->StoreInterface = 0;
+    Mac->StoreInterface = NULL;
 }
 
 VOID

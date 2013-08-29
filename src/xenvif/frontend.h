@@ -84,16 +84,14 @@ FrontendSuspend(
     IN  PXENVIF_FRONTEND    Frontend
     );
 
-extern NTSTATUS
-FrontendGetNetworkAddress(
-    IN  PXENVIF_FRONTEND    Frontend,
-    OUT PCHAR               *Buffer
+extern PETHERNET_ADDRESS
+FrontendGetPermanentMacAddress(
+    IN  PXENVIF_FRONTEND    Frontend
     );
 
-extern NTSTATUS
-FrontendGetNetLuidIndex(
-    IN  PXENVIF_FRONTEND    Frontend,
-    OUT PULONG              LuidIndex
+extern PETHERNET_ADDRESS
+FrontendGetCurrentMacAddress(
+    IN  PXENVIF_FRONTEND    Frontend
     );
 
 extern PCHAR

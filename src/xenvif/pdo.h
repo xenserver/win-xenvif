@@ -33,6 +33,8 @@
 #define _XENVIF_PDO_H
 
 #include <ntddk.h>
+#include <ifdef.h>
+#include <ethernet.h>
 
 #include "driver.h"
 #include "types.h"
@@ -108,13 +110,18 @@ PdoGetBusData(
     IN  ULONG           Length
     );
 
-extern ULONG
-PdoGetLuidIndex(
+extern PNET_LUID
+PdoGetNetLuid(
     IN  PXENVIF_PDO Pdo
     );
 
-extern PCHAR
-PdoGetAddress(
+extern PETHERNET_ADDRESS
+PdoGetPermanentMacAddress(
+    IN  PXENVIF_PDO Pdo
+    );
+
+extern PETHERNET_ADDRESS
+PdoGetCurrentMacAddress(
     IN  PXENVIF_PDO Pdo
     );
 

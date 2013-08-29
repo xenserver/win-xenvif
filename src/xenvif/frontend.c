@@ -353,20 +353,44 @@ FrontendGetTransmitter(
     return __FrontendGetTransmitter(Frontend);
 }
 
-static FORCEINLINE  ULONG
-__FrontendGetLuidIndex(
+static FORCEINLINE PNET_LUID
+__FrontendGetNetLuid(
     IN  PXENVIF_FRONTEND    Frontend
     )
 {
-    return PdoGetLuidIndex(__FrontendGetPdo(Frontend));
+    return PdoGetNetLuid(__FrontendGetPdo(Frontend));
 }
 
-static FORCEINLINE PCHAR
-__FrontendGetAddress(
+static FORCEINLINE PETHERNET_ADDRESS
+__FrontendGetPermanentMacAddress(
     IN  PXENVIF_FRONTEND    Frontend
     )
 {
-    return PdoGetAddress(__FrontendGetPdo(Frontend));
+    return PdoGetPermanentMacAddress(__FrontendGetPdo(Frontend));
+}
+
+PETHERNET_ADDRESS
+FrontendGetPermanentMacAddress(
+    IN  PXENVIF_FRONTEND    Frontend
+    )
+{
+    return __FrontendGetPermanentMacAddress(Frontend);
+}
+
+static FORCEINLINE PETHERNET_ADDRESS
+__FrontendGetCurrentMacAddress(
+    IN  PXENVIF_FRONTEND    Frontend
+    )
+{
+    return PdoGetCurrentMacAddress(__FrontendGetPdo(Frontend));
+}
+
+PETHERNET_ADDRESS
+FrontendGetCurrentMacAddress(
+    IN  PXENVIF_FRONTEND    Frontend
+    )
+{
+    return __FrontendGetCurrentMacAddress(Frontend);
 }
 
 static DECLSPEC_NOINLINE NTSTATUS
@@ -502,13 +526,13 @@ __FrontendGetAddressTable(
     OUT PULONG                      AddressCount
     )
 {
-    ULONG                           LuidIndex;
+    PNET_LUID                       NetLuid;
     ULONG                           Index;
     PMIB_UNICASTIPADDRESS_TABLE     MibTable;
     ULONG                           Count;
     NTSTATUS                        status;
 
-    LuidIndex = __FrontendGetLuidIndex(Frontend);
+    NetLuid = __FrontendGetNetLuid(Frontend);
 
     status = GetUnicastIpAddressTable(AF_UNSPEC, &MibTable);
     if (!NT_SUCCESS(status))
@@ -518,10 +542,10 @@ __FrontendGetAddressTable(
     for (Index = 0; Index < MibTable->NumEntries; Index++) {
         PMIB_UNICASTIPADDRESS_ROW   Row = &MibTable->Table[Index];
 
-        if (Row->InterfaceLuid.Info.IfType != IF_TYPE_ETHERNET_CSMACD)
+        if (Row->InterfaceLuid.Info.IfType != NetLuid->Info.IfType)
             continue;
 
-        if (Row->InterfaceLuid.Info.NetLuidIndex != LuidIndex)
+        if (Row->InterfaceLuid.Info.NetLuidIndex != NetLuid->Info.NetLuidIndex)
             continue;
 
         if (Row->Address.si_family != AF_INET &&
@@ -547,10 +571,10 @@ __FrontendGetAddressTable(
     for (Index = 0; Index < MibTable->NumEntries; Index++) {
         PMIB_UNICASTIPADDRESS_ROW   Row = &MibTable->Table[Index];
 
-        if (Row->InterfaceLuid.Info.IfType != IF_TYPE_ETHERNET_CSMACD)
+        if (Row->InterfaceLuid.Info.IfType != NetLuid->Info.IfType)
             continue;
 
-        if (Row->InterfaceLuid.Info.NetLuidIndex != LuidIndex)
+        if (Row->InterfaceLuid.Info.NetLuidIndex != NetLuid->Info.NetLuidIndex)
             continue;
 
         switch (Row->Address.si_family) {
@@ -1379,14 +1403,6 @@ FrontendSetState(
     return (!Failed) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
 }
 
-PCHAR
-FrontendGetAddress(
-    IN  PXENVIF_FRONTEND    Frontend
-    )
-{
-    return __FrontendGetAddress(Frontend);
-}
-
 static FORCEINLINE NTSTATUS
 __FrontendResume(
     IN  PXENVIF_FRONTEND    Frontend
@@ -1617,8 +1633,8 @@ FrontendInitialize(
         if (status != STATUS_NOT_SUPPORTED) 
             goto fail12;
         
-        // If IP Helper isn't available (As in Windows PE)
-        // NotifyUnicastIpAddressChange is not supported
+        // If IP Helper isn't available (as in Windows PE) then
+        // NotifyUnicastIpAddressChange will not be supported
         Warning("Cannot record or update network info to XAPI %x\n", status);
         (*Frontend)->Handle = NULL;
     }

@@ -44,6 +44,11 @@
 #include "types.h"
 
 extern PCHAR
+FdoGetVendorName(
+    IN  PXENVIF_FDO Fdo
+    );
+
+extern PCHAR
 FdoGetName(
     IN  PXENVIF_FDO Fdo
     );

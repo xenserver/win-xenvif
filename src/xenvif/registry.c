@@ -202,13 +202,14 @@ fail1:
 NTSTATUS
 RegistryCreateSubKey(
     IN  PHANDLE         Key,
-    IN  PCHAR           Name
+    IN  PCHAR           Name,
+    IN  ULONG           Options,
+    OUT PHANDLE         SubKey
     )
 {
     ANSI_STRING         Ansi;
     UNICODE_STRING      Unicode;
     OBJECT_ATTRIBUTES   Attributes;
-    HANDLE              SubKey;
     NTSTATUS            status;
 
     RtlInitAnsiString(&Ansi, Name);
@@ -223,18 +224,16 @@ RegistryCreateSubKey(
                                Key,
                                NULL);
 
-    status = ZwCreateKey(&SubKey,
+    status = ZwCreateKey(SubKey,
                          KEY_ALL_ACCESS,
                          &Attributes,
                          0,
                          NULL,
-                         REG_OPTION_NON_VOLATILE,
+                         Options,
                          NULL
                          );
     if (!NT_SUCCESS(status))
         goto fail2;
-
-    ZwClose(SubKey);
 
     RtlFreeUnicodeString(&Unicode);
 

@@ -46,6 +46,7 @@ extern PULONG       InitSafeBootMode;
 typedef struct _XENVIF_DRIVER {
     PDRIVER_OBJECT      DriverObject;
     HANDLE              ParametersKey;
+    HANDLE              DevicesKey;
 } XENVIF_DRIVER, *PXENVIF_DRIVER;
 
 static XENVIF_DRIVER    Driver;
@@ -98,6 +99,30 @@ DriverGetParametersKey(
     return __DriverGetParametersKey();
 }
 
+static FORCEINLINE VOID
+__DriverSetDevicesKey(
+    IN  HANDLE  Key
+    )
+{
+    Driver.DevicesKey = Key;
+}
+
+static FORCEINLINE HANDLE
+__DriverGetDevicesKey(
+    VOID
+    )
+{
+    return Driver.DevicesKey;
+}
+
+HANDLE
+DriverGetDevicesKey(
+    VOID
+    )
+{
+    return __DriverGetDevicesKey();
+}
+
 DRIVER_UNLOAD       DriverUnload;
 
 VOID
@@ -105,6 +130,7 @@ DriverUnload(
     IN  PDRIVER_OBJECT  DriverObject
     )
 {
+    HANDLE              DevicesKey;
     HANDLE              ParametersKey;
 
     ASSERT3P(DriverObject, ==, __DriverGetDriverObject());
@@ -113,6 +139,10 @@ DriverUnload(
 
     if (*InitSafeBootMode > 0)
         goto done;
+
+    DevicesKey = __DriverGetParametersKey();
+    RegistryCloseKey(DevicesKey);
+    __DriverSetDevicesKey(NULL);
 
     ParametersKey = __DriverGetParametersKey();
     if (ParametersKey != NULL) {
@@ -213,6 +243,7 @@ DriverEntry(
 {
     HANDLE              ServiceKey;
     HANDLE              ParametersKey;
+    HANDLE              DevicesKey;
     ULONG               Index;
     NTSTATUS            status;
 
@@ -248,9 +279,21 @@ DriverEntry(
     if (!NT_SUCCESS(status))
         goto fail2;
 
-    status = RegistryOpenSubKey(ServiceKey, "Parameters", KEY_READ, &ParametersKey);
+    status = RegistryOpenSubKey(ServiceKey, 
+                                "Parameters", 
+                                KEY_READ, 
+                                &ParametersKey);
     if (NT_SUCCESS(status))
         __DriverSetParametersKey(ParametersKey);
+
+    status = RegistryCreateSubKey(ServiceKey, 
+                                  "Devices", 
+                                  REG_OPTION_VOLATILE, 
+                                  &DevicesKey);
+    if (!NT_SUCCESS(status))
+        goto fail3;
+
+    __DriverSetDevicesKey(DevicesKey);
 
     RegistryCloseKey(ServiceKey);
 
@@ -266,6 +309,13 @@ done:
     Trace("<====\n");
 
     return STATUS_SUCCESS;
+
+fail3:
+    Error("fail3\n");
+
+    __DriverSetParametersKey(NULL);
+
+    RegistryCloseKey(ServiceKey);
 
 fail2:
     Error("fail2\n");

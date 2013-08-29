@@ -26,8 +26,8 @@
 
 	<PropertyGroup>
 		<EnableInf2cat>true</EnableInf2cat>
-		<Inf2CatWindowsVersionList Condition="'$(Platform)'=='x64'">Vista_$(DDKPlatform);7_$(DDKPlatform);Server2008_$(DDKPlatform);Server2008R2_$(DDKPlatform)</Inf2CatWindowsVersionList>
-		<Inf2CatWindowsVersionList Condition="'$(Platform)'=='Win32'">Vista_$(DDKPlatform);7_$(DDKPlatform);Server2008_$(DDKPlatform)</Inf2CatWindowsVersionList>
+		<Inf2CatWindowsVersionList Condition="'$(Platform)'=='x64'">Vista_x64;7_x64;Server2008_x64;Server2008R2_x64;Server8_x64</Inf2CatWindowsVersionList>
+		<Inf2CatWindowsVersionList Condition="'$(Platform)'=='Win32'">Vista_x86;7_x86;Server2008_x86;8_x86</Inf2CatWindowsVersionList>
 		<DebuggerFlavor>DbgengKernelDebugger</DebuggerFlavor>
 		<EnableDeployment>False</EnableDeployment>
 		<ImportToStore>False</ImportToStore>
