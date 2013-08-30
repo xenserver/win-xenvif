@@ -43,7 +43,7 @@ DriverGetParametersKey(
     );
 
 extern HANDLE
-DriverGetDevicesKey(
+DriverGetAddressesKey(
     VOID
     );
 

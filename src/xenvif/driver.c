@@ -46,7 +46,7 @@ extern PULONG       InitSafeBootMode;
 typedef struct _XENVIF_DRIVER {
     PDRIVER_OBJECT      DriverObject;
     HANDLE              ParametersKey;
-    HANDLE              DevicesKey;
+    HANDLE              AddressesKey;
 } XENVIF_DRIVER, *PXENVIF_DRIVER;
 
 static XENVIF_DRIVER    Driver;
@@ -100,27 +100,27 @@ DriverGetParametersKey(
 }
 
 static FORCEINLINE VOID
-__DriverSetDevicesKey(
+__DriverSetAddressesKey(
     IN  HANDLE  Key
     )
 {
-    Driver.DevicesKey = Key;
+    Driver.AddressesKey = Key;
 }
 
 static FORCEINLINE HANDLE
-__DriverGetDevicesKey(
+__DriverGetAddressesKey(
     VOID
     )
 {
-    return Driver.DevicesKey;
+    return Driver.AddressesKey;
 }
 
 HANDLE
-DriverGetDevicesKey(
+DriverGetAddressesKey(
     VOID
     )
 {
-    return __DriverGetDevicesKey();
+    return __DriverGetAddressesKey();
 }
 
 DRIVER_UNLOAD       DriverUnload;
@@ -130,7 +130,7 @@ DriverUnload(
     IN  PDRIVER_OBJECT  DriverObject
     )
 {
-    HANDLE              DevicesKey;
+    HANDLE              AddressesKey;
     HANDLE              ParametersKey;
 
     ASSERT3P(DriverObject, ==, __DriverGetDriverObject());
@@ -140,9 +140,9 @@ DriverUnload(
     if (*InitSafeBootMode > 0)
         goto done;
 
-    DevicesKey = __DriverGetParametersKey();
-    RegistryCloseKey(DevicesKey);
-    __DriverSetDevicesKey(NULL);
+    AddressesKey = __DriverGetParametersKey();
+    RegistryCloseKey(AddressesKey);
+    __DriverSetAddressesKey(NULL);
 
     ParametersKey = __DriverGetParametersKey();
     if (ParametersKey != NULL) {
@@ -243,7 +243,7 @@ DriverEntry(
 {
     HANDLE              ServiceKey;
     HANDLE              ParametersKey;
-    HANDLE              DevicesKey;
+    HANDLE              AddressesKey;
     ULONG               Index;
     NTSTATUS            status;
 
@@ -287,13 +287,13 @@ DriverEntry(
         __DriverSetParametersKey(ParametersKey);
 
     status = RegistryCreateSubKey(ServiceKey, 
-                                  "Devices", 
+                                  "Addresses", 
                                   REG_OPTION_VOLATILE, 
-                                  &DevicesKey);
+                                  &AddressesKey);
     if (!NT_SUCCESS(status))
         goto fail3;
 
-    __DriverSetDevicesKey(DevicesKey);
+    __DriverSetAddressesKey(AddressesKey);
 
     RegistryCloseKey(ServiceKey);
 

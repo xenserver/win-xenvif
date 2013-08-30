@@ -528,19 +528,19 @@ __FrontendGetAddressTable(
 {
     PNET_LUID                       NetLuid;
     ULONG                           Index;
-    PMIB_UNICASTIPADDRESS_TABLE     MibTable;
+    PMIB_UNICASTIPADDRESS_TABLE     Table;
     ULONG                           Count;
     NTSTATUS                        status;
 
     NetLuid = __FrontendGetNetLuid(Frontend);
 
-    status = GetUnicastIpAddressTable(AF_UNSPEC, &MibTable);
+    status = GetUnicastIpAddressTable(AF_UNSPEC, &Table);
     if (!NT_SUCCESS(status))
         goto fail1;
 
     *AddressCount = 0;
-    for (Index = 0; Index < MibTable->NumEntries; Index++) {
-        PMIB_UNICASTIPADDRESS_ROW   Row = &MibTable->Table[Index];
+    for (Index = 0; Index < Table->NumEntries; Index++) {
+        PMIB_UNICASTIPADDRESS_ROW   Row = &Table->Table[Index];
 
         if (Row->InterfaceLuid.Info.IfType != NetLuid->Info.IfType)
             continue;
@@ -568,8 +568,8 @@ __FrontendGetAddressTable(
 
     Count = 0;
 
-    for (Index = 0; Index < MibTable->NumEntries; Index++) {
-        PMIB_UNICASTIPADDRESS_ROW   Row = &MibTable->Table[Index];
+    for (Index = 0; Index < Table->NumEntries; Index++) {
+        PMIB_UNICASTIPADDRESS_ROW   Row = &Table->Table[Index];
 
         if (Row->InterfaceLuid.Info.IfType != NetLuid->Info.IfType)
             continue;
@@ -589,14 +589,14 @@ __FrontendGetAddressTable(
     ASSERT3U(Count, ==, *AddressCount);
 
 done:
-    FreeMibTable(MibTable);
+    FreeMibTable(Table);
 
     return STATUS_SUCCESS;
 
 fail2:
     Error("fail2\n");
 
-    FreeMibTable(MibTable);
+    FreeMibTable(Table);
 
 fail1:
     Error("fail1 (%08x)\n", status);

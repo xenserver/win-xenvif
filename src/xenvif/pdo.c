@@ -588,7 +588,7 @@ __PdoSetPermanentMacAddress(
     )
 {
     PCHAR                       Buffer;
-    HANDLE                      DevicesKey;
+    HANDLE                      AddressesKey;
     ANSI_STRING                 Ansi;
     ULONG                       Index;
     NTSTATUS                    status;
@@ -608,15 +608,15 @@ __PdoSetPermanentMacAddress(
     if (!NT_SUCCESS(status))
         goto fail2;
 
-    DevicesKey = DriverGetDevicesKey();
-    ASSERT(DevicesKey != NULL);
+    AddressesKey = DriverGetAddressesKey();
+    ASSERT(AddressesKey != NULL);
 
     RtlInitAnsiString(&Ansi, Buffer);
     for (Index = 0; Index < Ansi.Length; Index++)
         if (Ansi.Buffer[Index] == ':')
             Ansi.Buffer[Index] = '-';
     
-    status = RegistryUpdateSzValue(DevicesKey,
+    status = RegistryUpdateSzValue(AddressesKey,
                                    __PdoGetName(Pdo),
                                    REG_SZ,
                                    &Ansi);
@@ -1008,18 +1008,18 @@ __PdoCheckForAlias(
     IN  PXENVIF_PDO     Pdo
     )
 {
-    PMIB_IF_TABLE2      MibTable;
+    PMIB_IF_TABLE2      Table;
     PETHERNET_ADDRESS   Address;
     ULONG               Index;
     NTSTATUS            status;
 
-    status = GetIfTable2(&MibTable);
+    status = GetIfTable2(&Table);
     if (!NT_SUCCESS(status))
         goto fail1;
 
     Address = __PdoGetPermanentMacAddress(Pdo);
-    for (Index = 0; Index < MibTable->NumEntries; Index++) {
-        PMIB_IF_ROW2    Row = &MibTable->Table[Index];
+    for (Index = 0; Index < Table->NumEntries; Index++) {
+        PMIB_IF_ROW2    Row = &Table->Table[Index];
 
         if (!(Row->InterfaceAndOperStatusFlags.HardwareInterface))
             continue;
@@ -1035,14 +1035,14 @@ __PdoCheckForAlias(
             goto fail2;
     }
 
-    FreeMibTable(MibTable);
+    FreeMibTable(Table);
 
     return STATUS_SUCCESS;
 
 fail2:
     Error("fail2\n");
 
-    FreeMibTable(MibTable);
+    FreeMibTable(Table);
 
 fail1:
     Error("fail1 (%08x)\n", status);

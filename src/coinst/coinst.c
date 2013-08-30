@@ -378,6 +378,15 @@ Entry(
         MAJOR_VERSION_STR "." MINOR_VERSION_STR "." MICRO_VERSION_STR "." BUILD_NUMBER_STR,
         DAY_STR "/" MONTH_STR "/" YEAR_STR);
 
+    if (!Context->PostProcessing) {
+        Log("%s PreProcessing",
+            FunctionName(Function));
+    } else {
+        Log("%s PostProcessing (%08x)",
+            FunctionName(Function),
+            Context->InstallResult);
+    }
+
     switch (Function) {
     case DIF_INSTALLDEVICE: {
         SP_DRVINFO_DATA         DriverInfoData;
@@ -402,15 +411,8 @@ Entry(
         break;
     default:
         if (!Context->PostProcessing) {
-            Log("%s PreProcessing",
-                FunctionName(Function));
-
             Error = NO_ERROR;
         } else {
-            Log("%s PostProcessing (%08x)",
-                FunctionName(Function),
-                Context->InstallResult);
-
             Error = Context->InstallResult;
         }
 
