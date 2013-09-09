@@ -33,6 +33,7 @@
 
 #include <ntddk.h>
 #include <wdmguid.h>
+#include <devguid.h>
 #include <ntstrsafe.h>
 #include <stdlib.h>
 #include <netioapi.h>
@@ -812,8 +813,6 @@ __PdoD3ToD0(
     )
 {
     POWER_STATE                 PowerState;
-    PXENFILT_EMULATED_INTERFACE EmulatedInterface;
-    BOOLEAN                     Present;
     NTSTATUS                    status;
 
     Trace("(%s) ====>\n", __PdoGetName(Pdo));
@@ -821,29 +820,9 @@ __PdoD3ToD0(
     ASSERT3U(KeGetCurrentIrql(), ==, DISPATCH_LEVEL);
     ASSERT3U(__PdoGetDevicePowerState(Pdo), ==, PowerDeviceD3);
 
-    EmulatedInterface = __PdoGetEmulatedInterface(Pdo);
-    if (EmulatedInterface != NULL) {
-        EMULATED(Acquire, EmulatedInterface);
-
-        Present = EMULATED(IsDevicePresent,
-                           EmulatedInterface,
-                           NULL,
-                           NULL);
-
-        EMULATED(Release, EmulatedInterface);
-    } else {
-        // If we cannot confirm presence of the emulated device then
-        // we must assume it is present.
-        Present = TRUE;
-    }
-
-    status = STATUS_UNSUCCESSFUL;
-    if (Present)
-        goto fail1;
-
     status = FrontendSetState(__PdoGetFrontend(Pdo), FRONTEND_CONNECTED);
     if (!NT_SUCCESS(status))
-        goto fail2;
+        goto fail1;
 
     __PdoSetDevicePowerState(Pdo, PowerDeviceD0);
 
@@ -855,9 +834,6 @@ __PdoD3ToD0(
     Trace("(%s) <====\n", __PdoGetName(Pdo));
 
     return STATUS_SUCCESS;
-
-fail2:
-    Error("fail2\n");
 
 fail1:
     Error("fail1 (%08x)\n", status);
@@ -1003,46 +979,127 @@ PdoS3ToS4(
     Trace("(%s) <====\n", __PdoGetName(Pdo));
 }
 
+#define HKEY_LOCAL_MACHINE  "\\Registry\\Machine"
+#define CLASS_KEY           HKEY_LOCAL_MACHINE "\\SYSTEM\\CurrentControlSet\\Control\\Class"
+
 static FORCEINLINE NTSTATUS
 __PdoCheckForAlias(
-    IN  PXENVIF_PDO     Pdo
+    IN  PXENVIF_PDO             Pdo
     )
 {
-    PMIB_IF_TABLE2      Table;
-    PETHERNET_ADDRESS   Address;
-    ULONG               Index;
-    NTSTATUS            status;
+    HANDLE                      AliasesKey;
+    PANSI_STRING                Alias;
+    HANDLE                      ClassKey;
+    HANDLE                      AliasSoftwareKey;
+    PANSI_STRING                DeviceInstanceID;
+    PCHAR                       DeviceID;
+    PCHAR                       InstanceID;
+    PXENFILT_EMULATED_INTERFACE EmulatedInterface;
+    NTSTATUS                    status;
 
-    status = GetIfTable2(&Table);
-    if (!NT_SUCCESS(status))
+    EmulatedInterface = __PdoGetEmulatedInterface(Pdo);
+
+    status = STATUS_NOT_SUPPORTED;
+    if (EmulatedInterface == NULL)
         goto fail1;
 
-    Address = __PdoGetPermanentMacAddress(Pdo);
-    for (Index = 0; Index < Table->NumEntries; Index++) {
-        PMIB_IF_ROW2    Row = &Table->Table[Index];
+    AliasesKey = DriverGetAliasesKey();
+    ASSERT(AliasesKey != NULL);
 
-        if (!(Row->InterfaceAndOperStatusFlags.HardwareInterface))
-            continue;
+    status = RegistryQuerySzValue(AliasesKey,
+                                  __PdoGetName(Pdo),
+                                  &Alias);
+    if (!NT_SUCCESS(status))
+        goto fail2;
 
-        if (Row->PhysicalAddressLength != sizeof (ETHERNET_ADDRESS))
-            continue;
+    if (Alias->Length == 0)   // No alias
+        goto done;
 
-        status = STATUS_OBJECTID_EXISTS;
-        if (RtlCompareMemory(Row->PhysicalAddress,
-                             Address,
-                             sizeof (ETHERNET_ADDRESS)) ==
-            sizeof (ETHERNET_ADDRESS))
-            goto fail2;
-    }
+    Trace("%Z\n", Alias);
 
-    FreeMibTable(Table);
+    status = RegistryOpenSubKey(NULL,
+                                CLASS_KEY,
+                                KEY_READ,
+                                &ClassKey);
+    if (!NT_SUCCESS(status))
+        goto fail3;
+
+    status = RegistryOpenSubKey(ClassKey,
+                                Alias->Buffer,
+                                KEY_READ,
+                                &AliasSoftwareKey);
+    if (!NT_SUCCESS(status))
+        goto fail4;
+
+    status = RegistryQuerySzValue(AliasSoftwareKey,
+                                  "DeviceInstanceID",
+                                  &DeviceInstanceID);
+    if (!NT_SUCCESS(status))
+        goto fail5;
+
+    Trace("DeviceInstanceID = %Z\n", DeviceInstanceID);
+
+    DeviceID = DeviceInstanceID->Buffer;
+
+    InstanceID = strrchr(DeviceID, '\\');
+    if (InstanceID == NULL)
+        goto fail6;
+
+    *(InstanceID++) = '\0';
+
+    EMULATED(Acquire, EmulatedInterface);
+
+    status = STATUS_OBJECTID_EXISTS;
+    if (EMULATED(IsDevicePresent,
+                 EmulatedInterface,
+                 DeviceID,
+                 InstanceID))
+        goto fail7;
+
+    EMULATED(Release, EmulatedInterface);
+    
+    RegistryFreeSzValue(DeviceInstanceID);
+
+    RegistryCloseKey(AliasSoftwareKey);
+
+    RegistryCloseKey(ClassKey);
+
+done:
+    RegistryFreeSzValue(Alias);
+
+    RegistryCloseKey(AliasesKey);
 
     return STATUS_SUCCESS;
+
+fail7:
+    Error("fail7\n");
+
+    EMULATED(Release, EmulatedInterface);
+
+fail6:
+    Error("fail6\n");
+
+    RegistryFreeSzValue(DeviceInstanceID);
+
+fail5:
+    Error("fail5\n");
+
+    RegistryCloseKey(AliasSoftwareKey);
+
+fail4:
+    Error("fail4\n");
+
+    RegistryCloseKey(ClassKey);
+
+fail3:
+    Error("fail3\n");
+
+    RegistryFreeSzValue(Alias);
 
 fail2:
     Error("fail2\n");
 
-    FreeMibTable(Table);
+    RegistryCloseKey(AliasesKey);
 
 fail1:
     Error("fail1 (%08x)\n", status);

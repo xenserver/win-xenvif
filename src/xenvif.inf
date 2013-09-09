@@ -81,6 +81,7 @@ AddReg = XenVif_Parameters
 
 [XenVif_Parameters]
 HKR,"Parameters",,0x00000010
+HKR,"Aliases",,0x00000010
 
 [XenVif_Inst.CoInstallers]
 CopyFiles=CoInst_CopyFiles
