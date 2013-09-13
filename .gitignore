@@ -1,7 +1,7 @@
 # Cscope/Tags
-cscope.files
-cscope.out
-tags
+/cscope.files
+/cscope.out
+/tags
 
 # Output
-xenvif
+/xenvif
