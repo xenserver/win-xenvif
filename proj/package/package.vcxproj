@@ -37,8 +37,8 @@
 		<AllDrivers>False</AllDrivers>
 		<VerifyProjectOutput>True</VerifyProjectOutput>
 		<VerifyFlags>133563</VerifyFlags>
-		<IntDir>..\$(ProjectName)\$(ConfigurationName)\$(Platform)</IntDir>
-		<OutDir>..\$(ConfigurationName)\$(Platform)</OutDir>
+		<IntDir>..\$(ProjectName)\$(ConfigurationName)\$(Platform)\</IntDir>
+		<OutDir>..\$(ConfigurationName)\$(Platform)\</OutDir>
 		<PackageDir>..\..\xenvif\$(DDKPlatform)</PackageDir>
 	</PropertyGroup>
 	

@@ -77,10 +77,12 @@ StartType=%SERVICE_DEMAND_START%
 ErrorControl=%SERVICE_ERROR_NORMAL% 
 ServiceBinary=%12%\xenvif.sys 
 LoadOrderGroup="NDIS"
-AddReg = XenVif_Parameters
+AddReg = XenVif_Parameters, XenVif_Aliases
 
 [XenVif_Parameters]
 HKR,"Parameters",,0x00000010
+
+[XenVif_Aliases]
 HKR,"Aliases",,0x00000010
 
 [XenVif_Inst.CoInstallers]

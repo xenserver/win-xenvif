@@ -1067,8 +1067,6 @@ __PdoCheckForAlias(
 done:
     RegistryFreeSzValue(Alias);
 
-    RegistryCloseKey(AliasesKey);
-
     return STATUS_SUCCESS;
 
 fail7:
@@ -1098,8 +1096,6 @@ fail3:
 
 fail2:
     Error("fail2\n");
-
-    RegistryCloseKey(AliasesKey);
 
 fail1:
     Error("fail1 (%08x)\n", status);
