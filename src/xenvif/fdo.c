@@ -581,13 +581,32 @@ __FdoEnumerate(
     IN  PANSI_STRING    Devices
     )
 {
-    BOOLEAN             NeedInvalidate;
+    BOOLEAN             NeedInvalidate; 
+    HANDLE              ParametersKey;
+    ULONG               Enumerate;
     PLIST_ENTRY         ListEntry;
     ULONG               Index;
 
     Trace("====>\n");
 
     NeedInvalidate = FALSE;
+
+    ParametersKey = DriverGetParametersKey();
+
+    if (ParametersKey != NULL) {
+        NTSTATUS    status;
+
+        status = RegistryQueryDwordValue(ParametersKey,
+                                         "Enumerate",
+                                         &Enumerate);
+        if (!NT_SUCCESS(status))
+            Enumerate = 1;
+    } else {
+        Enumerate = 1;
+    }
+
+    if (Enumerate == 0)
+        goto done;
 
     __FdoAcquireMutex(Fdo);
 
@@ -651,7 +670,9 @@ __FdoEnumerate(
 
     __FdoReleaseMutex(Fdo);
 
+done:
     Trace("<====\n");
+
     return NeedInvalidate;
 }
 

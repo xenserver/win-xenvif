@@ -34,7 +34,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <strsafe.h>
-#include <malloc.h>
 
 #include <version.h>
 
@@ -44,11 +43,11 @@ __user_code;
 
 #define SERVICES_KEY "SYSTEM\\CurrentControlSet\\Services"
 
-#define PARAMETERS_KEY(_Driver)    \
-        SERVICES_KEY ## "\\" ## #_Driver ## "\\Parameters"
+#define SERVICE_KEY(_Driver)    \
+        SERVICES_KEY ## "\\" ## #_Driver
 
-#define STATUS_KEY(_Driver)    \
-        SERVICES_KEY ## "\\" ## #_Driver ## "\\Status"
+#define PARAMETERS_KEY(_Driver) \
+        SERVICE_KEY(_Driver) ## "\\Parameters"
 
 static VOID
 #pragma prefast(suppress:6262) // Function uses '1036' bytes of stack: exceeds /analyze:stacksize'1024'
@@ -95,8 +94,8 @@ __Log(
 #define Log(_Format, ...) \
         __Log(__MODULE__ "|" __FUNCTION__ ": " _Format, __VA_ARGS__)
 
-static PTCHAR
-GetErrorMessage(
+static FORCEINLINE PTCHAR
+__GetErrorMessage(
     IN  DWORD   Error
     )
 {
@@ -123,8 +122,8 @@ GetErrorMessage(
     return Message;
 }
 
-static const CHAR *
-FunctionName(
+static FORCEINLINE const CHAR *
+__FunctionName(
     IN  DI_FUNCTION Function
     )
 {
@@ -178,6 +177,186 @@ FunctionName(
 #undef  _NAME
 }
 
+static BOOLEAN
+IncrementServiceCount(
+    OUT PDWORD  Count
+    )
+{
+    HKEY        ServiceKey;
+    DWORD       Value;
+    DWORD       ValueLength;
+    DWORD       Type;
+    HRESULT     Error;
+
+    Error = RegOpenKeyEx(HKEY_LOCAL_MACHINE,
+                         SERVICE_KEY(XENVIF),
+                         0,
+                         KEY_ALL_ACCESS,
+                         &ServiceKey);
+    if (Error != ERROR_SUCCESS) {
+        SetLastError(Error);
+        goto fail1;
+    }
+
+    ValueLength = sizeof (DWORD);
+
+    Error = RegQueryValueEx(ServiceKey,
+                            "Count",
+                            NULL,
+                            &Type,
+                            (LPBYTE)&Value,
+                            &ValueLength);
+    if (Error != ERROR_SUCCESS) {
+        if (Error == ERROR_FILE_NOT_FOUND) {
+            Value = 0;
+            goto done;
+        }
+
+        SetLastError(Error);
+        goto fail2;
+    }
+
+    if (Type != REG_DWORD) {
+        SetLastError(ERROR_BAD_FORMAT);
+        goto fail3;
+    }
+
+done:
+    Value++;
+
+    Error = RegSetValueEx(ServiceKey,
+                          "Count",
+                          0,
+                          REG_DWORD,
+                          (LPBYTE)&Value,
+                          ValueLength);
+    if (Error != ERROR_SUCCESS) {
+        SetLastError(Error);
+        goto fail4;
+    }
+
+    *Count = Value;
+
+    RegCloseKey(ServiceKey);
+
+    return TRUE;
+
+fail4:
+    Log("fail4");
+
+fail3:
+    Log("fail3");
+
+fail2:
+    Log("fail2");
+
+    RegCloseKey(ServiceKey);
+
+fail1:
+    Error = GetLastError();
+
+    {
+        PTCHAR  Message;
+
+        Message = __GetErrorMessage(Error);
+        Log("fail1 (%s)", Message);
+        LocalFree(Message);
+    }
+
+    return FALSE;
+}
+
+static BOOLEAN
+DecrementServiceCount(
+    OUT PDWORD  Count
+    )
+{
+    HKEY        ServiceKey;
+    DWORD       Value;
+    DWORD       ValueLength;
+    DWORD       Type;
+    HRESULT     Error;
+
+    Error = RegOpenKeyEx(HKEY_LOCAL_MACHINE,
+                         SERVICE_KEY(XENVIF),
+                         0,
+                         KEY_ALL_ACCESS,
+                         &ServiceKey);
+    if (Error != ERROR_SUCCESS) {
+        SetLastError(Error);
+        goto fail1;
+    }
+
+    ValueLength = sizeof (DWORD);
+
+    Error = RegQueryValueEx(ServiceKey,
+                            "Count",
+                            NULL,
+                            &Type,
+                            (LPBYTE)&Value,
+                            &ValueLength);
+    if (Error != ERROR_SUCCESS) {
+        SetLastError(Error);
+        goto fail2;
+    }
+
+    if (Type != REG_DWORD) {
+        SetLastError(ERROR_BAD_FORMAT);
+        goto fail3;
+    }
+
+    if (Value == 0) {
+        SetLastError(ERROR_INVALID_DATA);
+        goto fail4;
+    }
+
+    --Value;
+
+    Error = RegSetValueEx(ServiceKey,
+                          "Count",
+                          0,
+                          REG_DWORD,
+                          (LPBYTE)&Value,
+                          ValueLength);
+    if (Error != ERROR_SUCCESS) {
+        SetLastError(Error);
+        goto fail5;
+    }
+
+    *Count = Value;
+
+    RegCloseKey(ServiceKey);
+
+    return TRUE;
+
+fail5:
+    Log("fail5");
+
+fail4:
+    Log("fail4");
+
+fail3:
+    Log("fail3");
+
+fail2:
+    Log("fail2");
+
+    RegCloseKey(ServiceKey);
+
+fail1:
+    Error = GetLastError();
+
+    {
+        PTCHAR  Message;
+
+        Message = __GetErrorMessage(Error);
+        Log("fail1 (%s)", Message);
+        LocalFree(Message);
+    }
+
+    return FALSE;
+}
+
 static FORCEINLINE HRESULT
 __DifInstallPreProcess(
     IN  HDEVINFO                    DeviceInfoSet,
@@ -191,7 +370,7 @@ __DifInstallPreProcess(
 
     Log("<===>");
 
-    return ERROR_DI_POSTPROCESSING_REQUIRED; 
+    return NO_ERROR; 
 }
 
 static FORCEINLINE HRESULT
@@ -201,7 +380,9 @@ __DifInstallPostProcess(
     IN  PCOINSTALLER_CONTEXT_DATA   Context
     )
 {
+    DWORD                           Count;
     HRESULT                         Error;
+    BOOLEAN                         Success;
 
     UNREFERENCED_PARAMETER(DeviceInfoSet);
     UNREFERENCED_PARAMETER(DeviceInfoData);
@@ -214,9 +395,16 @@ __DifInstallPostProcess(
         goto fail1;
     }
 
+    Success = IncrementServiceCount(&Count);
+    if (!Success)
+        goto fail2;
+
     Log("<====");
 
     return NO_ERROR;
+
+fail2:
+    Log("fail2");
 
 fail1:
     Error = GetLastError();
@@ -224,7 +412,7 @@ fail1:
     {
         PTCHAR  Message;
 
-        Message = GetErrorMessage(Error);
+        Message = __GetErrorMessage(Error);
         Log("fail1 (%s)", Message);
         LocalFree(Message);
     }
@@ -251,9 +439,20 @@ DifInstall(
 
     Log("Flags = %08x", DeviceInstallParams.Flags);
 
-    Error = (!Context->PostProcessing) ?
-            __DifInstallPreProcess(DeviceInfoSet, DeviceInfoData, Context) :
-            __DifInstallPostProcess(DeviceInfoSet, DeviceInfoData, Context);
+    if (!Context->PostProcessing) {
+        Error = __DifInstallPreProcess(DeviceInfoSet, DeviceInfoData, Context);
+
+        Context->PrivateData = (PVOID)Error;
+
+        Error = ERROR_DI_POSTPROCESSING_REQUIRED; 
+    } else {
+        Error = (HRESULT)(DWORD_PTR)Context->PrivateData;
+        
+        if (Error == NO_ERROR)
+            (VOID) __DifInstallPostProcess(DeviceInfoSet, DeviceInfoData, Context);
+
+        Error = NO_ERROR; 
+    }
 
     return Error;
 
@@ -263,7 +462,7 @@ fail1:
     {
         PTCHAR  Message;
 
-        Message = GetErrorMessage(Error);
+        Message = __GetErrorMessage(Error);
         Log("fail1 (%s)", Message);
         LocalFree(Message);
     }
@@ -284,7 +483,7 @@ __DifRemovePreProcess(
 
     Log("<===>");
 
-    return ERROR_DI_POSTPROCESSING_REQUIRED; 
+    return NO_ERROR; 
 }
 
 static FORCEINLINE HRESULT
@@ -294,7 +493,9 @@ __DifRemovePostProcess(
     IN  PCOINSTALLER_CONTEXT_DATA   Context
     )
 {
+    DWORD                           Count;
     HRESULT                         Error;
+    BOOLEAN                         Success;
 
     UNREFERENCED_PARAMETER(DeviceInfoSet);
     UNREFERENCED_PARAMETER(DeviceInfoData);
@@ -307,9 +508,16 @@ __DifRemovePostProcess(
         goto fail1;
     }
 
+    Success = DecrementServiceCount(&Count);
+    if (!Success)
+        goto fail2;
+
     Log("<====");
 
     return NO_ERROR;
+
+fail2:
+    Log("fail2");
 
 fail1:
     Error = GetLastError();
@@ -317,7 +525,7 @@ fail1:
     {
         PTCHAR  Message;
 
-        Message = GetErrorMessage(Error);
+        Message = __GetErrorMessage(Error);
         Log("fail1 (%s)", Message);
         LocalFree(Message);
     }
@@ -344,9 +552,20 @@ DifRemove(
 
     Log("Flags = %08x", DeviceInstallParams.Flags);
 
-    Error = (!Context->PostProcessing) ?
-            __DifRemovePreProcess(DeviceInfoSet, DeviceInfoData, Context) :
-            __DifRemovePostProcess(DeviceInfoSet, DeviceInfoData, Context);
+    if (!Context->PostProcessing) {
+        Error = __DifRemovePreProcess(DeviceInfoSet, DeviceInfoData, Context);
+
+        Context->PrivateData = (PVOID)Error;
+
+        Error = ERROR_DI_POSTPROCESSING_REQUIRED; 
+    } else {
+        Error = (HRESULT)(DWORD_PTR)Context->PrivateData;
+        
+        if (Error == NO_ERROR)
+            (VOID) __DifRemovePostProcess(DeviceInfoSet, DeviceInfoData, Context);
+
+        Error = NO_ERROR; 
+    }
 
     return Error;
 
@@ -356,7 +575,7 @@ fail1:
     {
         PTCHAR  Message;
 
-        Message = GetErrorMessage(Error);
+        Message = __GetErrorMessage(Error);
         Log("fail1 (%s)", Message);
         LocalFree(Message);
     }
@@ -380,10 +599,10 @@ Entry(
 
     if (!Context->PostProcessing) {
         Log("%s PreProcessing",
-            FunctionName(Function));
+            __FunctionName(Function));
     } else {
         Log("%s PostProcessing (%08x)",
-            FunctionName(Function),
+            __FunctionName(Function),
             Context->InstallResult);
     }
 

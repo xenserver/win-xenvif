@@ -166,7 +166,7 @@ DriverUnload(
     if (*InitSafeBootMode > 0)
         goto done;
 
-    AliasesKey = __DriverGetParametersKey();
+    AliasesKey = __DriverGetAliasesKey();
     __DriverSetAliasesKey(NULL);
 
     RegistryCloseKey(AliasesKey);
