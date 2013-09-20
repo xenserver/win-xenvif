@@ -1831,7 +1831,8 @@ __FdoSetDevicePowerUp(
     if (!NT_SUCCESS(status))
         goto done;
 
-    Info("%s -> %s\n",
+    Info("%s: %s -> %s\n",
+         __FdoGetName(Fdo),
          PowerDeviceStateName(__FdoGetDevicePowerState(Fdo)),
          PowerDeviceStateName(DeviceState));
 
@@ -1862,7 +1863,8 @@ __FdoSetDevicePowerDown(
 
     ASSERT3U(DeviceState, >,  __FdoGetDevicePowerState(Fdo));
 
-    Info("%s -> %s\n",
+    Info("%s: %s -> %s\n",
+         __FdoGetName(Fdo),
          PowerDeviceStateName(__FdoGetDevicePowerState(Fdo)),
          PowerDeviceStateName(DeviceState));
 
@@ -1992,14 +1994,16 @@ __FdoSetSystemPowerUp(
     if (!NT_SUCCESS(status))
         goto done;
 
-    if (SystemState < PowerSystemHibernate &&
-        __FdoGetSystemPowerState(Fdo) >= PowerSystemHibernate)
-        __FdoSetSystemPowerState(Fdo, PowerSystemHibernate);
-        FdoS4ToS3(Fdo);
-
-    Info("%s -> %s\n",
+    Info("%s: %s -> %s\n",
+         __FdoGetName(Fdo),
          PowerSystemStateName(__FdoGetSystemPowerState(Fdo)),
          PowerSystemStateName(SystemState));
+
+    if (SystemState < PowerSystemHibernate &&
+        __FdoGetSystemPowerState(Fdo) >= PowerSystemHibernate) {
+        __FdoSetSystemPowerState(Fdo, PowerSystemHibernate);
+        FdoS4ToS3(Fdo);
+    }
 
     __FdoSetSystemPowerState(Fdo, SystemState);
 
@@ -2033,7 +2037,8 @@ __FdoSetSystemPowerDown(
 
     FdoRequestSetDevicePower(Fdo, DeviceState);
 
-    Info("%s -> %s\n",
+    Info("%s: %s -> %s\n",
+         __FdoGetName(Fdo),
          PowerSystemStateName(__FdoGetSystemPowerState(Fdo)),
          PowerSystemStateName(SystemState));
 
