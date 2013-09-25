@@ -38,12 +38,21 @@
     typedef type * __guest_handle_ ## name
 #endif
 
+/*
+ * XEN_GUEST_HANDLE represents a guest pointer, when passed as a field
+ * in a struct in memory.
+ * XEN_GUEST_HANDLE_PARAM represent a guest pointer, when passed as an
+ * hypercall argument.
+ * XEN_GUEST_HANDLE_PARAM and XEN_GUEST_HANDLE are the same on X86 but
+ * they might not be on other architectures.
+ */
 #define __DEFINE_XEN_GUEST_HANDLE(name, type) \
     ___DEFINE_XEN_GUEST_HANDLE(name, type);   \
     ___DEFINE_XEN_GUEST_HANDLE(const_##name, const type)
 #define DEFINE_XEN_GUEST_HANDLE(name)   __DEFINE_XEN_GUEST_HANDLE(name, name)
 #define __XEN_GUEST_HANDLE(name)        __guest_handle_ ## name
 #define XEN_GUEST_HANDLE(name)          __XEN_GUEST_HANDLE(name)
+#define XEN_GUEST_HANDLE_PARAM(name)    XEN_GUEST_HANDLE(name)
 #define set_xen_guest_handle_raw(hnd, val)  do { (hnd).p = val; } while (0)
 #ifdef __XEN_TOOLS__
 #define get_xen_guest_handle(val, hnd)  do { val = (hnd).p; } while (0)
@@ -61,18 +70,40 @@ typedef ULONG_PTR xen_pfn_t;
 #define PRI_xen_pfn "lx"
 #endif
 
+#define XEN_HAVE_PV_GUEST_ENTRY 1
+
+#define XEN_HAVE_PV_UPCALL_MASK 1
+
 /*
- * SEGMENT DESCRIPTOR TABLES
+ * `incontents 200 segdesc Segment Descriptor Tables
+ */
+/*
+ * ` enum neg_errnoval
+ * ` HYPERVISOR_set_gdt(const xen_pfn_t frames[], unsigned int entries);
+ * `
  */
 /*
  * A number of GDT entries are reserved by Xen. These are not situated at the
  * start of the GDT because some stupid OSes export hard-coded selector values
  * in their ABI. These hard-coded values are always near the start of the GDT,
  * so Xen places itself out of the way, at the far end of the GDT.
+ *
+ * NB The LDT is set using the MMUEXT_SET_LDT op of HYPERVISOR_mmuext_op
  */
 #define FIRST_RESERVED_GDT_PAGE  14
 #define FIRST_RESERVED_GDT_BYTE  (FIRST_RESERVED_GDT_PAGE * 4096)
 #define FIRST_RESERVED_GDT_ENTRY (FIRST_RESERVED_GDT_BYTE / 8)
+
+
+/*
+ * ` enum neg_errnoval
+ * ` HYPERVISOR_update_descriptor(u64 pa, u64 desc);
+ * `
+ * ` @pa   The machine physical address of the descriptor to
+ * `       update. Must be either a descriptor page or writable.
+ * ` @desc The descriptor value to update, in the same format as a
+ * `       native descriptor table entry.
+ */
 
 /* Maximum number of virtual CPUs in legacy multi-processor guests. */
 #define XEN_LEGACY_MAX_VCPUS 32
@@ -80,9 +111,23 @@ typedef ULONG_PTR xen_pfn_t;
 #ifndef __ASSEMBLY__
 
 typedef ULONG_PTR xen_ulong_t;
+#define PRI_xen_ulong "lx"
 
 /*
+ * ` enum neg_errnoval
+ * ` HYPERVISOR_stack_switch(ULONG_PTR ss, ULONG_PTR esp);
+ * `
+ * Sets the stack segment and pointer for the current vcpu.
+ */
+
+/*
+ * ` enum neg_errnoval
+ * ` HYPERVISOR_set_trap_table(const struct trap_info traps[]);
+ * `
+ */
+/*
  * Send an array of these to HYPERVISOR_set_trap_table().
+ * Terminate the array with a sentinel entry, with traps[].address==0.
  * The privilege level specifies which modes may enter a trap via a software
  * interrupt. On x86/64, since rings 1 and 2 are unavailable, we allocate
  * privilege levels as follows:
@@ -177,6 +222,24 @@ typedef struct arch_shared_info arch_shared_info_t;
 #endif /* !__ASSEMBLY__ */
 
 /*
+ * ` enum neg_errnoval
+ * ` HYPERVISOR_fpu_taskswitch(int set);
+ * `
+ * Sets (if set!=0) or clears (if set==0) CR0.TS.
+ */
+
+/*
+ * ` enum neg_errnoval
+ * ` HYPERVISOR_set_debugreg(int regno, ULONG_PTR value);
+ *
+ * ` ULONG_PTR
+ * ` HYPERVISOR_get_debugreg(int regno);
+ * For 0<=reg<=7, returns the debug register value.
+ * For other values of reg, returns ((ULONG_PTR)-EINVAL).
+ * (Unfortunately, this interface is defective.)
+ */
+
+/*
  * Prefix forces emulation of some non-trapping instructions.
  * Currently only CPUID.
  */
@@ -193,7 +256,7 @@ typedef struct arch_shared_info arch_shared_info_t;
 /*
  * Local variables:
  * mode: C
- * c-set-style: "BSD"
+ * c-file-style: "BSD"
  * c-basic-offset: 4
  * tab-width: 4
  * indent-tabs-mode: nil

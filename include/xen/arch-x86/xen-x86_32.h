@@ -29,21 +29,12 @@
 
 /*
  * Hypercall interface:
- *  Input:  %ebx, %ecx, %edx, %esi, %edi (arguments 1-5)
+ *  Input:  %ebx, %ecx, %edx, %esi, %edi, %ebp (arguments 1-6)
  *  Output: %eax
  * Access is via hypercall page (set up by guest loader or via a Xen MSR):
  *  call hypercall_page + hypercall-number * 32
  * Clobbered: Argument registers (e.g., 2-arg hypercall clobbers %ebx,%ecx)
  */
-
-#if __XEN_INTERFACE_VERSION__ < 0x00030203
-/*
- * Legacy hypercall interface:
- * As above, except the entry sequence to the hypervisor is:
- *  mov $hypercall-number*32,%eax ; int $0x82
- */
-#define TRAP_INSTR "int $0x82"
-#endif
 
 /*
  * These flat segments are in the Xen-private section of every GDT. Since these
@@ -172,7 +163,7 @@ typedef struct xen_callback xen_callback_t;
 /*
  * Local variables:
  * mode: C
- * c-set-style: "BSD"
+ * c-file-style: "BSD"
  * c-basic-offset: 4
  * tab-width: 4
  * indent-tabs-mode: nil
