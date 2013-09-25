@@ -1398,6 +1398,7 @@ __RingPreparePacket(
     PXENVIF_RECEIVER    Receiver;
     PXENVIF_FRONTEND    Frontend;
     PRECEIVER_TAG       Tag;
+    NTSTATUS            status;
 
     Receiver = Ring->Receiver;
     Frontend = Receiver->Frontend;
@@ -1406,13 +1407,14 @@ __RingPreparePacket(
 
     Tag->Context = Mdl;
 
-    GNTTAB(PermitForeignAccess,
-           Receiver->GnttabInterface,
-           Tag->Reference,
-           FrontendGetBackendDomain(Frontend),
-           GNTTAB_ENTRY_FULL_PAGE,
-           MmGetMdlPfnArray(Mdl)[0],
-           FALSE);
+    status = GNTTAB(PermitForeignAccess,
+                    Receiver->GnttabInterface,
+                    Tag->Reference,
+                    FrontendGetBackendDomain(Frontend),
+                    GNTTAB_ENTRY_FULL_PAGE,
+                    MmGetMdlPfnArray(Mdl)[0],
+                    FALSE);
+    ASSERT(NT_SUCCESS(status));
 
     return Tag;
 }
@@ -1424,12 +1426,14 @@ RingReleaseTag(
     )
 {
     PXENVIF_RECEIVER    Receiver;
+    NTSTATUS            status;
 
     Receiver = Ring->Receiver;
 
-    GNTTAB(RevokeForeignAccess,
-           Receiver->GnttabInterface,
-           Tag->Reference);
+    status = GNTTAB(RevokeForeignAccess,
+                    Receiver->GnttabInterface,
+                    Tag->Reference);
+    ASSERT(NT_SUCCESS(status));
 
     __RingPutTag(Ring, Tag);
 }
@@ -2077,13 +2081,14 @@ __RingConnect(
 
     Pfn = MmGetMdlPfnArray(Ring->Mdl)[0];
     
-    GNTTAB(PermitForeignAccess,
-           Receiver->GnttabInterface,
-           Ring->Reference,
-           FrontendGetBackendDomain(Frontend),
-           GNTTAB_ENTRY_FULL_PAGE,
-           Pfn,
-           FALSE);
+    status = GNTTAB(PermitForeignAccess,
+                    Receiver->GnttabInterface,
+                    Ring->Reference,
+                    FrontendGetBackendDomain(Frontend),
+                    GNTTAB_ENTRY_FULL_PAGE,
+                    Pfn,
+                    FALSE);
+    ASSERT(NT_SUCCESS(status));
 
     return STATUS_SUCCESS;
 
@@ -2385,6 +2390,7 @@ __RingDisconnect(
     PXENVIF_RECEIVER    Receiver;
     PXENVIF_FRONTEND    Frontend;
     ULONG               Count;
+    NTSTATUS            status;
 
     Receiver = Ring->Receiver;
     Frontend = Receiver->Frontend;
@@ -2398,9 +2404,10 @@ __RingDisconnect(
     Ring->RequestsPushed = 0;
     Ring->RequestsPosted = 0;
 
-    GNTTAB(RevokeForeignAccess,
-           Receiver->GnttabInterface,
-           Ring->Reference);
+    status = GNTTAB(RevokeForeignAccess,
+                    Receiver->GnttabInterface,
+                    Ring->Reference);
+    ASSERT(NT_SUCCESS(status));
 
     Count = 0;
     while (Ring->HeadFreeTag != TAG_INDEX_INVALID) {

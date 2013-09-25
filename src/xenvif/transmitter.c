@@ -758,13 +758,14 @@ __RingCopyPayload(
 
         Pfn = MmGetMdlPfnArray(Mdl)[0];
 
-        GNTTAB(PermitForeignAccess,
-               Transmitter->GnttabInterface,
-               Tag->Reference,
-               FrontendGetBackendDomain(Frontend),
-               GNTTAB_ENTRY_FULL_PAGE,
-               Pfn,
-               TRUE);
+        status = GNTTAB(PermitForeignAccess,
+                        Transmitter->GnttabInterface,
+                        Tag->Reference,
+                        FrontendGetBackendDomain(Frontend),
+                        GNTTAB_ENTRY_FULL_PAGE,
+                        Pfn,
+                        TRUE);
+        ASSERT(NT_SUCCESS(status));
 
         Tag->Offset = 0;
         Tag->Length = Mdl->ByteCount;
@@ -798,9 +799,9 @@ fail1:
         Tag->Length = 0;
         Tag->Offset = 0;
 
-        GNTTAB(RevokeForeignAccess,
-               Transmitter->GnttabInterface,
-               Tag->Reference);
+        (VOID) GNTTAB(RevokeForeignAccess,
+                      Transmitter->GnttabInterface,
+                      Tag->Reference);
 
         ASSERT3U(Tag->Type, ==, TAG_BUFFER);
         Buffer = Tag->Context;
@@ -877,13 +878,14 @@ __RingGrantPayload(
             PageOffset = MdlOffset & (PAGE_SIZE - 1);
             PageLength = __min(MdlLength, PAGE_SIZE - PageOffset);
 
-            GNTTAB(PermitForeignAccess,
-                   Transmitter->GnttabInterface,
-                   Tag->Reference,
-                   FrontendGetBackendDomain(Frontend),
-                   GNTTAB_ENTRY_FULL_PAGE,
-                   Pfn,
-                   TRUE);
+            status = GNTTAB(PermitForeignAccess,
+                            Transmitter->GnttabInterface,
+                            Tag->Reference,
+                            FrontendGetBackendDomain(Frontend),
+                            GNTTAB_ENTRY_FULL_PAGE,
+                            Pfn,
+                            TRUE);
+            ASSERT(NT_SUCCESS(status));
 
             Tag->Offset = PageOffset;
             Tag->Length = PageLength;
@@ -931,9 +933,9 @@ fail1:
         Tag->Length = 0;
         Tag->Offset = 0;
 
-        GNTTAB(RevokeForeignAccess,
-               Transmitter->GnttabInterface,
-               Tag->Reference);
+        (VOID) GNTTAB(RevokeForeignAccess,
+                      Transmitter->GnttabInterface,
+                      Tag->Reference);
 
         Tag->Context = NULL;
         Tag->Type = TAG_TYPE_INVALID;
@@ -1007,13 +1009,14 @@ __RingPrepareHeader(
 
     Pfn = MmGetMdlPfnArray(Mdl)[0];
 
-    GNTTAB(PermitForeignAccess,
-           Transmitter->GnttabInterface,
-           Tag->Reference,
-           FrontendGetBackendDomain(Frontend),
-           GNTTAB_ENTRY_FULL_PAGE,
-           Pfn,
-           TRUE);
+    status = GNTTAB(PermitForeignAccess,
+                    Transmitter->GnttabInterface,
+                    Tag->Reference,
+                    FrontendGetBackendDomain(Frontend),
+                    GNTTAB_ENTRY_FULL_PAGE,
+                    Pfn,
+                    TRUE);
+    ASSERT(NT_SUCCESS(status));
 
     Tag->Offset = 0;
     Tag->Length = Mdl->ByteCount + Payload->Length;
@@ -1340,9 +1343,9 @@ fail3:
     Tag->Length = 0;
     Tag->Offset = 0;
 
-    GNTTAB(RevokeForeignAccess,
-           Transmitter->GnttabInterface,
-           Tag->Reference);
+    (VOID) GNTTAB(RevokeForeignAccess,
+                  Transmitter->GnttabInterface,
+                  Tag->Reference);
 
     Tag->Context = NULL;
     Tag->Type = TAG_TYPE_INVALID;
@@ -1384,6 +1387,7 @@ __RingUnprepareTags(
         PLIST_ENTRY                 ListEntry;
         PTRANSMITTER_TAG            Tag;
         PXENVIF_TRANSMITTER_PACKET  Packet;
+        NTSTATUS                    status;
 
         --State->Count;
 
@@ -1397,9 +1401,10 @@ __RingUnprepareTags(
         Tag->Length = 0;
         Tag->Offset = 0;
 
-        GNTTAB(RevokeForeignAccess,
-               Transmitter->GnttabInterface,
-               Tag->Reference);
+        status = GNTTAB(RevokeForeignAccess,
+                        Transmitter->GnttabInterface,
+                        Tag->Reference);
+        ASSERT(NT_SUCCESS(status));
 
         switch (Tag->Type) {
         case TAG_BUFFER: {
@@ -1710,13 +1715,14 @@ __RingPrepareGratuitousArp(
 
     Pfn = MmGetMdlPfnArray(Mdl)[0];
 
-    GNTTAB(PermitForeignAccess,
-           Transmitter->GnttabInterface,
-           Tag->Reference,
-           FrontendGetBackendDomain(Frontend),
-           GNTTAB_ENTRY_FULL_PAGE,
-           Pfn,
-           TRUE);
+    status = GNTTAB(PermitForeignAccess,
+                    Transmitter->GnttabInterface,
+                    Tag->Reference,
+                    FrontendGetBackendDomain(Frontend),
+                    GNTTAB_ENTRY_FULL_PAGE,
+                    Pfn,
+                    TRUE);
+    ASSERT(NT_SUCCESS(status));
 
     Tag->Offset = 0;
     Tag->Length = Mdl->ByteCount;
@@ -1858,13 +1864,14 @@ __RingPrepareNeighbourAdvertisement(
 
     Pfn = MmGetMdlPfnArray(Mdl)[0];
 
-    GNTTAB(PermitForeignAccess,
-           Transmitter->GnttabInterface,
-           Tag->Reference,
-           FrontendGetBackendDomain(Frontend),
-           GNTTAB_ENTRY_FULL_PAGE,
-           Pfn,
-           TRUE);
+    status = GNTTAB(PermitForeignAccess,
+                    Transmitter->GnttabInterface,
+                    Tag->Reference,
+                    FrontendGetBackendDomain(Frontend),
+                    GNTTAB_ENTRY_FULL_PAGE,
+                    Pfn,
+                    TRUE);
+    ASSERT(NT_SUCCESS(status));
 
     Tag->Offset = 0;
     Tag->Length = Mdl->ByteCount;
@@ -2121,15 +2128,17 @@ __RingReleaseTag(
     )
 {
     PXENVIF_TRANSMITTER     Transmitter;
+    NTSTATUS                status;
 
     Transmitter = Ring->Transmitter;
 
     Tag->Length = 0;
     Tag->Offset = 0;
 
-    GNTTAB(RevokeForeignAccess,
-           Transmitter->GnttabInterface,
-           Tag->Reference);
+    status = GNTTAB(RevokeForeignAccess,
+                    Transmitter->GnttabInterface,
+                    Tag->Reference);
+    ASSERT(NT_SUCCESS(status));
 
     __TransmitterPutTag(Ring, Tag);
 }
@@ -3006,13 +3015,14 @@ __RingConnect(
 
     Pfn = MmGetMdlPfnArray(Ring->Mdl)[0];
 
-    GNTTAB(PermitForeignAccess,
-           Transmitter->GnttabInterface,
-           Ring->Reference,
-           FrontendGetBackendDomain(Frontend),
-           GNTTAB_ENTRY_FULL_PAGE,
-           Pfn,
-           FALSE);
+    status = GNTTAB(PermitForeignAccess,
+                    Transmitter->GnttabInterface,
+                    Ring->Reference,
+                    FrontendGetBackendDomain(Frontend),
+                    GNTTAB_ENTRY_FULL_PAGE,
+                    Pfn,
+                    FALSE);
+    ASSERT(NT_SUCCESS(status));
 
     Ring->Connected = TRUE;
 
@@ -3184,6 +3194,7 @@ __RingDisconnect(
     PXENVIF_TRANSMITTER     Transmitter;
     PXENVIF_FRONTEND        Frontend;
     ULONG                   Count;
+    NTSTATUS                status;
 
     ASSERT(Ring->Connected);
     Ring->Connected = FALSE;
@@ -3198,9 +3209,10 @@ __RingDisconnect(
     Ring->RequestsPushed = 0;
     Ring->RequestsPosted = 0;
 
-    GNTTAB(RevokeForeignAccess,
-           Transmitter->GnttabInterface,
-           Ring->Reference);
+    status = GNTTAB(RevokeForeignAccess,
+                    Transmitter->GnttabInterface,
+                    Ring->Reference);
+    ASSERT(NT_SUCCESS(status));
 
     Count = 0;
     while (Ring->HeadFreeTag != TAG_INDEX_INVALID) {

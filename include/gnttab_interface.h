@@ -34,9 +34,7 @@
 
 typedef enum _XENBUS_GNTTAB_ENTRY_TYPE {
     GNTTAB_ENTRY_TYPE_INVALID = 0,
-    GNTTAB_ENTRY_FULL_PAGE,
-    GNTTAB_ENTRY_SUB_PAGE,
-    GNTTAB_ENTRY_TRANSITIVE
+    GNTTAB_ENTRY_FULL_PAGE
 } XENBUS_GNTTAB_ENTRY_TYPE, *PXENBUS_GNTTAB_ENTRY_TYPE;
 
 typedef struct _XENBUS_GNTTAB_COPY_OPERATION {
@@ -76,7 +74,7 @@ typedef struct _XENBUS_GNTTAB_COPY_OPERATION {
                          IN  ULONG                   Reference      \
                          )                                          \
                          )                                          \
-        GNTTAB_OPERATION(VOID,                                      \
+        GNTTAB_OPERATION(NTSTATUS,                                  \
                          PermitForeignAccess,                       \
                          (                                          \
                          IN  PXENBUS_GNTTAB_CONTEXT   Context,      \
@@ -86,7 +84,7 @@ typedef struct _XENBUS_GNTTAB_COPY_OPERATION {
                          ...                                        \
                          )                                          \
                          )                                          \
-        GNTTAB_OPERATION(VOID,                                      \
+        GNTTAB_OPERATION(NTSTATUS,                                  \
                          RevokeForeignAccess,                       \
                          (                                          \
                          IN  PXENBUS_GNTTAB_CONTEXT  Context,       \
@@ -129,7 +127,7 @@ DEFINE_GUID(GUID_GNTTAB_INTERFACE,
             0xd6,
             0xe);
 
-#define GNTTAB_INTERFACE_VERSION    2
+#define GNTTAB_INTERFACE_VERSION    3
 
 #define GNTTAB_OPERATIONS(_Interface) \
         (PXENBUS_GNTTAB_OPERATIONS *)((ULONG_PTR)(_Interface))
