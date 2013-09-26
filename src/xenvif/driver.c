@@ -346,7 +346,7 @@ DriverEntry(
 
     __DriverSetServiceKey(ServiceKey);
 
-    (VOID) RegistryDeleteValue(ServiceKey, "AliasPresent");
+    (VOID) RegistryDeleteValue(ServiceKey, "NeedReboot");
 
     status = RegistryOpenSubKey(ServiceKey, 
                                 "Parameters", 
