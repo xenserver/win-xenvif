@@ -94,6 +94,12 @@ RegistryEnumerateSubKeys(
     );
 
 extern NTSTATUS
+RegistryDeleteValue(
+    IN  HANDLE      Key,
+    IN  PCHAR       Name
+    );
+
+extern NTSTATUS
 RegistryEnumerateValues(
     IN  HANDLE      Key,
     IN  NTSTATUS    (*Callback)(PVOID, HANDLE, PCHAR),

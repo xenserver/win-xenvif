@@ -979,6 +979,20 @@ PdoS3ToS4(
     Trace("(%s) <====\n", __PdoGetName(Pdo));
 }
 
+static FORCEINLINE VOID
+__PdoNotifyInstaller(
+    IN  PXENVIF_PDO Pdo
+    )
+{
+    HANDLE          ServiceKey;
+
+    UNREFERENCED_PARAMETER(Pdo);
+
+    ServiceKey = DriverGetServiceKey();
+
+    (VOID) RegistryUpdateDwordValue(ServiceKey, "NeedReboot", 1);
+}
+
 #define HKEY_LOCAL_MACHINE  "\\Registry\\Machine"
 #define CLASS_KEY           HKEY_LOCAL_MACHINE "\\SYSTEM\\CurrentControlSet\\Control\\Class"
 
@@ -1000,8 +1014,10 @@ __PdoCheckForAlias(
     EmulatedInterface = __PdoGetEmulatedInterface(Pdo);
 
     status = STATUS_NOT_SUPPORTED;
-    if (EmulatedInterface == NULL)
+    if (EmulatedInterface == NULL) {
+        __PdoNotifyInstaller(Pdo);
         goto fail1;
+    }
 
     AliasesKey = DriverGetAliasesKey();
     ASSERT(AliasesKey != NULL);
@@ -1053,8 +1069,10 @@ __PdoCheckForAlias(
     if (EMULATED(IsDevicePresent,
                  EmulatedInterface,
                  DeviceID,
-                 InstanceID))
+                 InstanceID)) {
+        __PdoNotifyInstaller(Pdo);
         goto fail7;
+    }
 
     EMULATED(Release, EmulatedInterface);
     

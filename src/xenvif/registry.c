@@ -392,6 +392,37 @@ fail1:
 }
 
 NTSTATUS
+RegistryDeleteValue(
+    IN  PHANDLE         Key,
+    IN  PCHAR           Name
+    )
+{
+    ANSI_STRING         Ansi;
+    UNICODE_STRING      Unicode;
+    NTSTATUS            status;
+
+    RtlInitAnsiString(&Ansi, Name);
+
+    status = RtlAnsiStringToUnicodeString(&Unicode, &Ansi, TRUE);
+    if (!NT_SUCCESS(status))
+        goto fail1;
+
+    status = ZwDeleteValueKey(Key, &Unicode);
+    if (!NT_SUCCESS(status))
+        goto fail2;
+
+    RtlFreeUnicodeString(&Unicode);
+
+    return STATUS_SUCCESS;
+
+fail2:
+    RtlFreeUnicodeString(&Unicode);
+
+fail1:
+    return status;
+}
+
+NTSTATUS
 RegistryEnumerateValues(
     IN  HANDLE                      Key,
     IN  NTSTATUS                    (*Callback)(PVOID, HANDLE, PCHAR),

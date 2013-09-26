@@ -38,6 +38,11 @@ DriverGetDriverObject(
     );
 
 extern HANDLE
+DriverGetServiceKey(
+    VOID
+    );
+
+extern HANDLE
 DriverGetParametersKey(
     VOID
     );

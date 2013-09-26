@@ -45,6 +45,7 @@ extern PULONG       InitSafeBootMode;
 
 typedef struct _XENVIF_DRIVER {
     PDRIVER_OBJECT      DriverObject;
+    HANDLE              ServiceKey;
     HANDLE              ParametersKey;
     HANDLE              AddressesKey;
     HANDLE              AliasesKey;
@@ -74,6 +75,30 @@ DriverGetDriverObject(
     )
 {
     return __DriverGetDriverObject();
+}
+
+static FORCEINLINE VOID
+__DriverSetServiceKey(
+    IN  HANDLE  Key
+    )
+{
+    Driver.ServiceKey = Key;
+}
+
+static FORCEINLINE HANDLE
+__DriverGetServiceKey(
+    VOID
+    )
+{
+    return Driver.ServiceKey;
+}
+
+HANDLE
+DriverGetServiceKey(
+    VOID
+    )
+{
+    return __DriverGetServiceKey();
 }
 
 static FORCEINLINE VOID
@@ -155,6 +180,7 @@ DriverUnload(
     IN  PDRIVER_OBJECT  DriverObject
     )
 {
+    HANDLE              ServiceKey;
     HANDLE              AliasesKey;
     HANDLE              AddressesKey;
     HANDLE              ParametersKey;
@@ -182,6 +208,11 @@ DriverUnload(
 
         RegistryCloseKey(ParametersKey);
     }
+
+    ServiceKey = __DriverGetServiceKey();
+    __DriverSetServiceKey(NULL);
+
+    RegistryCloseKey(ServiceKey);
 
     RegistryTeardown();
 
@@ -309,9 +340,13 @@ DriverEntry(
     if (!NT_SUCCESS(status))
         goto fail1;
 
-    status = RegistryOpenServiceKey(KEY_READ, &ServiceKey);
+    status = RegistryOpenServiceKey(KEY_ALL_ACCESS, &ServiceKey);
     if (!NT_SUCCESS(status))
         goto fail2;
+
+    __DriverSetServiceKey(ServiceKey);
+
+    (VOID) RegistryDeleteValue(ServiceKey, "AliasPresent");
 
     status = RegistryOpenSubKey(ServiceKey, 
                                 "Parameters", 
@@ -338,8 +373,6 @@ DriverEntry(
 
     __DriverSetAliasesKey(AliasesKey);
 
-    RegistryCloseKey(ServiceKey);
-
     DriverObject->DriverExtension->AddDevice = AddDevice;
 
     for (Index = 0; Index <= IRP_MJ_MAXIMUM_FUNCTION; Index++) {
@@ -364,6 +397,8 @@ fail3:
     Error("fail3\n");
 
     __DriverSetParametersKey(NULL);
+
+    __DriverSetServiceKey(NULL);
 
     RegistryCloseKey(ServiceKey);
 
