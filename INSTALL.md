@@ -1,14 +1,26 @@
-To install the XenServer Virtual Network Interface Device Driver onto a 
-XenServer Windows guest VM:
+Installing XenVif
+=================
 
-*    Copy xenvif.sys, xenvif_coinst.dll and xenvif.inf onto the 
-     guest VM 
-*    Install xenbus.sys on the guest VM
-*    Install xenvif.sys on the guest VM 
-*    Copy dpinst.exe from the Windows driver kit into the same folder as
-     xenvif.sys, xenvif_coinst.dll and xenvif.inf on the guest vm, ensuring 
-     the version of dpinst.exe matches the architecture of the version 
-     of Windows installed on your VM
-*    As administrator, run dpinst.exe on the guest vm
-*    If any warnings arise about unknown certificates, accept them
+It's important to note that the build scripts generate a driver which is
+*test signed*. This means that when the driver is installed on a 64-bit
+version of Windows you must enabled testsigning mode otherwise your system
+will fail signature verification checked on the next reboot.
+If you wish to install the test certificate on the target system then copy
+xenvif.pfx (which you'll find in he proj subdirectory) onto your system and
+use certmgr to install it. (It is not password protected).
 
+xenvif.sys binds to one of three devices which may be created by XenBus:
+
+1. XENBUS\\VEN_XSC000&DEV_VIF&REV_00000001
+2. XENBUS\\VEN_XS0001&DEV_VIF&REV_00000001
+3. XENBUS\\VEN_XS0002&DEV_VIF&REV_00000001
+
+The particular device present in your VM will be determined by the binding
+of the XenBus driver. The DeviceID of the PCI device to which it is bound is
+echoed in the VEN_ substring of the devices it creates. Hence only one of the
+above three variants will be present.
+
+To install the driver on your target system, copy the contents of the xenvif
+subdirectory onto the system, then navigate into the copy, to either the x86
+or x64 subdirectory (whichever is appropriate), and execute the copy of
+dpinst.exe you find there with Administrator privilege.
