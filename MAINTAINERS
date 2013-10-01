@@ -1,24 +1,20 @@
 List of maintainers and how to submit changes
 =============================================
 
-This is an early public release of the XenServer XenVif driver.
+If you wish to submit code, we recommend first reaching out to the maintainers,
+who will advise you on the precise procedure they wish to use.
 
-At the moment we are working hard on improving this early release, to make
-it easier to build and install and test on your own systems.  As such things 
-are in a state of flux, and we may well find it difficult to take submissions.
+We also request you follow these basic guidelines:
 
-We hope things will have improved by January 2014
+1.  Make sure you test your changes on both 32- and 64-bit versions of  Windows.
 
-If you do wish to submit code, we recommend reaching out to the maintainers
-first, who will attempt to steer you in the right direction.
+2.  Make sure your changes do not introduce any new prefast warnings.
 
-We also request you follow these guidelines:
-
-1.  All submissions must be made under the terms of the "Developer's Certificate
+3.  All submissions must be made under the terms of the "Developer's Certificate
     of Origin" (DC) and should include a Signed-off-by: line.
 
 2.  All Submissions should use Unix line endings for consitency with the rest of
-    the XenServer project
+    the XenServer project.
 
 3.  Each patch should include a descriptive commit comment that helps understand
     why the patch is necessary and why it works. This will be used both for
@@ -34,8 +30,7 @@ Maintainers List
 
 * Paul Durrant <paul.durrant@citrix.com>
 
-* Owen Smith <owen.smith@citrix.com>
-
 * Ben Chalmers <ben.chalmers@citrix.com>
 
+* Owen Smith <owen.smith@citrix.com>
 
