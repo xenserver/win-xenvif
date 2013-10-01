@@ -53,6 +53,10 @@
 #include "dbg_print.h"
 #include "assert.h"
 
+#ifndef XEN_NETIF_GSO_TYPE_TCPV6
+#define XEN_NETIF_GSO_TYPE_TCPV6    2
+#endif
+
 #define TRANSMITTER_POOL    'NART'
 
 typedef struct _TRANSMITTER_BUFFER {
