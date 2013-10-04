@@ -1029,11 +1029,15 @@ __RingProcessLargePacket(
 
     IpHeader = (PIP_HEADER)(InfoVa + Info->IpHeader.Offset);
 
-    if (IpHeader->Version == 4) {
-        Offload = (Ring->OffloadOptions.OffloadIpVersion4LargePacket) ? TRUE : FALSE;
+    if (Receiver->AllowGsoPackets) {
+        if (IpHeader->Version == 4) {
+            Offload = (Ring->OffloadOptions.OffloadIpVersion4LargePacket) ? TRUE : FALSE;
+        } else {
+            ASSERT3U(IpHeader->Version, ==, 6);
+            Offload = (Ring->OffloadOptions.OffloadIpVersion6LargePacket) ? TRUE : FALSE;
+        }
     } else {
-        ASSERT3U(IpHeader->Version, ==, 6);
-        Offload = (Ring->OffloadOptions.OffloadIpVersion6LargePacket) ? TRUE : FALSE;
+        Offload = FALSE;
     }
 
     if (IpHeader->Version == 4) {
