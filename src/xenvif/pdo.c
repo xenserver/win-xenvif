@@ -995,6 +995,90 @@ __PdoNotifyInstaller(
 
 #define HKEY_LOCAL_MACHINE  "\\Registry\\Machine"
 #define CLASS_KEY           HKEY_LOCAL_MACHINE "\\SYSTEM\\CurrentControlSet\\Control\\Class"
+#define NETWORK_KEY         HKEY_LOCAL_MACHINE "\\SYSTEM\\CurrentControlSet\\Control\\Network\\{4D36E972-E325-11CE-BFC1-08002BE10318}"
+
+static FORCEINLINE NTSTATUS
+__PdoGetDeviceInstanceIDFromAliasSoftwareKey(
+    IN      HANDLE          AliasSoftwareKey,
+    IN OUT  PANSI_STRING    *DeviceInstanceID
+    )
+{
+    HANDLE                      ConnectionKey;
+    HANDLE                      GuidKey;
+    HANDLE                      NetworkKey;
+    PANSI_STRING                Guid;
+    NTSTATUS                    status;
+    
+    status = RegistryQuerySzValue(AliasSoftwareKey,
+                                  "DeviceInstanceID",
+                                  DeviceInstanceID);
+    if (NT_SUCCESS(status))
+        return status;
+
+    // Win2k8 and earlier don't provide DeviceInstanceID
+
+    status = RegistryQuerySzValue(AliasSoftwareKey, 
+                                  "NetCfgInstanceId",
+                                  &Guid);
+    if (!NT_SUCCESS(status))
+        goto fail1;
+
+    status = RegistryOpenSubKey(NULL,
+                                NETWORK_KEY,
+                                KEY_READ,
+                                &NetworkKey);
+    if (!NT_SUCCESS(status))
+        goto fail2;
+    
+    status = RegistryOpenSubKey(NetworkKey,
+                                Guid->Buffer,
+                                KEY_READ,
+                                &GuidKey);
+    if (!NT_SUCCESS(status))
+        goto fail3;
+
+    status = RegistryOpenSubKey(GuidKey,
+                                "Connection",
+                                KEY_READ,
+                                &ConnectionKey);
+    if (!NT_SUCCESS(status))
+        goto fail4;
+
+    status = RegistryQuerySzValue(ConnectionKey,
+                                  "PnpInstanceID",
+                                  DeviceInstanceID);
+    if (!NT_SUCCESS(status))
+        goto fail5;
+    
+    RegistryCloseKey(ConnectionKey);
+    RegistryCloseKey(GuidKey);
+    RegistryCloseKey(NetworkKey);
+    RegistryFreeSzValue(Guid);
+    
+    return status;
+
+
+fail5:
+    Error("fail5\n");
+    RegistryCloseKey(ConnectionKey);
+
+fail4:
+    Error("fail4\n");
+    RegistryCloseKey(GuidKey);
+
+fail3:
+    Error("fail3\n");
+    RegistryCloseKey(NetworkKey);
+
+fail2:
+    Error("fail2\n");
+    RegistryFreeSzValue(Guid);
+
+fail1:
+    Error("fail1 (%08x)\n", status);
+
+    return status;
+}
 
 static FORCEINLINE NTSTATUS
 __PdoCheckForAlias(
@@ -1047,9 +1131,9 @@ __PdoCheckForAlias(
     if (!NT_SUCCESS(status))
         goto fail4;
 
-    status = RegistryQuerySzValue(AliasSoftwareKey,
-                                  "DeviceInstanceID",
-                                  &DeviceInstanceID);
+    status = __PdoGetDeviceInstanceIDFromAliasSoftwareKey(AliasSoftwareKey,
+                                                          &DeviceInstanceID);
+
     if (!NT_SUCCESS(status))
         goto fail5;
 
