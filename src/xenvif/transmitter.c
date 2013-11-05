@@ -2534,13 +2534,19 @@ __RingTryAcquireLock(
 
     ASSERT3U(KeGetCurrentIrql(), ==, DISPATCH_LEVEL);
 
+    KeMemoryBarrier();
+
     Old = (ULONG_PTR)Ring->Lock & ~LOCK_BIT;
     New = Old | LOCK_BIT;
 
     Acquired = ((ULONG_PTR)InterlockedCompareExchangePointer(&Ring->Lock, (PVOID)New, (PVOID)Old) == Old) ? TRUE : FALSE;
+
+    KeMemoryBarrier();
+
     if (Acquired) {
         ASSERT3P(Ring->LockThread, ==, NULL);
         Ring->LockThread = KeGetCurrentThread();
+        KeMemoryBarrier();
     }
 
     return Acquired;
@@ -2586,9 +2592,17 @@ __RingTryReleaseLock(
 
     Ring->LockThread = NULL;
 
+    KeMemoryBarrier();
+
     Released = ((ULONG_PTR)InterlockedCompareExchangePointer(&Ring->Lock, (PVOID)New, (PVOID)Old) == Old) ? TRUE : FALSE;
-    if (!Released)
+
+    KeMemoryBarrier();
+
+    if (!Released) {
+        ASSERT3P(Ring->LockThread, ==, NULL);
         Ring->LockThread = KeGetCurrentThread();
+        KeMemoryBarrier();
+    }
 
     return Released;
 }
@@ -2741,6 +2755,8 @@ __RingDumpAddressTable(
 
     Transmitter = Ring->Transmitter;
     Frontend = Transmitter->Frontend;
+
+    ASSERT(Transmitter->StoreInterface != NULL);
 
     STORE(Remove,
           Transmitter->StoreInterface,
