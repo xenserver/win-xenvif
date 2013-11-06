@@ -270,10 +270,7 @@ __ParseIpVersion6Header(
     Count = 0;
     Finished = FALSE;
 
-    while (!Finished) {
-        Count++;
-        ASSERT3U(Count, <, 100);
-
+    while (!Finished && Count < 100) {
         switch (NextHeader) {
         case IPPROTO_FRAGMENT: {
             PIPV6_FRAGMENT_HEADER   Fragment;
@@ -317,7 +314,12 @@ __ParseIpVersion6Header(
             Finished = TRUE;
             break;
         }
+
+        Count++;
     }
+
+    if (!Finished)
+        goto fail6;
 
     Info->IpOptions.Length = (ULONG)(Offset - Info->IpOptions.Offset);
     if (Info->IpOptions.Length == 0)
@@ -348,6 +350,7 @@ __ParseIpVersion6Header(
 done:
     return status;
 
+fail6:
 fail5:
 fail4:
     Info->IpOptions.Offset = 0;
