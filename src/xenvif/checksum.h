@@ -42,12 +42,6 @@ AccumulateChecksum(
     );
 
 extern USHORT
-FoldChecksum(
-    IN  ULONG   Accumulator,
-    IN  BOOLEAN Invert
-    );
-
-extern USHORT
 ChecksumIpVersion4Header(
     IN  PUCHAR              StartVa,
     IN  PXENVIF_PACKET_INFO Info

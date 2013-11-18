@@ -44,27 +44,27 @@
 static FORCEINLINE VOID
 __AccumulateChecksum(
     IN OUT  PULONG  Accumulator,
-    IN      PVOID   MappedSystemVa,
+    IN      PUCHAR  MappedSystemVa,
     IN      ULONG   ByteCount
     )
 {
-    PUSHORT         Word;
+    ULONG           Current;
 
-    Word = (PUSHORT)MappedSystemVa;
+    Current = *Accumulator;
+
     while (ByteCount > 1) {
-        *Accumulator += *Word++;
+        Current += *((PUSHORT)MappedSystemVa);
+        if (Current & (1 << 31))
+            Current = (Current & 0xFFFF) + (Current >> 16);
+        MappedSystemVa += 2;
         ByteCount -= 2;
     }
 
-    if (ByteCount != 0) {
-        UCHAR Extra[2];
+    if (ByteCount != 0)
+        Current += (USHORT)*MappedSystemVa;
 
-        Extra[0] = *((PUCHAR)Word);
-        Extra[1] = 0;
-
-        Word = (PUSHORT)Extra;
-        *Accumulator += *Word;
-    }
+    while ((Current >> 16) != 0)
+        Current = (Current & 0xFFFF) + (Current >> 16);
 }
 
 VOID
@@ -75,27 +75,6 @@ AccumulateChecksum(
     )
 {
     __AccumulateChecksum(Accumulator, MappedSystemVa, ByteCount);
-}
-
-static FORCEINLINE USHORT
-__FoldChecksum(
-    IN  ULONG   Accumulator,
-    IN  BOOLEAN Invert
-    )
-{
-    Accumulator = (Accumulator & 0xFFFF) + (Accumulator >> 16);
-    Accumulator += Accumulator >> 16;
-
-    return (USHORT)((Invert) ? ~Accumulator : Accumulator);
-}
-
-USHORT
-FoldChecksum(
-    IN  ULONG   Accumulator,
-    IN  BOOLEAN Invert
-    )
-{
-    return __FoldChecksum(Accumulator, Invert);
 }
 
 static FORCEINLINE USHORT
@@ -119,7 +98,7 @@ __ChecksumIpVersion4PseudoHeader(
     Accumulator = 0;
     __AccumulateChecksum(&Accumulator, (PUCHAR)&Header, sizeof (IPV4_PSEUDO_HEADER));
 
-    return __FoldChecksum(Accumulator, FALSE);
+    return (USHORT)Accumulator;
 }
 
 USHORT
@@ -157,7 +136,7 @@ __ChecksumIpVersion6PseudoHeader(
     Accumulator = 0;
     __AccumulateChecksum(&Accumulator, (PUCHAR)&Header, sizeof (IPV6_PSEUDO_HEADER));
 
-    return __FoldChecksum(Accumulator, FALSE);
+    return (USHORT)Accumulator;
 }
 
 USHORT
@@ -252,7 +231,7 @@ ChecksumIpVersion4Header(
                              StartVa + Info->IpOptions.Offset,
                              Info->IpOptions.Length);
 
-    return __FoldChecksum(Accumulator, TRUE);
+    return (USHORT)~Accumulator;
 }
 
 USHORT
@@ -334,7 +313,7 @@ ChecksumTcpPacket(
         Offset = 0;
     }
 
-    return __FoldChecksum(Accumulator, TRUE);
+    return (USHORT)~Accumulator;
 }
 
 USHORT
@@ -410,5 +389,5 @@ ChecksumUdpPacket(
         Offset = 0;
     }
 
-    return __FoldChecksum(Accumulator, TRUE);
+    return (USHORT)~Accumulator;
 }

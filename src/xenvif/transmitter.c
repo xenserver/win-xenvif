@@ -1858,7 +1858,7 @@ __RingPrepareNeighbourAdvertisement(
                                                  IPPROTO_ICMPV6);
     AccumulateChecksum(&Accumulator, IcmpHeader, PayloadLength);
 
-    IcmpHeader->Checksum = FoldChecksum(Accumulator, TRUE);
+    IcmpHeader->Checksum = (USHORT)~Accumulator;
 
     Tag = __TransmitterGetTag(Ring);
 
