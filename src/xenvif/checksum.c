@@ -65,6 +65,8 @@ __AccumulateChecksum(
 
     while ((Current >> 16) != 0)
         Current = (Current & 0xFFFF) + (Current >> 16);
+
+    *Accumulator = Current;
 }
 
 VOID
@@ -97,6 +99,9 @@ __ChecksumIpVersion4PseudoHeader(
 
     Accumulator = 0;
     __AccumulateChecksum(&Accumulator, (PUCHAR)&Header, sizeof (IPV4_PSEUDO_HEADER));
+
+    // As-per RFC1624, Accumulator should never be 0.
+    ASSERT(Accumulator != 0);
 
     return (USHORT)Accumulator;
 }
@@ -135,6 +140,9 @@ __ChecksumIpVersion6PseudoHeader(
 
     Accumulator = 0;
     __AccumulateChecksum(&Accumulator, (PUCHAR)&Header, sizeof (IPV6_PSEUDO_HEADER));
+
+    // As-per RFC1624, Accumulator should never be 0.
+    ASSERT(Accumulator != 0);
 
     return (USHORT)Accumulator;
 }
@@ -231,6 +239,9 @@ ChecksumIpVersion4Header(
                              StartVa + Info->IpOptions.Offset,
                              Info->IpOptions.Length);
 
+    // As-per RFC1624, Accumulator should never be 0.
+    ASSERT(Accumulator != 0);
+
     return (USHORT)~Accumulator;
 }
 
@@ -313,6 +324,9 @@ ChecksumTcpPacket(
         Offset = 0;
     }
 
+    // As-per RFC1624, Accumulator should never be 0.
+    ASSERT(Accumulator != 0);
+
     return (USHORT)~Accumulator;
 }
 
@@ -388,6 +402,9 @@ ChecksumUdpPacket(
         Mdl = Mdl->Next;
         Offset = 0;
     }
+
+    // As-per RFC1624, Accumulator should never be 0.
+    ASSERT(Accumulator != 0);
 
     return (USHORT)~Accumulator;
 }

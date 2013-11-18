@@ -567,7 +567,8 @@ RingProcessChecksum(
                 else
                     Ring->OffloadStatistics.IpVersion6UdpChecksumCalculated++;
 
-                if (Embedded == Calculated) {
+                if (Embedded == 0 ||    // Tolarate zero checksum for IPv4/UDP
+                    Embedded == Calculated) {
                     Packet->Flags.UdpChecksumSucceeded = 1;
 
                     if (IpHeader->Version == 4)
@@ -1012,6 +1013,8 @@ __RingProcessLargePacket(
     Receiver = Ring->Receiver;
 
     Info = &Packet->Info;
+    ASSERT(Info->IpHeader.Offset != 0);
+    ASSERT(Info->TcpHeader.Offset != 0);
     
     flags = (uint16_t)(ULONG_PTR)Packet->Cookie;
     ASSERT(flags & NETRXF_csum_blank);
