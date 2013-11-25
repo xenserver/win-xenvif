@@ -189,9 +189,10 @@ __ParseIpVersion4Header(
     Info->Length += Info->IpHeader.Length + Info->IpOptions.Length;
 
     FragmentOffsetAndFlags = NTOHS(Header->FragmentOffsetAndFlags);
+    Info->Flags.IsAFragment = IPV4_IS_A_FRAGMENT(FragmentOffsetAndFlags) ? 1 : 0;
     
     status = STATUS_SUCCESS;
-    if (IPV4_IS_A_FRAGMENT(FragmentOffsetAndFlags))
+    if (Info->Flags.IsAFragment)
         goto done;
 
     switch (Header->Protocol) {
@@ -238,7 +239,6 @@ __ParseIpVersion6Header(
 {
     PIPV6_HEADER                        Header;
     USHORT                              PayloadLength;
-    BOOLEAN                             IsAFragment;
     UCHAR                               NextHeader;
     ULONG                               Count;
     BOOLEAN                             Finished;
@@ -264,8 +264,6 @@ __ParseIpVersion6Header(
 
     Info->IpOptions.Offset = Offset;
 
-    IsAFragment = FALSE;
-
     NextHeader = Header->NextHeader;
     Count = 0;
     Finished = FALSE;
@@ -283,7 +281,7 @@ __ParseIpVersion6Header(
             Offset += sizeof (IPV6_FRAGMENT_HEADER);
 
             FragmentOffsetAndFlags = NTOHS(Fragment->OffsetAndFlags);
-            IsAFragment = IPV6_IS_A_FRAGMENT(FragmentOffsetAndFlags) ? TRUE : FALSE;
+            Info->Flags.IsAFragment = IPV6_IS_A_FRAGMENT(FragmentOffsetAndFlags) ? 1 : 0;
 
             NextHeader = Fragment->NextHeader;
             break;
@@ -330,7 +328,7 @@ __ParseIpVersion6Header(
     Info->Length += Info->IpHeader.Length + Info->IpOptions.Length;
 
     status = STATUS_SUCCESS;
-    if (IsAFragment)
+    if (Info->Flags.IsAFragment)
         goto done;
     
     switch (NextHeader) {

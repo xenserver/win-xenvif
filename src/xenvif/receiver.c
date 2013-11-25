@@ -54,6 +54,7 @@
 #include "mac.h"
 #include "vif.h"
 #include "receiver.h"
+#include "thread.h"
 #include "driver.h"
 #include "dbg_print.h"
 #include "assert.h"
@@ -136,6 +137,8 @@ struct _XENVIF_RECEIVER {
 
     ULONG                       CalculateChecksums;
     ULONG                       AllowGsoPackets;
+    ULONG                       DisableIpVersion4Gso;
+    ULONG                       DisableIpVersion6Gso;
     ULONG                       IpAlignOffset;
     ULONG                       AlwaysPullup;
 
@@ -373,7 +376,6 @@ RingProcessChecksum(
     uint16_t                    flags;
     PUCHAR                      StartVa;
     PIP_HEADER                  IpHeader;
-    BOOLEAN                     IsAFragment;
 
     Receiver = Ring->Receiver;
 
@@ -438,15 +440,9 @@ RingProcessChecksum(
         } else {
             IpHeader->Version4.Checksum = 0;
         }
-
-        IsAFragment = IPV4_IS_A_FRAGMENT(NTOHS(IpHeader->Version4.FragmentOffsetAndFlags)) ? TRUE : FALSE;
-    } else {
-        ASSERT3U(IpHeader->Version, ==, 6);
-
-        IsAFragment = FALSE;  // No fragmentation in IPv6
     }
 
-    if (Info->TcpHeader.Length != 0 && !IsAFragment) {
+    if (Info->TcpHeader.Length != 0 && !Info->Flags.IsAFragment) {
         PTCP_HEADER     TcpHeader;
         BOOLEAN         OffloadChecksum;
 
@@ -475,6 +471,8 @@ RingProcessChecksum(
                 ASSERT(~flags & NETRXF_csum_blank);
 
                 Embedded = TcpHeader->Checksum;
+                if (Embedded == 0xFFFF)
+                    Warning("Invalid TCP checksum\n");
 
                 Calculated = ChecksumPseudoHeader(StartVa, Info);
                 Calculated = ChecksumTcpPacket(StartVa, Info, Calculated, &Payload);
@@ -526,10 +524,8 @@ RingProcessChecksum(
                 Ring->OffloadStatistics.IpVersion4TcpChecksumPresent++;
             else
                 Ring->OffloadStatistics.IpVersion6TcpChecksumPresent++;
-        } else {
-            TcpHeader->Checksum = 0;
         }
-    } else if (Info->UdpHeader.Length != 0 && !IsAFragment) {
+    } else if (Info->UdpHeader.Length != 0 && !Info->Flags.IsAFragment) {
         PUDP_HEADER     UdpHeader;
         BOOLEAN         OffloadChecksum;
 
@@ -558,6 +554,8 @@ RingProcessChecksum(
                 ASSERT(~flags & NETRXF_csum_blank);
 
                 Embedded = UdpHeader->Checksum;
+                if (Embedded == 0xFFFF)
+                    Warning("Invalid UDP checksum\n");
 
                 Calculated = ChecksumPseudoHeader(StartVa, Info);
                 Calculated = ChecksumUdpPacket(StartVa, Info, Calculated, &Payload);
@@ -611,8 +609,6 @@ RingProcessChecksum(
                 Ring->OffloadStatistics.IpVersion4UdpChecksumPresent++;
             else
                 Ring->OffloadStatistics.IpVersion6UdpChecksumPresent++;
-        } else {
-            UdpHeader->Checksum = 0;
         }
     }
 }
@@ -1484,8 +1480,12 @@ RingFill(
     RING_IDX            req_prod;
     RING_IDX            rsp_cons;
 
+    KeMemoryBarrier();
+
     req_prod = Ring->Front.req_prod_pvt;
     rsp_cons = Ring->Front.rsp_cons;
+
+    KeMemoryBarrier();
 
     while (req_prod - rsp_cons < RING_SIZE(&Ring->Front)) {
         PXENVIF_RECEIVER_PACKET Packet;
@@ -1517,6 +1517,8 @@ RingFill(
         ASSERT(IsZeroMemory(&Ring->Pending[id], sizeof (netif_rx_request_t)));
         Ring->Pending[id] = *req;
     }
+
+    KeMemoryBarrier();
 
     Ring->Front.req_prod_pvt = req_prod;
 
@@ -2023,6 +2025,8 @@ __RingInitialize(
     return STATUS_SUCCESS;
 
 fail2:
+    Error("fail2\n");
+
     RtlZeroMemory(&(*Ring)->Lock, sizeof (KSPIN_LOCK));
 
     ASSERT(IsZeroMemory(*Ring, sizeof (RECEIVER_RING)));
@@ -2457,13 +2461,13 @@ __RingTeardown(
     IN  PRECEIVER_RING  Ring
     )
 {
-    Ring->Receiver = NULL;
-
     Ring->OffloadOptions.Value = 0;
 
     RtlZeroMemory(&Ring->HeaderStatistics, sizeof (XENVIF_HEADER_STATISTICS));
     RtlZeroMemory(&Ring->OffloadStatistics, sizeof (RECEIVER_OFFLOAD_STATISTICS));
     RtlZeroMemory(&Ring->PacketStatistics, sizeof (XENVIF_RECEIVER_PACKET_STATISTICS));
+
+    Ring->Receiver = NULL;
 
     ASSERT(IsListEmpty(&Ring->PacketList));
     RtlZeroMemory(&Ring->PacketList, sizeof (LIST_ENTRY));
@@ -2600,12 +2604,16 @@ ReceiverInitialize(
 
     (*Receiver)->CalculateChecksums = 1;
     (*Receiver)->AllowGsoPackets = 1;
+    (*Receiver)->DisableIpVersion4Gso = 0;
+    (*Receiver)->DisableIpVersion6Gso = 0;
     (*Receiver)->IpAlignOffset = 0;
     (*Receiver)->AlwaysPullup = 0;
 
     if (ParametersKey != NULL) {
         ULONG   ReceiverCalculateChecksums;
         ULONG   ReceiverAllowGsoPackets;
+        ULONG   ReceiverDisableIpVersion4Gso;
+        ULONG   ReceiverDisableIpVersion6Gso;
         ULONG   ReceiverIpAlignOffset;
         ULONG   ReceiverAlwaysPullup;
 
@@ -2620,6 +2628,18 @@ ReceiverInitialize(
                                          &ReceiverAllowGsoPackets);
         if (NT_SUCCESS(status))
             (*Receiver)->AllowGsoPackets = ReceiverAllowGsoPackets;
+
+        status = RegistryQueryDwordValue(ParametersKey,
+                                         "ReceiverDisableIpVersion4Gso",
+                                         &ReceiverDisableIpVersion4Gso);
+        if (NT_SUCCESS(status))
+            (*Receiver)->DisableIpVersion4Gso = ReceiverDisableIpVersion4Gso;
+
+        status = RegistryQueryDwordValue(ParametersKey,
+                                         "ReceiverDisableIpVersion6Gso",
+                                         &ReceiverDisableIpVersion6Gso);
+        if (NT_SUCCESS(status))
+            (*Receiver)->DisableIpVersion6Gso = ReceiverDisableIpVersion6Gso;
 
         status = RegistryQueryDwordValue(ParametersKey,
                                          "ReceiverIpAlignOffset",
@@ -2678,6 +2698,8 @@ fail2:
 
     (*Receiver)->CalculateChecksums = 0;
     (*Receiver)->AllowGsoPackets = 0;
+    (*Receiver)->DisableIpVersion4Gso = 0;
+    (*Receiver)->DisableIpVersion6Gso = 0;
     (*Receiver)->IpAlignOffset = 0;
     (*Receiver)->AlwaysPullup = 0;
 
@@ -2705,7 +2727,7 @@ __ReceiverSetGsoFeatureFlag(
                  FrontendGetPath(Frontend),
                  "feature-gso-tcpv4-prefix",
                  "%u",
-                 TRUE);
+                 (Receiver->DisableIpVersion4Gso == 0) ? TRUE : FALSE);
 
     (VOID) STORE(Printf,
                  Receiver->StoreInterface,
@@ -2713,7 +2735,7 @@ __ReceiverSetGsoFeatureFlag(
                  FrontendGetPath(Frontend),
                  "feature-gso-tcpv6-prefix",
                  "%u",
-                 TRUE);
+                 (Receiver->DisableIpVersion6Gso == 0) ? TRUE : FALSE);
 }
 
 NTSTATUS
@@ -3008,6 +3030,8 @@ ReceiverTeardown(
 
     Receiver->CalculateChecksums = 0;
     Receiver->AllowGsoPackets = 0;
+    Receiver->DisableIpVersion4Gso = 0;
+    Receiver->DisableIpVersion6Gso = 0;
     Receiver->IpAlignOffset = 0;
     Receiver->AlwaysPullup = 0;
 

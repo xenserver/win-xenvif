@@ -35,8 +35,6 @@
 #include <ifdef.h>
 #include <ethernet.h>
 
-#define MAX_SKB_FRAGS   ((65536/PAGE_SIZE) + 2)
-
 typedef UCHAR   XENVIF_PACKET_STATUS, *PXENVIF_PACKET_STATUS;
 
 #define PACKET_STATUS_INVALID   0
@@ -50,6 +48,19 @@ typedef struct  _XENVIF_PACKET_HEADER {
     ULONG   Length;
 } XENVIF_PACKET_HEADER, *PXENVIF_PACKET_HEADER;
 
+#pragma warning(push)
+#pragma warning(disable:4214)   // nonstandard extension used : bit field types other than int
+#pragma warning(disable:4201)   // nonstandard extension used : nameless struct/union
+
+typedef struct _XENVIF_PACKET_FLAGS {
+    struct {
+        ULONG   IsAFragment:1;
+        ULONG   Reserved:31;
+    };
+} XENVIF_PACKET_FLAGS, *PXENVIF_PACKET_FLAGS;
+
+#pragma warning(pop)
+
 typedef struct _XENVIF_PACKET_INFO {
     XENVIF_PACKET_HEADER    EthernetHeader;
     XENVIF_PACKET_HEADER    LLCSnapHeader;
@@ -58,6 +69,7 @@ typedef struct _XENVIF_PACKET_INFO {
     XENVIF_PACKET_HEADER    TcpHeader;
     XENVIF_PACKET_HEADER    TcpOptions;
     XENVIF_PACKET_HEADER    UdpHeader;
+    XENVIF_PACKET_FLAGS     Flags;
     ULONG                   Length;
 } XENVIF_PACKET_INFO, *PXENVIF_PACKET_INFO;
 
@@ -403,7 +415,7 @@ DEFINE_GUID(GUID_VIF_INTERFACE,
             0x95,
             0xc3);
 
-#define VIF_INTERFACE_VERSION    12
+#define VIF_INTERFACE_VERSION    13
 
 #define VIF_OPERATIONS(_Interface) \
         (PXENVIF_VIF_OPERATIONS *)((ULONG_PTR)(_Interface))
