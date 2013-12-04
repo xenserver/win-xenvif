@@ -31,6 +31,7 @@
 
 #include <ntddk.h>
 #include <ntstrsafe.h>
+#include <stdlib.h>
 #include <util.h>
 #include <evtchn_interface.h>
 #include <store_interface.h>
@@ -43,14 +44,22 @@
 #include "dbg_print.h"
 #include "assert.h"
 
+typedef enum _NOTIFIER_EVTCHN {
+    NOTIFIER_EVTCHN_COMBINED = 0,
+    NOTIFIER_EVTCHN_RX,
+    NOTIFIER_EVTCHN_TX,
+    NOTIFIER_EVTCHN_COUNT
+} NOTIFIER_EVTCHN, *PNOTIFIER_EVTCHN;
+
 struct _XENVIF_NOTIFIER {
     PXENVIF_FRONTEND            Frontend;
-    PXENBUS_EVTCHN_DESCRIPTOR   Evtchn;
-    KDPC                        Dpc;
-    ULONG                       Events;
-    ULONG                       Dpcs;
+    PXENBUS_EVTCHN_DESCRIPTOR   Evtchn[NOTIFIER_EVTCHN_COUNT];
+    KDPC                        Dpc[NOTIFIER_EVTCHN_COUNT];
+    ULONG                       Dpcs[NOTIFIER_EVTCHN_COUNT];
+    ULONG                       Events[NOTIFIER_EVTCHN_COUNT];
     BOOLEAN                     Connected;
     KSPIN_LOCK                  Lock;
+    BOOLEAN                     Split;
     BOOLEAN                     Enabled;
 
     PXENBUS_EVTCHN_INTERFACE    EvtchnInterface;
@@ -78,25 +87,10 @@ __NotifierFree(
     __FreePoolWithTag(Buffer, NOTIFIER_POOL);
 }
 
-#pragma warning(push)
-#pragma warning(disable:6011)   // Dereferencing NULL pointer
-
-static FORCEINLINE VOID
-__NotifierNotify(
-    IN  PXENVIF_NOTIFIER    Notifier
-    )
-{
-    PXENVIF_FRONTEND        Frontend;
-
-    Frontend = Notifier->Frontend;
-
-    TransmitterNotify(FrontendGetTransmitter(Frontend));
-    ReceiverNotify(FrontendGetReceiver(Frontend));
-}
-
 static FORCEINLINE BOOLEAN
 __NotifierUnmask(
-    IN  PXENVIF_NOTIFIER    Notifier
+    IN  PXENVIF_NOTIFIER    Notifier,
+    IN  NOTIFIER_EVTCHN     Index
     )
 {
     BOOLEAN                 Pending;
@@ -106,7 +100,7 @@ __NotifierUnmask(
     Pending = (Notifier->Connected) ?
               EVTCHN(Unmask,
                      Notifier->EvtchnInterface,
-                     Notifier->Evtchn,
+                     Notifier->Evtchn[Index],
                      FALSE) :
               FALSE;
 
@@ -115,6 +109,8 @@ __NotifierUnmask(
     return Pending;
 }
 
+#pragma warning(push)
+#pragma warning(disable:6011)   // Dereferencing NULL pointer
 
 KDEFERRED_ROUTINE   NotifierDpc;
 
@@ -127,45 +123,96 @@ NotifierDpc(
     )
 {
     PXENVIF_NOTIFIER    Notifier = Context;
+    NOTIFIER_EVTCHN     Index = (ULONG_PTR)Argument1;
+    PXENVIF_FRONTEND    Frontend;
     BOOLEAN             Pending;
 
     UNREFERENCED_PARAMETER(Dpc);
-    UNREFERENCED_PARAMETER(Argument1);
     UNREFERENCED_PARAMETER(Argument2);
 
     ASSERT(Notifier != NULL);
 
-    do {
-        if (Notifier->Enabled)
-            __NotifierNotify(Notifier);
+    Frontend = Notifier->Frontend;
 
-        Pending = __NotifierUnmask(Notifier);
+    do {
+        if (Notifier->Enabled) {
+            switch (Index) {
+            case NOTIFIER_EVTCHN_TX:
+                TransmitterNotify(FrontendGetTransmitter(Frontend));
+                break;
+
+            case NOTIFIER_EVTCHN_RX:
+                ReceiverNotify(FrontendGetReceiver(Frontend));
+                break;
+
+            case NOTIFIER_EVTCHN_COMBINED:
+                TransmitterNotify(FrontendGetTransmitter(Frontend));
+                ReceiverNotify(FrontendGetReceiver(Frontend));
+                break;
+
+            default:
+                ASSERT(FALSE);
+                break;
+            }
+        }
+
+        Pending = __NotifierUnmask(Notifier, Index);
     } while (Pending);
 }
 
-#pragma warning(pop)
-
-KSERVICE_ROUTINE    NotifierEvtchnCallback;
-
-BOOLEAN
-NotifierEvtchnCallback(
-    IN  PKINTERRUPT         InterruptObject,
-    IN  PVOID               Argument
+static FORCEINLINE BOOLEAN
+__NotifierEvtchnCallback(
+    IN  PXENVIF_NOTIFIER    Notifier,
+    IN  NOTIFIER_EVTCHN     Index
     )
 {
-    PXENVIF_NOTIFIER        Notifier = Argument;
+    Notifier->Events[Index]++;
 
-    UNREFERENCED_PARAMETER(InterruptObject);
-
-    ASSERT(Notifier != NULL);
-
-    Notifier->Events++;
-
-    if (KeInsertQueueDpc(&Notifier->Dpc, NULL, NULL))
-        Notifier->Dpcs++;
+    if (KeInsertQueueDpc(&Notifier->Dpc[Index],
+                         (PVOID)(ULONG_PTR)Index,
+                         NULL))
+        Notifier->Dpcs[Index]++;
 
     return TRUE;
 }
+
+#define DEFINE_NOTIFIER_EVTCHN_CALLBACK(_Type)                  \
+                                                                \
+KSERVICE_ROUTINE    Notifier_ ## _Type ## _EvtchnCallback;      \
+                                                                \
+BOOLEAN                                                         \
+Notifier_ ## _Type ## _EvtchnCallback(                          \
+    IN  PKINTERRUPT         InterruptObject,                    \
+    IN  PVOID               Argument                            \
+    )                                                           \
+{                                                               \
+    PXENVIF_NOTIFIER        Notifier = Argument;                \
+                                                                \
+    UNREFERENCED_PARAMETER(InterruptObject);                    \
+                                                                \
+    ASSERT(Notifier != NULL);                                   \
+    return __NotifierEvtchnCallback(Notifier,                   \
+                                    NOTIFIER_EVTCHN_ ## _Type); \
+}
+
+DEFINE_NOTIFIER_EVTCHN_CALLBACK(COMBINED)
+DEFINE_NOTIFIER_EVTCHN_CALLBACK(RX)
+DEFINE_NOTIFIER_EVTCHN_CALLBACK(TX)
+
+#undef DEFINE_NOTIFIER_EVTCHN_CALLBACK
+
+#define DEFINE_NOTIFIER_EVTCHN_CALLBACK(_Type)                  \
+    Notifier_ ## _Type ## _EvtchnCallback,
+
+PKSERVICE_ROUTINE   NotifierEvtchnCallback[] = {
+    DEFINE_NOTIFIER_EVTCHN_CALLBACK(COMBINED)
+    DEFINE_NOTIFIER_EVTCHN_CALLBACK(RX)
+    DEFINE_NOTIFIER_EVTCHN_CALLBACK(TX)
+};
+
+#undef DEFINE_NOTIFIER_EVTCHN_CALLBACK
+
+C_ASSERT((sizeof (NotifierEvtchnCallback) / sizeof (NotifierEvtchnCallback[0])) == NOTIFIER_EVTCHN_COUNT);
 
 static VOID
 NotifierDebugCallback(
@@ -174,15 +221,21 @@ NotifierDebugCallback(
     )
 {
     PXENVIF_NOTIFIER    Notifier = Argument;
+    ULONG               Index;
 
     UNREFERENCED_PARAMETER(Crashing);
 
-    DEBUG(Printf,
-          Notifier->DebugInterface,
-          Notifier->DebugCallback,
-          "Events = %lu Dpcs = %lu\n",
-          Notifier->Events,
-          Notifier->Dpcs);
+    for (Index = 0; Index < NOTIFIER_EVTCHN_COUNT; Index++)
+        DEBUG(Printf,
+              Notifier->DebugInterface,
+              Notifier->DebugCallback,
+              "[%s]: Events = %lu Dpcs = %lu\n",
+              ((Index == NOTIFIER_EVTCHN_COMBINED) ? "COMBINED" :
+               ((Index == NOTIFIER_EVTCHN_RX) ? "RX" :
+                ((Index == NOTIFIER_EVTCHN_TX) ? "TX" :
+                 "UNKNOWN"))),
+              Notifier->Events[Index],
+              Notifier->Dpcs[Index]);
 }
 
 NTSTATUS
@@ -191,6 +244,7 @@ NotifierInitialize(
     OUT PXENVIF_NOTIFIER    *Notifier
     )
 {
+    ULONG                   Index;
     NTSTATUS                status;
 
     *Notifier = __NotifierAllocate(sizeof (XENVIF_NOTIFIER));
@@ -202,9 +256,10 @@ NotifierInitialize(
     (*Notifier)->Frontend = Frontend;
 
     KeInitializeSpinLock(&(*Notifier)->Lock);
-    KeInitializeDpc(&(*Notifier)->Dpc,
-                    NotifierDpc,
-                    *Notifier);
+    for (Index = 0; Index < NOTIFIER_EVTCHN_COUNT; Index++)
+        KeInitializeDpc(&(*Notifier)->Dpc[Index],
+                        NotifierDpc,
+                        *Notifier);
 
     return STATUS_SUCCESS;
 
@@ -220,7 +275,8 @@ NotifierConnect(
     )
 {
     PXENVIF_FRONTEND        Frontend = Notifier->Frontend;
-    BOOLEAN                 Pending;
+    LONG                    Index;
+    PCHAR                   Buffer;
     NTSTATUS                status;
 
     ASSERT3U(KeGetCurrentIrql(), ==, DISPATCH_LEVEL);
@@ -232,26 +288,31 @@ NotifierConnect(
 
     EVTCHN(Acquire, Notifier->EvtchnInterface);
 
-    Notifier->Evtchn = EVTCHN(Open,
-                              Notifier->EvtchnInterface,
-                              EVTCHN_UNBOUND,
-                              NotifierEvtchnCallback,
-                              Notifier,
-                              FrontendGetBackendDomain(Frontend),
-                              TRUE);
+    for (Index = 0; Index < NOTIFIER_EVTCHN_COUNT; Index++) {
+        PKSERVICE_ROUTINE   Callback = NotifierEvtchnCallback[Index];
+        BOOLEAN             Pending;
 
-    status = STATUS_UNSUCCESSFUL;
-    if (Notifier->Evtchn == NULL)
-        goto fail1;
+        Notifier->Evtchn[Index] = EVTCHN(Open,
+                                         Notifier->EvtchnInterface,
+                                         EVTCHN_UNBOUND,
+                                         Callback,
+                                         Notifier,
+                                         FrontendGetBackendDomain(Frontend),
+                                         TRUE);
 
-    Pending = EVTCHN(Unmask,
-                     Notifier->EvtchnInterface,
-                     Notifier->Evtchn,
-                     FALSE);
-    if (Pending)
-        EVTCHN(Trigger,
-               Notifier->EvtchnInterface,
-               Notifier->Evtchn);
+        status = STATUS_UNSUCCESSFUL;
+        if (Notifier->Evtchn[Index] == NULL)
+            goto fail1;
+
+        Pending = EVTCHN(Unmask,
+                         Notifier->EvtchnInterface,
+                         Notifier->Evtchn[Index],
+                         FALSE);
+        if (Pending)
+            EVTCHN(Trigger,
+                   Notifier->EvtchnInterface,
+                   Notifier->Evtchn[Index]);
+    }
 
     Notifier->DebugInterface = FrontendGetDebugInterface(Frontend);
 
@@ -270,6 +331,22 @@ NotifierConnect(
 
     STORE(Acquire, Notifier->StoreInterface);
 
+    status = STORE(Read,
+                   Notifier->StoreInterface,
+                   NULL,
+                   FrontendGetBackendPath(Frontend),
+                   "feature-split-event-channels",
+                   &Buffer);
+    if (!NT_SUCCESS(status)) {
+        Notifier->Split = FALSE;
+    } else {
+        Notifier->Split = (BOOLEAN)strtol(Buffer, NULL, 2);
+
+        STORE(Free,
+              Notifier->StoreInterface,
+              Buffer);
+    }
+
     Notifier->Connected = TRUE;
     KeReleaseSpinLockFromDpcLevel(&Notifier->Lock);
 
@@ -280,15 +357,19 @@ fail2:
 
     DEBUG(Release, Notifier->DebugInterface);
 
-    EVTCHN(Close,
-           Notifier->EvtchnInterface,
-           Notifier->Evtchn);
-    Notifier->Evtchn = NULL;
-
-    Notifier->Events = 0;
+    Index = NOTIFIER_EVTCHN_COUNT;
 
 fail1:
     Error("fail1 (%08x)\n", status);
+
+    while (--Index >= 0) {
+        EVTCHN(Close,
+               Notifier->EvtchnInterface,
+               Notifier->Evtchn[Index]);
+        Notifier->Evtchn[Index] = NULL;
+
+        Notifier->Events[Index] = 0;
+    }
 
     EVTCHN(Release, Notifier->EvtchnInterface);
 
@@ -304,23 +385,57 @@ NotifierStoreWrite(
     )
 {
     PXENVIF_FRONTEND                Frontend = Notifier->Frontend;
-    ULONG                           Port;
+    ULONG                           Index;
     NTSTATUS                        status;
 
-    Port = EVTCHN(Port,
-                  Notifier->EvtchnInterface,
-                  Notifier->Evtchn);
+    for (Index = 0; Index < NOTIFIER_EVTCHN_COUNT; Index++) {
+        PCHAR   Node;
+        ULONG   Port;
 
-    status = STORE(Printf,
-                   Notifier->StoreInterface,
-                   Transaction,
-                   FrontendGetPath(Frontend),
-                   "event-channel",
-                   "%u",
-                   Port);
+        switch (Index) {
+        case NOTIFIER_EVTCHN_COMBINED:
+            if (Notifier->Split)
+                continue;
 
-    if (!NT_SUCCESS(status))
-        goto fail1;
+            Node = "event-channel";
+            break;
+
+        case NOTIFIER_EVTCHN_RX:
+            if (!Notifier->Split)
+                continue;
+
+            Node = "event-channel-rx";
+            break;
+
+        case NOTIFIER_EVTCHN_TX:
+            if (!Notifier->Split)
+                continue;
+
+            Node = "event-channel-tx";
+            break;
+
+        default:
+            ASSERT(FALSE);
+
+            Node = "";
+            break;
+        }
+
+        Port = EVTCHN(Port,
+                      Notifier->EvtchnInterface,
+                      Notifier->Evtchn[Index]);
+
+        status = STORE(Printf,
+                       Notifier->StoreInterface,
+                       Transaction,
+                       FrontendGetPath(Frontend),
+                       Node,
+                       "%u",
+                       Port);
+
+        if (!NT_SUCCESS(status))
+            goto fail1;
+    }
 
     return STATUS_SUCCESS;
 
@@ -334,12 +449,43 @@ NTSTATUS
 NotifierEnable(
     IN  PXENVIF_NOTIFIER    Notifier
     )
-{
+{   
+    ULONG                   Index;
+
     ASSERT(!Notifier->Enabled);
     Notifier->Enabled = TRUE;
 
-    if (KeInsertQueueDpc(&Notifier->Dpc, NULL, NULL))
-        Notifier->Dpcs++;
+    for (Index = 0; Index < NOTIFIER_EVTCHN_COUNT; Index++) {
+        switch (Index) {
+        case NOTIFIER_EVTCHN_COMBINED:
+            if (Notifier->Split)
+                continue;
+
+            break;
+
+        case NOTIFIER_EVTCHN_RX:
+            if (!Notifier->Split)
+                continue;
+
+            break;
+
+        case NOTIFIER_EVTCHN_TX:
+            if (!Notifier->Split)
+                continue;
+
+            break;
+
+        default:
+            ASSERT(FALSE);
+
+            break;
+        }
+
+        if (KeInsertQueueDpc(&Notifier->Dpc[Index],
+                             (PVOID)(ULONG_PTR)Index,
+                             NULL))
+            Notifier->Dpcs[Index]++;
+    }
 
     return STATUS_SUCCESS;
 }
@@ -358,6 +504,8 @@ NotifierDisconnect(
     IN  PXENVIF_NOTIFIER    Notifier
     )
 {
+    LONG                    Index;
+
     KeAcquireSpinLockAtDpcLevel(&Notifier->Lock);
 
     ASSERT(Notifier->Connected);
@@ -374,12 +522,15 @@ NotifierDisconnect(
     DEBUG(Release, Notifier->DebugInterface);
     Notifier->DebugInterface = NULL;
 
-    EVTCHN(Close,
-           Notifier->EvtchnInterface,
-           Notifier->Evtchn);
-    Notifier->Evtchn = NULL;
+    Index = NOTIFIER_EVTCHN_COUNT;
+    while (--Index >= 0) {
+        EVTCHN(Close,
+               Notifier->EvtchnInterface,
+               Notifier->Evtchn[Index]);
+        Notifier->Evtchn[Index] = NULL;
 
-    Notifier->Events = 0;
+        Notifier->Events[Index] = 0;
+    }
 
     EVTCHN(Release, Notifier->EvtchnInterface);
     Notifier->EvtchnInterface = NULL;
@@ -392,12 +543,18 @@ NotifierTeardown(
     IN  PXENVIF_NOTIFIER    Notifier
     )
 {
+    LONG                    Index;
+
     KeFlushQueuedDpcs();
 
-    Notifier->Dpcs = 0;
+    Index = NOTIFIER_EVTCHN_COUNT;
+    while (--Index >= 0) {
+        Notifier->Dpcs[Index] = 0;
+        RtlZeroMemory(&Notifier->Dpc[Index], sizeof (KDPC));
+    }
+
     Notifier->Frontend = NULL;
 
-    RtlZeroMemory(&Notifier->Dpc, sizeof (KDPC));
     RtlZeroMemory(&Notifier->Lock, sizeof (KSPIN_LOCK));
 
     ASSERT(IsZeroMemory(Notifier, sizeof (XENVIF_NOTIFIER)));
@@ -405,9 +562,10 @@ NotifierTeardown(
     __NotifierFree(Notifier);
 }
 
-VOID
-NotifierSend(
-    IN  PXENVIF_NOTIFIER    Notifier
+static FORCEINLINE VOID
+__NotifierSend(
+    IN  PXENVIF_NOTIFIER    Notifier,
+    IN  ULONG               Index
     )
 {
     KIRQL                   Irql;
@@ -417,14 +575,37 @@ NotifierSend(
     if (Notifier->Connected)
         (VOID) EVTCHN(Send,
                       Notifier->EvtchnInterface,
-                      Notifier->Evtchn);
+                      Notifier->Evtchn[Index]);
 
     KeReleaseSpinLock(&Notifier->Lock, Irql);
 }
 
 VOID
-NotifierTrigger(
+NotifierSendTx(
     IN  PXENVIF_NOTIFIER    Notifier
+    )
+{
+    if (Notifier->Split)
+        __NotifierSend(Notifier, NOTIFIER_EVTCHN_TX);
+    else
+        __NotifierSend(Notifier, NOTIFIER_EVTCHN_COMBINED);
+}
+
+VOID
+NotifierSendRx(
+    IN  PXENVIF_NOTIFIER    Notifier
+    )
+{
+    if (Notifier->Split)
+        __NotifierSend(Notifier, NOTIFIER_EVTCHN_RX);
+    else
+        __NotifierSend(Notifier, NOTIFIER_EVTCHN_COMBINED);
+}
+
+static FORCEINLINE VOID
+__NotifierTrigger(
+    IN  PXENVIF_NOTIFIER    Notifier,
+    IN  ULONG               Index
     )
 {
     KIRQL                   Irql;
@@ -434,7 +615,29 @@ NotifierTrigger(
     if (Notifier->Connected)
         (VOID) EVTCHN(Trigger,
                       Notifier->EvtchnInterface,
-                      Notifier->Evtchn);
+                      Notifier->Evtchn[Index]);
 
     KeReleaseSpinLock(&Notifier->Lock, Irql);
+}
+
+VOID
+NotifierTriggerTx(
+    IN  PXENVIF_NOTIFIER    Notifier
+    )
+{
+    if (Notifier->Split)
+        __NotifierTrigger(Notifier, NOTIFIER_EVTCHN_TX);
+    else
+        __NotifierTrigger(Notifier, NOTIFIER_EVTCHN_COMBINED);
+}
+
+VOID
+NotifierTriggerRx(
+    IN  PXENVIF_NOTIFIER    Notifier
+    )
+{
+    if (Notifier->Split)
+        __NotifierTrigger(Notifier, NOTIFIER_EVTCHN_RX);
+    else
+        __NotifierTrigger(Notifier, NOTIFIER_EVTCHN_COMBINED);
 }

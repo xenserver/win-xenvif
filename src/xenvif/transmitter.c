@@ -2357,7 +2357,7 @@ __RingPushRequests(
         Transmitter = Ring->Transmitter;
         Frontend = Transmitter->Frontend;
 
-        NotifierSend(FrontendGetNotifier(Frontend));
+        NotifierSendTx(FrontendGetNotifier(Frontend));
     }
 
     Ring->RequestsPushed = Ring->RequestsPosted;
@@ -2733,8 +2733,8 @@ RingWatchdog(
                  Ring->ResponsesProcessed);
 
             // Try to move things along
-            NotifierSend(FrontendGetNotifier(Frontend));
-            NotifierTrigger(FrontendGetNotifier(Frontend));
+            NotifierSendTx(FrontendGetNotifier(Frontend));
+            NotifierTriggerTx(FrontendGetNotifier(Frontend));
         }
 
         PacketsQueued = Ring->PacketsQueued;

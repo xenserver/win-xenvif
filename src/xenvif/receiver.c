@@ -717,7 +717,7 @@ __RingReturnPacket(
             Receiver = Ring->Receiver;
             Frontend = Receiver->Frontend;
 
-            NotifierTrigger(FrontendGetNotifier(Frontend));
+            NotifierTriggerRx(FrontendGetNotifier(Frontend));
         }
 
         if (!Locked)
@@ -1466,7 +1466,7 @@ __RingPushRequests(
         Receiver = Ring->Receiver;
         Frontend = Receiver->Frontend;
 
-        NotifierSend(FrontendGetNotifier(Frontend));
+        NotifierSendRx(FrontendGetNotifier(Frontend));
     }
 
     Ring->RequestsPushed = Ring->RequestsPosted;
