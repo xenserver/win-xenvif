@@ -1003,11 +1003,11 @@ __PdoGetDeviceInstanceIDFromAliasSoftwareKey(
     IN OUT  PANSI_STRING    *DeviceInstanceID
     )
 {
-    HANDLE                      ConnectionKey;
-    HANDLE                      GuidKey;
-    HANDLE                      NetworkKey;
-    PANSI_STRING                Guid;
-    NTSTATUS                    status;
+    HANDLE                  ConnectionKey;
+    HANDLE                  GuidKey;
+    HANDLE                  NetworkKey;
+    PANSI_STRING            Guid;
+    NTSTATUS                status;
     
     status = RegistryQuerySzValue(AliasSoftwareKey,
                                   "DeviceInstanceID",

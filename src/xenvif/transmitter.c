@@ -166,6 +166,8 @@ struct _XENVIF_TRANSMITTER {
     PXENBUS_DEBUG_CALLBACK              DebugCallback;
 };
 
+#define MAX_SKB_FRAGS   18
+
 static FORCEINLINE PVOID
 __TransmitterAllocate(
     IN  ULONG   Length
@@ -1080,6 +1082,8 @@ __RingPrepareHeader(
         PTCP_HEADER TcpHeader;
         ULONG       Length;
 
+        ASSERT(!Info->Flags.IsAFragment);
+
         Ring->OffloadStatistics.IpVersion4LargePacket++;
 
         ASSERT(Info->IpHeader.Length != 0);
@@ -1119,6 +1123,8 @@ __RingPrepareHeader(
         PIP_HEADER  IpHeader;
         PTCP_HEADER TcpHeader;
         ULONG       Length;
+
+        ASSERT(!Info->Flags.IsAFragment);
 
         Ring->OffloadStatistics.IpVersion6LargePacket++;
 
@@ -1200,6 +1206,7 @@ __RingPrepareHeader(
 #endif  // VERIFY_CHECKSUMS
 
     if (State->Send.OffloadOptions.OffloadIpVersion4TcpChecksum) {
+        ASSERT(!Info->Flags.IsAFragment);
         Ring->OffloadStatistics.IpVersion4TcpChecksum++;
     }
 #ifdef  VERIFY_CHECKSUMS
@@ -1234,6 +1241,7 @@ __RingPrepareHeader(
 #endif  // VERIFY_CHECKSUMS
 
     if (State->Send.OffloadOptions.OffloadIpVersion6TcpChecksum) {
+        ASSERT(!Info->Flags.IsAFragment);
         Ring->OffloadStatistics.IpVersion6TcpChecksum++;
     }
 #ifdef  VERIFY_CHECKSUMS
@@ -1268,6 +1276,7 @@ __RingPrepareHeader(
 #endif  // VERIFY_CHECKSUMS
 
     if (State->Send.OffloadOptions.OffloadIpVersion4UdpChecksum) {
+        ASSERT(!Info->Flags.IsAFragment);
         Ring->OffloadStatistics.IpVersion4UdpChecksum++;
     }
 #ifdef  VERIFY_CHECKSUMS
@@ -1302,6 +1311,7 @@ __RingPrepareHeader(
 #endif  // VERIFY_CHECKSUMS
 
     if (State->Send.OffloadOptions.OffloadIpVersion6UdpChecksum) {
+        ASSERT(!Info->Flags.IsAFragment);
         Ring->OffloadStatistics.IpVersion6UdpChecksum++;
     }
 #ifdef  VERIFY_CHECKSUMS
@@ -1858,7 +1868,7 @@ __RingPrepareNeighbourAdvertisement(
                                                  IPPROTO_ICMPV6);
     AccumulateChecksum(&Accumulator, IcmpHeader, PayloadLength);
 
-    IcmpHeader->Checksum = FoldChecksum(Accumulator, TRUE);
+    IcmpHeader->Checksum = (USHORT)~Accumulator;
 
     Tag = __TransmitterGetTag(Ring);
 
@@ -2347,7 +2357,7 @@ __RingPushRequests(
         Transmitter = Ring->Transmitter;
         Frontend = Transmitter->Frontend;
 
-        NotifierSend(FrontendGetNotifier(Frontend));
+        NotifierSendTx(FrontendGetNotifier(Frontend));
     }
 
     Ring->RequestsPushed = Ring->RequestsPosted;
@@ -2723,8 +2733,8 @@ RingWatchdog(
                  Ring->ResponsesProcessed);
 
             // Try to move things along
-            NotifierSend(FrontendGetNotifier(Frontend));
-            NotifierTrigger(FrontendGetNotifier(Frontend));
+            NotifierSendTx(FrontendGetNotifier(Frontend));
+            NotifierTriggerTx(FrontendGetNotifier(Frontend));
         }
 
         PacketsQueued = Ring->PacketsQueued;
@@ -4009,6 +4019,7 @@ TransmitterGetOffloadOptions(
 #define MAXIMUM_TCPV6_PAYLOAD_SIZE    (MAXIMUM_TX_REQ_SIZE -          \
                                        sizeof (ETHERNET_HEADER) -     \
                                        MAXIMUM_IPV6_HEADER_LENGTH -   \
+                                       MAXIMUM_IPV6_OPTIONS_LENGTH -  \
                                        MAXIMUM_TCP_HEADER_LENGTH)
 
 ULONG

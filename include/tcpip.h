@@ -136,6 +136,12 @@ typedef struct _IPV6_HEADER {
 #define MAXIMUM_IPV6_HEADER_LENGTH \
         (ULONG)(sizeof (IPV6_HEADER))
 
+// There is no defined maximum for an IPv6 options
+// sequence but 256 is a reasonable maximum for
+// header plus options.
+#define MAXIMUM_IPV6_OPTIONS_LENGTH \
+        (ULONG)(256 - sizeof (IPV6_HEADER))
+
 // IP
 
 typedef union _IP_ADDRESS {
@@ -180,11 +186,11 @@ typedef struct _IPV6_FRAGMENT_HEADER {
 } IPV6_FRAGMENT_HEADER, *PIPV6_FRAGMENT_HEADER;
 
 #define IPV6_FRAGMENT_OFFSET(_FragmentOffsetAndFlags)   \
-        ((_FragmentOffsetAndFlags) & 0x1fff)
+        ((_FragmentOffsetAndFlags) & 0xfff8)
 #define IPV6_MORE_FRAGMENTS(_FragmentOffsetAndFlags)    \
-        ((_FragmentOffsetAndFlags) & 0x8000)
+        ((_FragmentOffsetAndFlags) & 0x0001)
 #define IPV6_IS_A_FRAGMENT(_FragmentOffsetAndFlags)     \
-        ((_FragmentOffsetAndFlags) & 0x9fff)
+        ((_FragmentOffsetAndFlags) & 0xfff9)
 
 #define IPPROTO_TCP         6
 

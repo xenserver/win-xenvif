@@ -77,12 +77,22 @@ NotifierTeardown(
     );
 
 extern VOID
-NotifierSend(
+NotifierSendTx(
     IN  PXENVIF_NOTIFIER    Notifier
     );
 
 extern VOID
-NotifierTrigger(
+NotifierSendRx(
+    IN  PXENVIF_NOTIFIER    Notifier
+    );
+
+extern VOID
+NotifierTriggerTx(
+    IN  PXENVIF_NOTIFIER    Notifier
+    );
+
+extern VOID
+NotifierTriggerRx(
     IN  PXENVIF_NOTIFIER    Notifier
     );
 
