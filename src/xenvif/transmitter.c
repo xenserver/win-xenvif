@@ -1183,167 +1183,26 @@ __RingPrepareHeader(
 
         Ring->OffloadStatistics.IpVersion4HeaderChecksum++;
     }
-#ifdef  VERIFY_CHECKSUMS
-    else if (Info->IpHeader.Length != 0) {
-        PIP_HEADER  IpHeader;
-
-        ASSERT(Info->IpHeader.Length != 0);
-        IpHeader = (PIP_HEADER)(StartVa + Info->IpHeader.Offset);
-
-        if (IpHeader->Version == 4) {
-            USHORT  Embedded;
-            USHORT  Calculated;
-
-            Embedded = IpHeader->Version4.Checksum;
-            Calculated = ChecksumIpVersion4Header(StartVa, Info);
-
-            if (Embedded != Calculated)
-                Warning("Bad Ip Version 4 Header Checksum (expected %04x, found %04x)\n",
-                        Calculated,
-                        Embedded);
-        }
-    }
-#endif  // VERIFY_CHECKSUMS
 
     if (State->Send.OffloadOptions.OffloadIpVersion4TcpChecksum) {
         ASSERT(!Info->Flags.IsAFragment);
         Ring->OffloadStatistics.IpVersion4TcpChecksum++;
     }
-#ifdef  VERIFY_CHECKSUMS
-    else if (Info->TcpHeader.Length != 0) {
-        PIP_HEADER  IpHeader;
-
-        ASSERT(Info->IpHeader.Length != 0);
-        IpHeader = (PIP_HEADER)(StartVa + Info->IpHeader.Offset);
-
-        if (IpHeader->Version == 4) {
-            PTCP_HEADER TcpHeader;
-            USHORT      Embedded;
-            USHORT      Calculated;
-
-            TcpHeader = (PTCP_HEADER)(StartVa + Info->TcpHeader.Offset);
-
-            Embedded = TcpHeader->Checksum;
-            Calculated = ChecksumPseudoHeader(StartVa, Info);
-
-            if (Embedded != Calculated) {
-                Calculated = ChecksumTcpPacket(StartVa, Info, Calculated, Payload);
-
-                if (Embedded != Calculated)
-                    Warning("Bad Ip Version 4 TCP Checksum (expected %04x, found %04x)\n",
-                            Calculated,
-                            Embedded);
-            } else {
-                Warning("Ip Version 4 TCP Checksum only covers pseudo-header\n");
-            }
-        }
-    }
-#endif  // VERIFY_CHECKSUMS
 
     if (State->Send.OffloadOptions.OffloadIpVersion6TcpChecksum) {
         ASSERT(!Info->Flags.IsAFragment);
         Ring->OffloadStatistics.IpVersion6TcpChecksum++;
     }
-#ifdef  VERIFY_CHECKSUMS
-    else if (Info->TcpHeader.Length != 0) {
-        PIP_HEADER  IpHeader;
-
-        ASSERT(Info->IpHeader.Length != 0);
-        IpHeader = (PIP_HEADER)(StartVa + Info->IpHeader.Offset);
-
-        if (IpHeader->Version == 6) {
-            PTCP_HEADER TcpHeader;
-            USHORT      Embedded;
-            USHORT      Calculated;
-
-            TcpHeader = (PTCP_HEADER)(StartVa + Info->TcpHeader.Offset);
-
-            Embedded = TcpHeader->Checksum;
-            Calculated = ChecksumPseudoHeader(StartVa, Info);
-
-            if (Embedded != Calculated) {
-                Calculated = ChecksumTcpPacket(StartVa, Info, Calculated, Payload);
-
-                if (Embedded != Calculated)
-                    Warning("Bad Ip Version 6 TCP Checksum (expected %04x, found %04x)\n",
-                            Calculated,
-                            Embedded);
-            } else {
-                Warning("Ip Version 6 TCP Checksum only covers pseudo-header\n");
-            }
-        }
-    }
-#endif  // VERIFY_CHECKSUMS
 
     if (State->Send.OffloadOptions.OffloadIpVersion4UdpChecksum) {
         ASSERT(!Info->Flags.IsAFragment);
         Ring->OffloadStatistics.IpVersion4UdpChecksum++;
     }
-#ifdef  VERIFY_CHECKSUMS
-    else if (Info->UdpHeader.Length != 0) {
-        PIP_HEADER  IpHeader;
-
-        ASSERT(Info->IpHeader.Length != 0);
-        IpHeader = (PIP_HEADER)(StartVa + Info->IpHeader.Offset);
-
-        if (IpHeader->Version == 4) {
-            PUDP_HEADER UdpHeader;
-            USHORT      Embedded;
-            USHORT      Calculated;
-
-            UdpHeader = (PUDP_HEADER)(StartVa + Info->UdpHeader.Offset);
-
-            Embedded = UdpHeader->Checksum;
-            Calculated = ChecksumPseudoHeader(StartVa, Info);
-
-            if (Embedded != Calculated) {
-                Calculated = ChecksumUdpPacket(StartVa, Info, Calculated, Payload);
-
-                if (Embedded != Calculated)
-                    Warning("Bad Ip Version 4 UDP Checksum (expected %04x, found %04x)\n",
-                            Calculated,
-                            Embedded);
-            } else {
-                Warning("Ip Version 4 UDP Checksum only covers pseudo-header\n");
-            }
-        }
-    }
-#endif  // VERIFY_CHECKSUMS
 
     if (State->Send.OffloadOptions.OffloadIpVersion6UdpChecksum) {
         ASSERT(!Info->Flags.IsAFragment);
         Ring->OffloadStatistics.IpVersion6UdpChecksum++;
     }
-#ifdef  VERIFY_CHECKSUMS
-    else if (Info->UdpHeader.Length != 0) {
-        PIP_HEADER  IpHeader;
-
-        ASSERT(Info->IpHeader.Length != 0);
-        IpHeader = (PIP_HEADER)(StartVa + Info->IpHeader.Offset);
-
-        if (IpHeader->Version == 6) {
-            PUDP_HEADER UdpHeader;
-            USHORT      Embedded;
-            USHORT      Calculated;
-
-            UdpHeader = (PUDP_HEADER)(StartVa + Info->UdpHeader.Offset);
-
-            Embedded = UdpHeader->Checksum;
-            Calculated = ChecksumPseudoHeader(StartVa, Info);
-
-            if (Embedded != Calculated) {
-                Calculated = ChecksumUdpPacket(StartVa, Info, Calculated, Payload);
-
-                if (Embedded != Calculated)
-                    Warning("Bad Ip Version 6 UDP Checksum (expected %04x, found %04x)\n",
-                            Calculated,
-                            Embedded);
-            } else {
-                Warning("Ip Version 6 UDP Checksum only covers pseudo-header\n");
-            }
-        }
-    }
-#endif  // VERIFY_CHECKSUMS
 
     return STATUS_SUCCESS;
 
