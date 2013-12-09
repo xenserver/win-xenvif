@@ -471,32 +471,40 @@ RingProcessChecksum(
                 ASSERT(~flags & NETRXF_csum_blank);
 
                 Embedded = TcpHeader->Checksum;
-                if (Embedded == 0xFFFF)
-                    Warning("Invalid TCP checksum\n");
 
                 Calculated = ChecksumPseudoHeader(StartVa, Info);
                 Calculated = ChecksumTcpPacket(StartVa, Info, Calculated, &Payload);
 
-                if (IpHeader->Version == 4)
+                if (IpHeader->Version == 4) {
                     Ring->OffloadStatistics.IpVersion4TcpChecksumCalculated++;
-                else
+
+                    if (Embedded == Calculated) {
+                        Packet->Flags.TcpChecksumSucceeded = 1;
+
+                        Ring->OffloadStatistics.IpVersion4TcpChecksumSucceeded++;
+                    } else {
+                        Packet->Flags.TcpChecksumFailed = 1;
+
+                        Ring->OffloadStatistics.IpVersion4TcpChecksumFailed++;
+                    }
+                } else {
                     Ring->OffloadStatistics.IpVersion6TcpChecksumCalculated++;
 
-                if (Embedded == Calculated) {
-                    Packet->Flags.TcpChecksumSucceeded = 1;
+                    // Windows seems to take RFC 2460 a bit too far and replace zero
+                    // TCP checksum in IPv6 packets with 0xFFFF even though there was
+                    // never a provision for in 'no checksum' option for TCP in IPv4.
+                    if (Embedded == 0xFFFF)
+                        Embedded = 0;
 
-                    if (IpHeader->Version == 4)
-                        Ring->OffloadStatistics.IpVersion4TcpChecksumSucceeded++;
-                    else
+                    if (Embedded == Calculated) {
+                        Packet->Flags.TcpChecksumSucceeded = 1;
+
                         Ring->OffloadStatistics.IpVersion6TcpChecksumSucceeded++;
+                    } else {
+                        Packet->Flags.TcpChecksumFailed = 1;
 
-                } else {
-                    Packet->Flags.TcpChecksumFailed = 1;
-
-                    if (IpHeader->Version == 4)
-                        Ring->OffloadStatistics.IpVersion4TcpChecksumFailed++;
-                    else
                         Ring->OffloadStatistics.IpVersion6TcpChecksumFailed++;
+                    }
                 }
             }
         }
@@ -554,34 +562,39 @@ RingProcessChecksum(
                 ASSERT(~flags & NETRXF_csum_blank);
 
                 Embedded = UdpHeader->Checksum;
-                if (Embedded == 0xFFFF)
-                    Warning("Invalid UDP checksum\n");
 
                 Calculated = ChecksumPseudoHeader(StartVa, Info);
                 Calculated = ChecksumUdpPacket(StartVa, Info, Calculated, &Payload);
 
-                if (IpHeader->Version == 4)
+                if (IpHeader->Version == 4) {
                     Ring->OffloadStatistics.IpVersion4UdpChecksumCalculated++;
-                else
+
+                    if (Embedded == 0 ||    // Tolarate zero checksum for IPv4/UDP
+                        Embedded == Calculated) {
+                        Packet->Flags.UdpChecksumSucceeded = 1;
+
+                        Ring->OffloadStatistics.IpVersion4UdpChecksumSucceeded++;
+                    } else {
+                        Packet->Flags.UdpChecksumFailed = 1;
+
+                        Ring->OffloadStatistics.IpVersion4UdpChecksumFailed++;
+                    }
+                } else {
                     Ring->OffloadStatistics.IpVersion6UdpChecksumCalculated++;
 
-                if (Embedded == 0 ||    // Tolarate zero checksum for IPv4/UDP
-                    Embedded == Calculated) {
-                    Packet->Flags.UdpChecksumSucceeded = 1;
+                    // See RFC 2460
+                    if (Embedded == 0xFFFF)
+                        Embedded = 0;
 
-                    if (IpHeader->Version == 4)
-                        Ring->OffloadStatistics.IpVersion4UdpChecksumSucceeded++;
-                    else
+                    if (Embedded == Calculated) {
+                        Packet->Flags.UdpChecksumSucceeded = 1;
+
                         Ring->OffloadStatistics.IpVersion6UdpChecksumSucceeded++;
+                    } else {
+                        Packet->Flags.UdpChecksumFailed = 1;
 
-                } else {
-                    Packet->Flags.UdpChecksumFailed = 1;
-
-                    if (IpHeader->Version == 4)
-                        Ring->OffloadStatistics.IpVersion4UdpChecksumFailed++;
-                    else
                         Ring->OffloadStatistics.IpVersion6UdpChecksumFailed++;
-
+                    }
                 }
             }
         }
@@ -595,10 +608,15 @@ RingProcessChecksum(
                 Calculated = ChecksumPseudoHeader(StartVa, Info);
                 Calculated = ChecksumUdpPacket(StartVa, Info, Calculated, &Payload);
 
-                if (IpHeader->Version == 4)
+                if (IpHeader->Version == 4) {
                     Ring->OffloadStatistics.IpVersion4UdpChecksumCalculated++;
-                else
+                } else {
                     Ring->OffloadStatistics.IpVersion6UdpChecksumCalculated++;
+
+                    // See RFC 2460
+                    if (Calculated == 0)
+                        Calculated = 0xFFFF;
+                }
 
                 UdpHeader->Checksum = Calculated;
             }
