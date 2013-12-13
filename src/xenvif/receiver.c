@@ -69,6 +69,8 @@ typedef struct _RECEIVER_TAG {
 } RECEIVER_TAG, *PRECEIVER_TAG;
 
 typedef struct _RECEIVER_OFFLOAD_STATISTICS {
+    ULONGLONG   IpVersion4LargePacket;
+    ULONGLONG   IpVersion6LargePacket;
     ULONGLONG   IpVersion4LargePacketSegment;
     ULONGLONG   IpVersion6LargePacketSegment;
     ULONGLONG   IpVersion4HeaderChecksumCalculated;
@@ -911,29 +913,29 @@ __RingBuildSegment(
     // Adjust the segment IP header
     IpHeader = (PIP_HEADER)(StartVa + Info->IpHeader.Offset);
     if (IpHeader->Version == 4) {
-        ULONG   Length;
+        ULONG   PacketLength;
 
-        Length = Info->IpHeader.Length +
-                 Info->IpOptions.Length + 
-                 Info->TcpHeader.Length + 
-                 Info->TcpOptions.Length + 
-                 SegmentSize;
+        PacketLength = Info->IpHeader.Length +
+                       Info->IpOptions.Length + 
+                       Info->TcpHeader.Length + 
+                       Info->TcpOptions.Length + 
+                       SegmentSize;
 
-        IpHeader->Version4.PacketLength = HTONS((USHORT)Length);
+        IpHeader->Version4.PacketLength = HTONS((USHORT)PacketLength);
         IpHeader->Version4.Checksum = ChecksumIpVersion4Header(StartVa, Info);
 
         Ring->OffloadStatistics.IpVersion4LargePacketSegment++;
     } else {
-        ULONG   Length;
+        ULONG   PayloadLength;
 
         ASSERT3U(IpHeader->Version, ==, 6);
 
-        Length = Info->IpOptions.Length + 
-                 Info->TcpHeader.Length + 
-                 Info->TcpOptions.Length + 
-                 SegmentSize;
+        PayloadLength = Info->IpOptions.Length + 
+                        Info->TcpHeader.Length + 
+                        Info->TcpOptions.Length + 
+                        SegmentSize;
 
-        IpHeader->Version6.PayloadLength = HTONS((USHORT)Length);
+        IpHeader->Version6.PayloadLength = HTONS((USHORT)PayloadLength);
 
         Ring->OffloadStatistics.IpVersion6LargePacketSegment++;
     }
@@ -1046,15 +1048,11 @@ __RingProcessLargePacket(
 
     IpHeader = (PIP_HEADER)(InfoVa + Info->IpHeader.Offset);
 
-    if (Receiver->AllowGsoPackets) {
-        if (IpHeader->Version == 4) {
-            Offload = (Ring->OffloadOptions.OffloadIpVersion4LargePacket) ? TRUE : FALSE;
-        } else {
-            ASSERT3U(IpHeader->Version, ==, 6);
-            Offload = (Ring->OffloadOptions.OffloadIpVersion6LargePacket) ? TRUE : FALSE;
-        }
+    if (IpHeader->Version == 4) {
+        Offload = (Ring->OffloadOptions.OffloadIpVersion4LargePacket) ? TRUE : FALSE;
     } else {
-        Offload = FALSE;
+        ASSERT3U(IpHeader->Version, ==, 6);
+        Offload = (Ring->OffloadOptions.OffloadIpVersion6LargePacket) ? TRUE : FALSE;
     }
 
     if (IpHeader->Version == 4) {
@@ -1067,6 +1065,8 @@ __RingProcessLargePacket(
                  Info->TcpHeader.Length -
                  Info->IpOptions.Length - 
                  Info->IpHeader.Length;
+
+        Ring->OffloadStatistics.IpVersion4LargePacket++;
     } else {
         USHORT  PayloadLength;
 
@@ -1078,6 +1078,8 @@ __RingProcessLargePacket(
                  Info->TcpOptions.Length -
                  Info->TcpHeader.Length -
                  Info->IpOptions.Length;
+
+        Ring->OffloadStatistics.IpVersion6LargePacket++;
     }
 
     while (Length > 0) {
@@ -1195,6 +1197,7 @@ __RingProcessPacket(
 {
     PXENVIF_RECEIVER            Receiver;
     PXENVIF_FRONTEND            Frontend;
+    PXENVIF_MAC                 Mac;
     ULONG                       Length;
     USHORT                      MaximumSegmentSize;
     PVOID                       Cookie;
@@ -1208,6 +1211,7 @@ __RingProcessPacket(
 
     Receiver = Ring->Receiver;
     Frontend = Receiver->Frontend;
+    Mac = FrontendGetMac(Frontend);
 
     ASSERT3U(Packet->Offset, ==, 0);
     Length = Packet->Length;
@@ -1295,6 +1299,13 @@ __RingProcessPacket(
     if (Packet->MaximumSegmentSize != 0) {
         __RingProcessLargePacket(Ring, Packet, List);
     } else {
+        ULONG   MaximumFrameSize;
+
+        MaximumFrameSize = MacGetMaximumFrameSize(Mac);
+
+        if (Packet->Length > MaximumFrameSize)
+            goto fail4;
+        
         // Certain HCK tests (e.g. the NDISTest 2c_Priority test) are
         // sufficiently brain-dead that they cannot cope with
         // multi-fragment packets, or at least packets where headers are
@@ -1311,6 +1322,7 @@ __RingProcessPacket(
 
     return;
 
+fail4:
 fail3:
     Packet->Mdl.Next = NULL;
     __RingPutPacket(Ring, Packet, TRUE);
@@ -1869,6 +1881,18 @@ __RingDebugCallback(
           Receiver->DebugInterface,
           Receiver->DebugCallback,
           "OffloadStatistics:\n");
+
+    DEBUG(Printf,
+          Receiver->DebugInterface,
+          Receiver->DebugCallback,
+          "- IpVersion4LargePacket = %u\n",
+          Ring->OffloadStatistics.IpVersion4LargePacket);
+
+    DEBUG(Printf,
+          Receiver->DebugInterface,
+          Receiver->DebugCallback,
+          "- IpVersion6LargePacket = %u\n",
+          Ring->OffloadStatistics.IpVersion6LargePacket);
 
     DEBUG(Printf,
           Receiver->DebugInterface,
@@ -2730,32 +2754,6 @@ fail1:
     return status;
 }
 
-static FORCEINLINE VOID
-__ReceiverSetGsoFeatureFlag(
-    IN  PXENVIF_RECEIVER    Receiver
-    )
-{
-    PXENVIF_FRONTEND        Frontend;
-
-    Frontend = Receiver->Frontend;
-
-    (VOID) STORE(Printf,
-                 Receiver->StoreInterface,
-                 NULL,
-                 FrontendGetPath(Frontend),
-                 "feature-gso-tcpv4-prefix",
-                 "%u",
-                 (Receiver->DisableIpVersion4Gso == 0) ? TRUE : FALSE);
-
-    (VOID) STORE(Printf,
-                 Receiver->StoreInterface,
-                 NULL,
-                 FrontendGetPath(Frontend),
-                 "feature-gso-tcpv6-prefix",
-                 "%u",
-                 (Receiver->DisableIpVersion6Gso == 0) ? TRUE : FALSE);
-}
-
 NTSTATUS
 ReceiverConnect(
     IN  PXENVIF_RECEIVER    Receiver
@@ -2782,8 +2780,6 @@ ReceiverConnect(
         if (!NT_SUCCESS(status))
             goto fail1;
     }    
-
-    __ReceiverSetGsoFeatureFlag(Receiver);
 
     Receiver->DebugInterface = FrontendGetDebugInterface(Frontend);
 
@@ -2830,6 +2826,91 @@ fail1:
     return status;
 }
 
+static FORCEINLINE NTSTATUS
+__ReceiverSetGsoFeatureFlag(
+    IN  PXENVIF_RECEIVER            Receiver,
+    IN  PXENBUS_STORE_TRANSACTION   Transaction
+    )
+{
+    PXENVIF_FRONTEND                Frontend;
+    NTSTATUS                        status;
+
+    Frontend = Receiver->Frontend;
+
+    status = STORE(Printf,
+                   Receiver->StoreInterface,
+                   Transaction,
+                   FrontendGetPath(Frontend),
+                   "feature-gso-tcpv4-prefix",
+                   "%u",
+                   (Receiver->DisableIpVersion4Gso == 0) ? TRUE : FALSE);
+    if (!NT_SUCCESS(status))
+        goto fail1;
+
+
+    status = STORE(Printf,
+                   Receiver->StoreInterface,
+                   Transaction,
+                   FrontendGetPath(Frontend),
+                   "feature-gso-tcpv6-prefix",
+                   "%u",
+                   (Receiver->DisableIpVersion6Gso == 0) ? TRUE : FALSE);
+    if (!NT_SUCCESS(status))
+        goto fail2;
+
+    return STATUS_SUCCESS;
+
+fail2:
+    Error("fail2\n");
+
+fail1:
+    Error("fail1 (%08x)\n", status);
+
+    return status;
+}
+
+static FORCEINLINE NTSTATUS
+__ReceiverSetChecksumFeatureFlag(
+    IN  PXENVIF_RECEIVER            Receiver,
+    IN  PXENBUS_STORE_TRANSACTION   Transaction
+    )
+{
+    PXENVIF_FRONTEND                Frontend;
+    NTSTATUS                        status;
+
+    Frontend = Receiver->Frontend;
+
+    status = STORE(Printf,
+                   Receiver->StoreInterface,
+                   Transaction,
+                   FrontendGetPath(Frontend),
+                   "feature-no-csum-offload",
+                   "%u",
+                   FALSE);
+    if (!NT_SUCCESS(status))
+        goto fail1;
+
+    status = STORE(Printf,
+                   Receiver->StoreInterface,
+                   Transaction,
+                   FrontendGetPath(Frontend),
+                   "feature-ipv6-csum-offload",
+                   "%u",
+                   TRUE);
+    if (!NT_SUCCESS(status))
+        goto fail2;
+
+    return STATUS_SUCCESS;
+
+fail2:
+    Error("fail2\n");
+
+fail1:
+    Error("fail1 (%08x)\n", status);
+
+    return status;
+}
+
 NTSTATUS
 ReceiverStoreWrite(
     IN  PXENVIF_RECEIVER            Receiver,
@@ -2866,29 +2947,17 @@ ReceiverStoreWrite(
                    Receiver->StoreInterface,
                    Transaction,
                    FrontendGetPath(Frontend),
-                   "feature-no-csum-offload",
-                   "%u",
-                   FALSE);
-    if (!NT_SUCCESS(status))
-        goto fail3;
-
-    status = STORE(Printf,
-                   Receiver->StoreInterface,
-                   Transaction,
-                   FrontendGetPath(Frontend),
-                   "feature-ipv6-csum-offload",
-                   "%u",
-                   TRUE);
-    if (!NT_SUCCESS(status))
-        goto fail4;
-
-    status = STORE(Printf,
-                   Receiver->StoreInterface,
-                   Transaction,
-                   FrontendGetPath(Frontend),
                    "feature-rx-notify",
                    "%u",
                    TRUE);
+    if (!NT_SUCCESS(status))
+        goto fail3;
+
+    status = __ReceiverSetGsoFeatureFlag(Receiver, Transaction);
+    if (!NT_SUCCESS(status))
+        goto fail4;
+
+    status = __ReceiverSetChecksumFeatureFlag(Receiver, Transaction);
     if (!NT_SUCCESS(status))
         goto fail5;
 
@@ -3066,6 +3135,7 @@ ReceiverSetOffloadOptions(
     PLIST_ENTRY                 ListEntry;
 
     if (Receiver->AllowGsoPackets == 0) {
+        Warning("RECEIVER GSO DISALLOWED\n");
         Options.OffloadIpVersion4LargePacket = 0;
         Options.OffloadIpVersion6LargePacket = 0;
     }

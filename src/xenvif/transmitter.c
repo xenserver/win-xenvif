@@ -50,6 +50,7 @@
 #include "mac.h"
 #include "vif.h"
 #include "thread.h"
+#include "registry.h"
 #include "dbg_print.h"
 #include "assert.h"
 
@@ -158,6 +159,10 @@ struct _XENVIF_TRANSMITTER {
     LIST_ENTRY                          List;
     XENVIF_TRANSMITTER_PACKET_METADATA  Metadata;
 
+    ULONG                               DisableIpVersion4Gso;
+    ULONG                               DisableIpVersion6Gso;
+    ULONG                               AlwaysCopy;
+
     PXENBUS_DEBUG_INTERFACE             DebugInterface;
     PXENBUS_STORE_INTERFACE             StoreInterface;
     PXENBUS_GNTTAB_INTERFACE            GnttabInterface;
@@ -186,14 +191,14 @@ __TransmitterFree(
 
 static NTSTATUS
 TransmitterBufferCtor(
-    IN  PVOID   Argument,
-    IN  PVOID   Object
+    IN  PVOID           Argument,
+    IN  PVOID           Object
     )
 {
     PTRANSMITTER_BUFFER Buffer = Object;
-    PMDL		Mdl;
-    PUCHAR		MdlMappedSystemVa;
-    NTSTATUS		status;
+    PMDL		        Mdl;
+    PUCHAR		        MdlMappedSystemVa;
+    NTSTATUS	        status;
 
     UNREFERENCED_PARAMETER(Argument);
 
@@ -922,6 +927,9 @@ __RingGrantPayload(
     return STATUS_SUCCESS;
 
 fail1:
+    if (status != STATUS_BUFFER_OVERFLOW)
+        Error("fail1 (%08x)\n", status);
+
     while (PACKET_REFERENCE(Packet) != 1) {
         PLIST_ENTRY         ListEntry;
         PTRANSMITTER_TAG    Tag;
@@ -1151,7 +1159,7 @@ __RingPrepareHeader(
         State->Send.OffloadOptions.OffloadIpVersion6TcpChecksum = 1;
 
         // If the MSS is such that the payload would constitute only a single fragment then
-        // we no longer need trate the packet as a large packet.
+        // we no longer need treat the packet as a large packet.
         ASSERT3U(State->Send.MaximumSegmentSize, <=, Payload->Length);
         if (State->Send.MaximumSegmentSize == Payload->Length)
             State->Send.OffloadOptions.OffloadIpVersion6LargePacket = 0;
@@ -1165,8 +1173,6 @@ __RingPrepareHeader(
         MaximumFrameSize = MacGetMaximumFrameSize(Mac);
         
         if (Tag->Length > MaximumFrameSize) {
-            Warning("OVERSIZE PACKET (%u > %u)\n", Tag->Length, MaximumFrameSize);
-
             status = STATUS_INVALID_PARAMETER;
             goto fail3;
         }
@@ -1207,6 +1213,9 @@ __RingPrepareHeader(
     return STATUS_SUCCESS;
 
 fail3:
+    if (status != STATUS_INVALID_PARAMETER)
+        Error("fail2\n");
+
     ASSERT(State->Count != 0);
     --State->Count;
 
@@ -1231,12 +1240,18 @@ fail3:
     Mdl->ByteCount = 0;
 
 fail2:
+    if (status != STATUS_INVALID_PARAMETER)
+        Error("fail2\n");
+
     DECREMENT_PACKET_REFERENCE(Packet);
     Buffer->Context = NULL;
 
     __TransmitterPutBuffer(Ring, Buffer);
 
 fail1:
+    if (status != STATUS_INVALID_PARAMETER)
+        Error("fail1 (%08x)\n", status);
+
     ASSERT3U(PACKET_REFERENCE(Packet), ==, 0);
 
     return status;
@@ -1329,6 +1344,7 @@ __RingPreparePacket(
          (PVOID)((PUCHAR)(_Packet) + (_Ring)->Transmitter->Metadata. _Type ## Offset) : \
          NULL)
 
+    PXENVIF_TRANSMITTER             Transmitter;
     PTRANSMITTER_STATE              State;
     PXENVIF_PACKET_PAYLOAD          Payload;
     PXENVIF_PACKET_INFO             Info;
@@ -1336,6 +1352,8 @@ __RingPreparePacket(
 
     ASSERT(IsZeroMemory(&Ring->State, sizeof (TRANSMITTER_STATE)));
     ASSERT3P(Packet->Next, ==, NULL);
+
+    Transmitter = Ring->Transmitter;
 
     State = &Ring->State;
 
@@ -1417,8 +1435,11 @@ __RingPreparePacket(
             ASSERT3U(Tag->Length, ==, ETHERNET_MIN);
         }
     } else {
-        status = __RingGrantPayload(Ring);
-        if (!NT_SUCCESS(status) && status == STATUS_BUFFER_OVERFLOW) {
+        if (Transmitter->AlwaysCopy == 0)
+            status = __RingGrantPayload(Ring);
+
+        if (Transmitter->AlwaysCopy != 0 ||
+            (!NT_SUCCESS(status) && status == STATUS_BUFFER_OVERFLOW)) {
             ASSERT3U(State->Count, ==, PACKET_REFERENCE(Packet));
 
             status = __RingCopyPayload(Ring);
@@ -1434,9 +1455,15 @@ __RingPreparePacket(
     return STATUS_SUCCESS;
 
 fail2:
+    if (status != STATUS_INVALID_PARAMETER)
+        Error("fail2\n");
+
     __RingUnprepareTags(Ring);
 
 fail1:
+    if (status != STATUS_INVALID_PARAMETER)
+        Error("fail1 (%08x)\n", status);
+
     State->StartVa = NULL;
     RtlZeroMemory(&State->Info, sizeof (XENVIF_PACKET_INFO));
 
@@ -1797,7 +1824,9 @@ __RingPostTags(
     rsp_cons = Ring->Front.rsp_cons;
 
     Extra = (State->Send.OffloadOptions.OffloadIpVersion4LargePacket ||
-             State->Send.OffloadOptions.OffloadIpVersion6LargePacket) ? 1 : 0;
+             State->Send.OffloadOptions.OffloadIpVersion6LargePacket) ?
+            1 :
+            0;
 
     ASSERT3U(State->Count + Extra, <=, RING_SIZE(&Ring->Front));
 
@@ -3350,6 +3379,7 @@ TransmitterInitialize(
     OUT PXENVIF_TRANSMITTER *Transmitter
     )
 {
+    HANDLE                  ParametersKey;
     ULONG                   Done;
     NTSTATUS                status;
 
@@ -3358,6 +3388,36 @@ TransmitterInitialize(
     status = STATUS_NO_MEMORY;
     if (*Transmitter == NULL)
         goto fail1;
+
+    ParametersKey = DriverGetParametersKey();
+
+    (*Transmitter)->DisableIpVersion4Gso = 0;
+    (*Transmitter)->DisableIpVersion6Gso = 0;
+    (*Transmitter)->AlwaysCopy = 0;
+
+    if (ParametersKey != NULL) {
+        ULONG   TransmitterDisableIpVersion4Gso;
+        ULONG   TransmitterDisableIpVersion6Gso;
+        ULONG   TransmitterAlwaysCopy;
+
+        status = RegistryQueryDwordValue(ParametersKey,
+                                         "TransmitterDisableIpVersion4Gso",
+                                         &TransmitterDisableIpVersion4Gso);
+        if (NT_SUCCESS(status))
+            (*Transmitter)->DisableIpVersion4Gso = TransmitterDisableIpVersion4Gso;
+
+        status = RegistryQueryDwordValue(ParametersKey,
+                                         "TransmitterDisableIpVersion6Gso",
+                                         &TransmitterDisableIpVersion6Gso);
+        if (NT_SUCCESS(status))
+            (*Transmitter)->DisableIpVersion6Gso = TransmitterDisableIpVersion6Gso;
+
+        status = RegistryQueryDwordValue(ParametersKey,
+                                         "TransmitterAlwaysCopy",
+                                         &TransmitterAlwaysCopy);
+        if (NT_SUCCESS(status))
+            (*Transmitter)->AlwaysCopy = TransmitterAlwaysCopy;
+    }
 
     InitializeListHead(&(*Transmitter)->List);
 
@@ -3397,6 +3457,10 @@ fail2:
     ASSERT3U(Done, ==, 0);
 
     RtlZeroMemory(&(*Transmitter)->List, sizeof (LIST_ENTRY));
+
+    (*Transmitter)->DisableIpVersion4Gso = 0;
+    (*Transmitter)->DisableIpVersion6Gso = 0;
+    (*Transmitter)->AlwaysCopy = 0;
     
     ASSERT(IsZeroMemory(*Transmitter, sizeof (XENVIF_TRANSMITTER)));
     __TransmitterFree(*Transmitter);
@@ -3628,6 +3692,10 @@ TransmitterTeardown(
 
     RtlZeroMemory(&Transmitter->List, sizeof (LIST_ENTRY));
 
+    Transmitter->DisableIpVersion4Gso = 0;
+    Transmitter->DisableIpVersion6Gso = 0;
+    Transmitter->AlwaysCopy = 0;
+
     ASSERT(IsZeroMemory(Transmitter, sizeof (XENVIF_TRANSMITTER)));
     __TransmitterFree(Transmitter);
 }
@@ -3789,12 +3857,18 @@ TransmitterGetOffloadOptions(
 
     Options->OffloadTagManipulation = 1;
 
-    status = STORE(Read,
-                   Transmitter->StoreInterface,
-                   NULL,
-                   FrontendGetBackendPath(Frontend),
-                   "feature-gso-tcpv4",
-                   &Buffer);
+    if (Transmitter->DisableIpVersion4Gso == 0) {
+        status = STORE(Read,
+                       Transmitter->StoreInterface,
+                       NULL,
+                       FrontendGetBackendPath(Frontend),
+                       "feature-gso-tcpv4",
+                       &Buffer);
+    } else {
+        Buffer = NULL;
+        status = STATUS_NOT_SUPPORTED;
+    }
+
     if (!NT_SUCCESS(status)) {
         Options->OffloadIpVersion4LargePacket = 0;
     } else {
@@ -3805,12 +3879,18 @@ TransmitterGetOffloadOptions(
               Buffer);
     }
 
-    status = STORE(Read,
-                   Transmitter->StoreInterface,
-                   NULL,
-                   FrontendGetBackendPath(Frontend),
-                   "feature-gso-tcpv6",
-                   &Buffer);
+    if (Transmitter->DisableIpVersion6Gso == 0) {
+        status = STORE(Read,
+                       Transmitter->StoreInterface,
+                       NULL,
+                       FrontendGetBackendPath(Frontend),
+                       "feature-gso-tcpv6",
+                       &Buffer);
+    } else {
+        Buffer = NULL;
+        status = STATUS_NOT_SUPPORTED;
+    }
+
     if (!NT_SUCCESS(status)) {
         Options->OffloadIpVersion6LargePacket = 0;
     } else {

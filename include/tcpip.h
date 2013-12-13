@@ -37,6 +37,7 @@
 #pragma warning(push)
 #pragma warning(disable:4214) // nonstandard extension used : bit field types other than int
 #pragma warning(disable:4201) // nonstandard extension used : nameless struct/union
+#pragma warning(disable:4200) // nonstandard extension used : zero-sized array in struct/union
 
 #pragma pack(push, 1)
 
@@ -258,6 +259,19 @@ typedef struct _ICMPV6_HEADER {
 #define ICMPV6_TYPE_RA  134
 #define ICMPV6_TYPE_NS  135
 #define ICMPV6_TYPE_NA  136
+
+#define IPPROTO_AH          51
+
+// AH
+
+typedef struct _IP_AUTHENTICATION_HEADER {
+    UCHAR   NextHeader;
+    UCHAR   Length;
+    USHORT  Reserved;
+    ULONG   Spi;
+    ULONG   Seq;
+    UCHAR   Icv[0];
+} IP_AUTHENTICATION_HEADER, *PIP_AUTHENTICATION_HEADER;
 
 #define IPPROTO_NONE        59
 
