@@ -286,6 +286,29 @@ __ParseIpVersion6Header(
             NextHeader = Fragment->NextHeader;
             break;
         }
+        case IPPROTO_AH: {
+            PIP_AUTHENTICATION_HEADER   Authentication;
+            ULONG                       Extra;
+
+            if (!Pullup(Argument, StartVa + Offset, Payload, sizeof (IP_AUTHENTICATION_HEADER)))
+                goto fail4;
+
+            Authentication = (PIP_AUTHENTICATION_HEADER)(StartVa + Offset);
+            Offset += sizeof (IP_AUTHENTICATION_HEADER);
+
+#pragma warning(push)
+#pragma warning(disable:6297)
+            Extra = ((Authentication->Length + 2) << 2) - sizeof (IP_AUTHENTICATION_HEADER);
+#pragma warning(pop)
+
+            if (!Pullup(Argument, StartVa + Offset, Payload, Extra))
+                goto fail5;
+
+            Offset += Extra;
+
+            NextHeader = Authentication->NextHeader;
+            break;
+        }
         case IPPROTO_HOP_OPTIONS:
         case IPPROTO_DST_OPTIONS:
         case IPPROTO_ROUTING: {
@@ -298,7 +321,10 @@ __ParseIpVersion6Header(
             Option = (PIPV6_OPTION_HEADER)(StartVa + Offset);
             Offset += sizeof (IPV6_OPTION_HEADER);
 
-            Extra = ((Option->Length + 1) * 8) - sizeof (IPV6_OPTION_HEADER);
+#pragma warning(push)
+#pragma warning(disable:6297)
+            Extra = ((Option->Length + 1) << 3) - sizeof (IPV6_OPTION_HEADER);
+#pragma warning(pop)
 
             if (!Pullup(Argument, StartVa + Offset, Payload, Extra))
                 goto fail5;

@@ -511,6 +511,8 @@ NotifierDisconnect(
     ASSERT(Notifier->Connected);
     Notifier->Connected = FALSE;
 
+    Notifier->Split = FALSE;
+
     STORE(Release, Notifier->StoreInterface);
     Notifier->StoreInterface = NULL;
 

@@ -289,13 +289,13 @@ ChecksumTcpPacket(
         PIPV4_HEADER    Version4 = &IpHeader->Version4;
         
         Length = NTOHS(Version4->PacketLength) -
-                 sizeof (IPV4_HEADER) -
-                 (USHORT)Info->IpOptions.Length;
+                 Info->IpHeader.Length -
+                 Info->IpOptions.Length;
     } else {
         PIPV6_HEADER    Version6 = &IpHeader->Version6;
 
         Length = NTOHS(Version6->PayloadLength) -
-                 (USHORT)Info->IpOptions.Length;
+                 Info->IpOptions.Length;
     }
 
     Length -= Info->TcpHeader.Length;
