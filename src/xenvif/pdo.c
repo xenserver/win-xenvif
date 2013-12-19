@@ -609,6 +609,10 @@ __PdoSetPermanentMacAddress(
     if (!NT_SUCCESS(status))
         goto fail2;
 
+    status = STATUS_INVALID_PARAMETER;
+    if (Pdo->PermanentMacAddress.Byte[0] & 0x01)
+        goto fail3;
+
     AddressesKey = DriverGetAddressesKey();
     ASSERT(AddressesKey != NULL);
 
@@ -622,7 +626,7 @@ __PdoSetPermanentMacAddress(
                                    REG_SZ,
                                    &Ansi);
     if (!NT_SUCCESS(status))
-        goto fail3;
+        goto fail4;
 
     STORE(Free,
           StoreInterface,
@@ -632,10 +636,13 @@ __PdoSetPermanentMacAddress(
 
     return STATUS_SUCCESS;
 
-fail3:
-    Error("fail3\n");
+fail4:
+    Error("fail4\n");
 
     RtlZeroMemory(&Pdo->PermanentMacAddress, sizeof (ETHERNET_ADDRESS));
+
+fail3:
+    Error("fail3\n");
 
 fail2:
     Error("fail2\n");

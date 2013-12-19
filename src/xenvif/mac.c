@@ -82,32 +82,50 @@ __MacFree(
     __FreePoolWithTag(Buffer, MAC_POOL);
 }
 
-static FORCEINLINE VOID
+static FORCEINLINE NTSTATUS
 __MacSetPermanentAddress(
     IN  PXENVIF_MAC         Mac,
     IN  PETHERNET_ADDRESS   Address
     )
 {
     PXENVIF_FRONTEND        Frontend;
-
-    ASSERT(!(Address->Byte[0] & 0x01));
+    NTSTATUS                status;
 
     Frontend = Mac->Frontend;
 
+    status = STATUS_INVALID_PARAMETER;
+    if (Address->Byte[0] & 0x01)
+        goto fail1;
+
     Mac->PermanentAddress = *Address;
 
-    STORE(Printf,
-          Mac->StoreInterface,
-          NULL,
-          FrontendGetPrefix(Frontend),
-          "mac/unicast/permanent",
-          "%02x:%02x:%02x:%02x:%02x:%02x",
-          Mac->PermanentAddress.Byte[0],
-          Mac->PermanentAddress.Byte[1],
-          Mac->PermanentAddress.Byte[2],
-          Mac->PermanentAddress.Byte[3],
-          Mac->PermanentAddress.Byte[4],
-          Mac->PermanentAddress.Byte[5]);
+    (VOID) STORE(Printf,
+                 Mac->StoreInterface,
+                 NULL,
+                 FrontendGetPrefix(Frontend),
+                 "mac/unicast/permanent",
+                 "%02x:%02x:%02x:%02x:%02x:%02x",
+                 Mac->PermanentAddress.Byte[0],
+                 Mac->PermanentAddress.Byte[1],
+                 Mac->PermanentAddress.Byte[2],
+                 Mac->PermanentAddress.Byte[3],
+                 Mac->PermanentAddress.Byte[4],
+                 Mac->PermanentAddress.Byte[5]);
+
+    Info("%02x:%02x:%02x:%02x:%02x:%02x\n",
+         Mac->PermanentAddress.Byte[0],
+         Mac->PermanentAddress.Byte[1],
+         Mac->PermanentAddress.Byte[2],
+         Mac->PermanentAddress.Byte[3],
+         Mac->PermanentAddress.Byte[4],
+         Mac->PermanentAddress.Byte[5]);
+
+    return STATUS_SUCCESS;
+
+fail1:
+    Error("fail1 (%08x)\n");
+
+    return status;
 }
 
 static FORCEINLINE PETHERNET_ADDRESS
@@ -126,32 +144,50 @@ MacGetPermanentAddress(
     return __MacGetPermanentAddress(Mac);
 }
 
-static FORCEINLINE VOID
+static FORCEINLINE NTSTATUS
 __MacSetCurrentAddress(
     IN  PXENVIF_MAC         Mac,
     IN  PETHERNET_ADDRESS   Address
     )
 {
     PXENVIF_FRONTEND        Frontend;
-
-    ASSERT(!(Address->Byte[0] & 0x01));
+    NTSTATUS                status;
 
     Frontend = Mac->Frontend;
 
+    status = STATUS_INVALID_PARAMETER;
+    if (Address->Byte[0] & 0x01)
+        goto fail1;
+
     Mac->CurrentAddress = *Address;
 
-    STORE(Printf,
-          Mac->StoreInterface,
-          NULL,
-          FrontendGetPrefix(Frontend),
-          "mac/unicast/current",
-          "%02x:%02x:%02x:%02x:%02x:%02x",
-          Mac->CurrentAddress.Byte[0],
-          Mac->CurrentAddress.Byte[1],
-          Mac->CurrentAddress.Byte[2],
-          Mac->CurrentAddress.Byte[3],
-          Mac->CurrentAddress.Byte[4],
-          Mac->CurrentAddress.Byte[5]);
+    (VOID) STORE(Printf,
+                 Mac->StoreInterface,
+                 NULL,
+                 FrontendGetPrefix(Frontend),
+                 "mac/unicast/current",
+                 "%02x:%02x:%02x:%02x:%02x:%02x",
+                 Mac->CurrentAddress.Byte[0],
+                 Mac->CurrentAddress.Byte[1],
+                 Mac->CurrentAddress.Byte[2],
+                 Mac->CurrentAddress.Byte[3],
+                 Mac->CurrentAddress.Byte[4],
+                 Mac->CurrentAddress.Byte[5]);
+
+    Info("%02x:%02x:%02x:%02x:%02x:%02x\n",
+         Mac->CurrentAddress.Byte[0],
+         Mac->CurrentAddress.Byte[1],
+         Mac->CurrentAddress.Byte[2],
+         Mac->CurrentAddress.Byte[3],
+         Mac->CurrentAddress.Byte[4],
+         Mac->CurrentAddress.Byte[5]);
+
+    return STATUS_SUCCESS;
+
+fail1:
+    Error("fail1 (%08x)\n");
+
+    return status;
 }
 
 static FORCEINLINE PETHERNET_ADDRESS
@@ -312,8 +348,18 @@ MacConnect(
 
     Mac->MaximumFrameSize = (ULONG)Mtu + sizeof (ETHERNET_TAGGED_HEADER);
 
-    __MacSetPermanentAddress(Mac, FrontendGetPermanentMacAddress(Frontend));
-    __MacSetCurrentAddress(Mac, FrontendGetCurrentMacAddress(Frontend));
+    status = __MacSetPermanentAddress(Mac,
+                                      FrontendGetPermanentMacAddress(Frontend));
+    if (!NT_SUCCESS(status))
+        goto fail2;
+
+    status = __MacSetCurrentAddress(Mac,
+                                    FrontendGetCurrentMacAddress(Frontend));
+    if (!NT_SUCCESS(status))
+        RtlCopyMemory(&Mac->CurrentAddress,
+                      &Mac->PermanentAddress,
+                      sizeof (ETHERNET_ADDRESS));
+
     RtlFillMemory(Mac->BroadcastAddress.Byte, ETHERNET_ADDRESS_LENGTH, 0xFF);
 
     Mac->DebugInterface = FrontendGetDebugInterface(Frontend);
@@ -327,15 +373,15 @@ MacConnect(
                    Mac,
                    &Mac->DebugCallback);
     if (!NT_SUCCESS(status))
-        goto fail2;
+        goto fail3;
 
     ASSERT(!Mac->Connected);
     Mac->Connected = TRUE;
 
     return STATUS_SUCCESS;
 
-fail2:
-    Error("fail2\n");
+fail3:
+    Error("fail3\n");
 
     DEBUG(Release, Mac->DebugInterface);
     Mac->DebugInterface = NULL;
@@ -343,6 +389,9 @@ fail2:
     RtlZeroMemory(Mac->BroadcastAddress.Byte, ETHERNET_ADDRESS_LENGTH);
     RtlZeroMemory(Mac->CurrentAddress.Byte, ETHERNET_ADDRESS_LENGTH);
     RtlZeroMemory(Mac->PermanentAddress.Byte, ETHERNET_ADDRESS_LENGTH);
+
+fail2:
+    Error("fail2\n");
 
     Mac->MaximumFrameSize = 0;
 
@@ -536,19 +585,14 @@ MacSetCurrentAddress(
     IN  PETHERNET_ADDRESS   Address
     )
 {
-    PXENVIF_FRONTEND        Frontend;
     KIRQL                   Irql;
     NTSTATUS                status;
 
-    Frontend = Mac->Frontend;
-
     KeAcquireSpinLock(&Mac->Lock, &Irql);
 
-    status = STATUS_INVALID_PARAMETER;
-    if (Address->Byte[0] & 0x01)
+    status = __MacSetCurrentAddress(Mac, Address);
+    if (!NT_SUCCESS(status))
         goto fail1;
-
-    __MacSetCurrentAddress(Mac, Address);
 
     KeReleaseSpinLock(&Mac->Lock, Irql);
 
