@@ -2637,18 +2637,22 @@ RingWatchdog(
     return STATUS_SUCCESS;
 }
 
-static FORCEINLINE VOID
+static FORCEINLINE NTSTATUS
 __RingDumpAddressTable(
-    IN  PTRANSMITTER_RING   Ring
+    IN  PTRANSMITTER_RING       Ring
     )
 {
-    PXENVIF_TRANSMITTER     Transmitter;
-    PXENVIF_FRONTEND        Frontend;
-    ULONG                   Index;
-    ULONG                   IpVersion4Count;
-    ULONG                   IpVersion6Count;
+    PXENVIF_TRANSMITTER         Transmitter;
+    PXENVIF_FRONTEND            Frontend;
+    PXENBUS_STORE_TRANSACTION   Transaction;
+    ULONG                       Index;
+    ULONG                       IpVersion4Count;
+    ULONG                       IpVersion6Count;
+    NTSTATUS                    status;
 
     __RingAcquireLock(Ring);
+
+    status = STATUS_SUCCESS;
     if (!Ring->Connected)
         goto done;
 
@@ -2657,23 +2661,38 @@ __RingDumpAddressTable(
 
     ASSERT(Transmitter->StoreInterface != NULL);
 
-    STORE(Remove,
-          Transmitter->StoreInterface,
-          NULL,
-          FrontendGetPrefix(Frontend),
-          "ip");
+    status = STORE(TransactionStart,
+                   Transmitter->StoreInterface,
+                   &Transaction);
+    if (!NT_SUCCESS(status))
+        goto fail1;
 
-    STORE(Remove,
-          Transmitter->StoreInterface,
-          NULL,
-          FrontendGetPrefix(Frontend),
-          "ipv4");
+    status = STORE(Remove,
+                   Transmitter->StoreInterface,
+                   Transaction,
+                   FrontendGetPrefix(Frontend),
+                   "ip");
+    if (!NT_SUCCESS(status) &&
+        status != STATUS_OBJECT_NAME_NOT_FOUND)
+        goto fail2;
 
-    STORE(Remove,
-          Transmitter->StoreInterface,
-          NULL,
-          FrontendGetPrefix(Frontend),
-          "ipv6");
+    status = STORE(Remove,
+                   Transmitter->StoreInterface,
+                   Transaction,
+                   FrontendGetPrefix(Frontend),
+                   "ipv4");
+    if (!NT_SUCCESS(status) &&
+        status != STATUS_OBJECT_NAME_NOT_FOUND)
+        goto fail3;
+
+    status = STORE(Remove,
+                   Transmitter->StoreInterface,
+                   Transaction,
+                   FrontendGetPrefix(Frontend),
+                   "ipv6");
+    if (!NT_SUCCESS(status) &&
+        status != STATUS_OBJECT_NAME_NOT_FOUND)
+        goto fail4;
 
     IpVersion4Count = 0;
     IpVersion6Count = 0;
@@ -2682,70 +2701,79 @@ __RingDumpAddressTable(
         switch (Ring->AddressTable[Index].si_family) {
         case AF_INET: {
             IPV4_ADDRESS    Address;
-            CHAR            Node[sizeof ("ipv4/XX/addr")];
+            CHAR            Node[sizeof ("ipv4/XXXXXXXX/addr")];
 
             RtlCopyMemory(Address.Byte,
                           &Ring->AddressTable[Index].Ipv4.sin_addr.s_addr,
                           IPV4_ADDRESS_LENGTH);
 
-            (VOID) RtlStringCbPrintfA(Node,
-                                      sizeof (Node),
-                                      "ipv4/%u/addr",
-                                      IpVersion4Count);
+            status = RtlStringCbPrintfA(Node,
+                                        sizeof (Node),
+                                        "ipv4/%u/addr",
+                                        IpVersion4Count);
+            ASSERT(NT_SUCCESS(status));
 
-            STORE(Printf,
-                  Transmitter->StoreInterface,
-                  NULL,
-                  FrontendGetPrefix(Frontend),
-                  Node,
-                  "%u.%u.%u.%u",
-                  Address.Byte[0],
-                  Address.Byte[1],
-                  Address.Byte[2],
-                  Address.Byte[3]);
+            status = STORE(Printf,
+                           Transmitter->StoreInterface,
+                           Transaction,
+                           FrontendGetPrefix(Frontend),
+                           Node,
+                           "%u.%u.%u.%u",
+                           Address.Byte[0],
+                           Address.Byte[1],
+                           Address.Byte[2],
+                           Address.Byte[3]);
+            if (!NT_SUCCESS(status))
+                goto fail5;
 
-            if (IpVersion4Count == 0)
-                STORE(Printf,
-                      Transmitter->StoreInterface,
-                      NULL,
-                      FrontendGetPrefix(Frontend),
-                      "ip",
-                      "%u.%u.%u.%u",
-                      Address.Byte[0],
-                      Address.Byte[1],
-                      Address.Byte[2],
-                      Address.Byte[3]);
+            if (IpVersion4Count == 0) {
+                status = STORE(Printf,
+                               Transmitter->StoreInterface,
+                               NULL,
+                               FrontendGetPrefix(Frontend),
+                               "ip",
+                               "%u.%u.%u.%u",
+                               Address.Byte[0],
+                               Address.Byte[1],
+                               Address.Byte[2],
+                               Address.Byte[3]);
+                if (!NT_SUCCESS(status))
+                    goto fail6;
+            }
 
             IpVersion4Count++;
             break;
         }
         case AF_INET6: {
             IPV6_ADDRESS    Address;
-            CHAR            Node[sizeof ("ipv6/XX/addr")];
+            CHAR            Node[sizeof ("ipv6/XXXXXXXX/addr")];
 
             RtlCopyMemory(Address.Byte,
                           &Ring->AddressTable[Index].Ipv6.sin6_addr.s6_addr,
                           IPV6_ADDRESS_LENGTH);
 
-            RtlStringCbPrintfA(Node,
-                               sizeof (Node),
-                               "ipv6/%u/addr",
-                               IpVersion6Count);
+            status = RtlStringCbPrintfA(Node,
+                                        sizeof (Node),
+                                        "ipv6/%u/addr",
+                                        IpVersion6Count);
+            ASSERT(NT_SUCCESS(status));
 
-            STORE(Printf,
-                  Transmitter->StoreInterface,
-                  NULL,
-                  FrontendGetPrefix(Frontend),
-                  Node,
-                  "%04x:%04x:%04x:%04x:%04x:%04x:%04x:%04x",
-                  NTOHS(Address.Word[0]),
-                  NTOHS(Address.Word[1]),
-                  NTOHS(Address.Word[2]),
-                  NTOHS(Address.Word[3]),
-                  NTOHS(Address.Word[4]),
-                  NTOHS(Address.Word[5]),
-                  NTOHS(Address.Word[6]),
-                  NTOHS(Address.Word[7]));
+            status = STORE(Printf,
+                           Transmitter->StoreInterface,
+                           Transaction,
+                           FrontendGetPrefix(Frontend),
+                           Node,
+                           "%04x:%04x:%04x:%04x:%04x:%04x:%04x:%04x",
+                           NTOHS(Address.Word[0]),
+                           NTOHS(Address.Word[1]),
+                           NTOHS(Address.Word[2]),
+                           NTOHS(Address.Word[3]),
+                           NTOHS(Address.Word[4]),
+                           NTOHS(Address.Word[5]),
+                           NTOHS(Address.Word[6]),
+                           NTOHS(Address.Word[7]));
+            if (!NT_SUCCESS(status))
+                goto fail5;
 
             IpVersion6Count++;
             break;
@@ -2755,8 +2783,42 @@ __RingDumpAddressTable(
         }
     }
 
+    status = STORE(TransactionEnd,
+                   Transmitter->StoreInterface,
+                   Transaction,
+                   TRUE);
+
 done:
     __RingReleaseLock(Ring);
+
+    return status;
+
+fail6:
+    Error("fail6\n");
+
+fail5:
+    Error("fail5\n");
+
+fail4:
+    Error("fail4\n");
+
+fail3:
+    Error("fail3\n");
+
+fail2:
+    Error("fail2\n");
+
+    (VOID) STORE(TransactionEnd,
+                 Transmitter->StoreInterface,
+                 Transaction,
+                 FALSE);
+
+fail1:
+    Error("fail1 (%08x)\n", status);
+
+    __RingReleaseLock(Ring);
+
+    return status;
 }
 
 static FORCEINLINE VOID
@@ -2766,6 +2828,7 @@ __RingUpdateAddressTable(
     IN  ULONG               Count
     )
 {
+    ULONG                   Attempt;
     NTSTATUS                status;
 
     __RingAcquireLock(Ring);
@@ -2797,7 +2860,10 @@ __RingUpdateAddressTable(
 done:
     __RingReleaseLock(Ring);
 
-    __RingDumpAddressTable(Ring);
+    Attempt = 0;
+    do {
+        status = __RingDumpAddressTable(Ring);
+    } while (status == STATUS_RETRY && ++Attempt <= 10);
 
     return;
 
@@ -3480,6 +3546,7 @@ TransmitterConnect(
     PXENVIF_FRONTEND        Frontend;
     PLIST_ENTRY             ListEntry;
     PTRANSMITTER_RING       Ring;
+    ULONG                   Attempt;
     NTSTATUS                status;
 
     Frontend = Transmitter->Frontend;
@@ -3515,7 +3582,10 @@ TransmitterConnect(
     ListEntry = Transmitter->List.Flink;
     Ring = CONTAINING_RECORD(ListEntry, TRANSMITTER_RING, ListEntry);
 
-    __RingDumpAddressTable(Ring);
+    Attempt = 0;
+    do {
+        status = __RingDumpAddressTable(Ring);
+    } while (status == STATUS_RETRY && ++Attempt <= 10);
 
     Transmitter->VifInterface = FrontendGetVifInterface(Frontend);
 
