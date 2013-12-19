@@ -122,6 +122,7 @@ typedef struct _RECEIVER_RING {
     BOOLEAN                             Enabled;
     BOOLEAN                             Stopped;
     XENVIF_OFFLOAD_OPTIONS              OffloadOptions;
+    PXENVIF_THREAD                      Thread;
     XENVIF_RECEIVER_PACKET_STATISTICS   PacketStatistics;
     XENVIF_HEADER_STATISTICS            HeaderStatistics;
     RECEIVER_OFFLOAD_STATISTICS         OffloadStatistics;
@@ -2033,6 +2034,108 @@ __RingDebugCallback(
           Ring->OffloadStatistics.TagRemoved);
 }
 
+#define TIME_US(_us)        ((_us) * 10)
+#define TIME_MS(_ms)        (TIME_US((_ms) * 1000))
+#define TIME_RELATIVE(_t)   (-(_t))
+
+#define RING_PERIOD         5000
+
+static NTSTATUS
+RingWatchdog(
+    IN  PXENVIF_THREAD  Self,
+    IN  PVOID           Context
+    )
+{
+    PRECEIVER_RING      Ring = Context;
+    LARGE_INTEGER       Timeout;
+    RING_IDX            rsp_prod;
+    RING_IDX            rsp_cons;
+
+    Trace("====>\n");
+
+    Timeout.QuadPart = TIME_RELATIVE(TIME_MS(RING_PERIOD));
+
+    rsp_prod = 0;
+    rsp_cons = 0;
+
+    for (;;) { 
+        PKEVENT Event;
+        KIRQL   Irql;
+
+        Event = ThreadGetEvent(Self);
+
+        (VOID) KeWaitForSingleObject(Event,
+                                     Executive,
+                                     KernelMode,
+                                     FALSE,
+                                     &Timeout);
+        KeClearEvent(Event);
+
+        if (ThreadIsAlerted(Self))
+            break;
+
+        KeRaiseIrql(DISPATCH_LEVEL, &Irql);
+        __RingAcquireLock(Ring);
+
+        if (Ring->Enabled) {
+            KeMemoryBarrier();
+
+            if (Ring->Shared->rsp_prod != rsp_prod &&
+                Ring->Front.rsp_cons == rsp_cons) {
+                PXENVIF_RECEIVER    Receiver;
+                PXENVIF_FRONTEND    Frontend;
+
+                Receiver = Ring->Receiver;
+                Frontend = Receiver->Frontend;
+
+                // Dump front ring
+                DEBUG(Printf,
+                      Receiver->DebugInterface,
+                      Receiver->DebugCallback,
+                      "FRONT: req_prod_pvt = %u rsp_cons = %u nr_ents = %u sring = %p\n",
+                      Ring->Front.req_prod_pvt,
+                      Ring->Front.rsp_cons,
+                      Ring->Front.nr_ents,
+                      Ring->Front.sring);
+
+                // Dump shared ring
+                DEBUG(Printf,
+                      Receiver->DebugInterface,
+                      Receiver->DebugCallback,
+                      "SHARED: req_prod = %u req_event = %u rsp_prod = %u rsp_event = %u\n",
+                      Ring->Shared->req_prod,
+                      Ring->Shared->req_event,
+                      Ring->Shared->rsp_prod,
+                      Ring->Shared->rsp_event);
+
+                DEBUG(Printf,
+                      Receiver->DebugInterface,
+                      Receiver->DebugCallback,
+                      "RequestsPosted = %u RequestsPushed = %u ResponsesProcessed = %u\n",
+                      Ring->RequestsPosted,
+                      Ring->RequestsPushed,
+                      Ring->ResponsesProcessed);
+
+                // Try to move things along
+                NotifierSendRx(FrontendGetNotifier(Frontend));
+                NotifierTriggerRx(FrontendGetNotifier(Frontend));
+            }
+
+            KeMemoryBarrier();
+
+            rsp_prod = Ring->Shared->rsp_prod;
+            rsp_cons = Ring->Front.rsp_cons;
+        }
+
+        __RingReleaseLock(Ring);
+        KeLowerIrql(Irql);
+    }
+
+    Trace("<====\n");
+
+    return STATUS_SUCCESS;
+}
+
 static FORCEINLINE NTSTATUS
 __RingInitialize(
     IN  PXENVIF_RECEIVER    Receiver,
@@ -2064,7 +2167,23 @@ __RingInitialize(
 
     (*Ring)->Receiver = Receiver;
 
+    status = ThreadCreate(RingWatchdog,
+                          *Ring,
+                          &(*Ring)->Thread);
+    if (!NT_SUCCESS(status))
+        goto fail3;
+
     return STATUS_SUCCESS;
+
+fail3:
+    Error("fail3\n");
+
+    (*Ring)->Receiver = NULL;
+
+    RtlZeroMemory(&(*Ring)->PacketList, sizeof (LIST_ENTRY));
+
+    PoolTeardown((*Ring)->PacketPool);
+    (*Ring)->PacketPool = NULL;
 
 fail2:
     Error("fail2\n");
@@ -2508,6 +2627,10 @@ __RingTeardown(
     RtlZeroMemory(&Ring->HeaderStatistics, sizeof (XENVIF_HEADER_STATISTICS));
     RtlZeroMemory(&Ring->OffloadStatistics, sizeof (RECEIVER_OFFLOAD_STATISTICS));
     RtlZeroMemory(&Ring->PacketStatistics, sizeof (XENVIF_RECEIVER_PACKET_STATISTICS));
+
+    ThreadAlert(Ring->Thread);
+    ThreadJoin(Ring->Thread);
+    Ring->Thread = NULL;
 
     Ring->Receiver = NULL;
 
