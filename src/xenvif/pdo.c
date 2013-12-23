@@ -1000,93 +1000,6 @@ __PdoNotifyInstaller(
     (VOID) RegistryUpdateDwordValue(ServiceKey, "NeedReboot", 1);
 }
 
-#define HKEY_LOCAL_MACHINE  "\\Registry\\Machine"
-#define CLASS_KEY           HKEY_LOCAL_MACHINE "\\SYSTEM\\CurrentControlSet\\Control\\Class"
-#define NETWORK_KEY         HKEY_LOCAL_MACHINE "\\SYSTEM\\CurrentControlSet\\Control\\Network\\{4D36E972-E325-11CE-BFC1-08002BE10318}"
-
-static FORCEINLINE NTSTATUS
-__PdoGetDeviceInstanceIDFromAliasSoftwareKey(
-    IN      HANDLE          AliasSoftwareKey,
-    IN OUT  PANSI_STRING    *DeviceInstanceID
-    )
-{
-    HANDLE                  ConnectionKey;
-    HANDLE                  GuidKey;
-    HANDLE                  NetworkKey;
-    PANSI_STRING            Guid;
-    NTSTATUS                status;
-    
-    status = RegistryQuerySzValue(AliasSoftwareKey,
-                                  "DeviceInstanceID",
-                                  DeviceInstanceID);
-    if (NT_SUCCESS(status))
-        return status;
-
-    // Win2k8 and earlier don't provide DeviceInstanceID
-
-    status = RegistryQuerySzValue(AliasSoftwareKey, 
-                                  "NetCfgInstanceId",
-                                  &Guid);
-    if (!NT_SUCCESS(status))
-        goto fail1;
-
-    status = RegistryOpenSubKey(NULL,
-                                NETWORK_KEY,
-                                KEY_READ,
-                                &NetworkKey);
-    if (!NT_SUCCESS(status))
-        goto fail2;
-    
-    status = RegistryOpenSubKey(NetworkKey,
-                                Guid->Buffer,
-                                KEY_READ,
-                                &GuidKey);
-    if (!NT_SUCCESS(status))
-        goto fail3;
-
-    status = RegistryOpenSubKey(GuidKey,
-                                "Connection",
-                                KEY_READ,
-                                &ConnectionKey);
-    if (!NT_SUCCESS(status))
-        goto fail4;
-
-    status = RegistryQuerySzValue(ConnectionKey,
-                                  "PnpInstanceID",
-                                  DeviceInstanceID);
-    if (!NT_SUCCESS(status))
-        goto fail5;
-    
-    RegistryCloseKey(ConnectionKey);
-    RegistryCloseKey(GuidKey);
-    RegistryCloseKey(NetworkKey);
-    RegistryFreeSzValue(Guid);
-    
-    return status;
-
-
-fail5:
-    Error("fail5\n");
-    RegistryCloseKey(ConnectionKey);
-
-fail4:
-    Error("fail4\n");
-    RegistryCloseKey(GuidKey);
-
-fail3:
-    Error("fail3\n");
-    RegistryCloseKey(NetworkKey);
-
-fail2:
-    Error("fail2\n");
-    RegistryFreeSzValue(Guid);
-
-fail1:
-    Error("fail1 (%08x)\n", status);
-
-    return status;
-}
-
 static FORCEINLINE NTSTATUS
 __PdoCheckForAlias(
     IN  PXENVIF_PDO             Pdo
@@ -1094,9 +1007,6 @@ __PdoCheckForAlias(
 {
     HANDLE                      AliasesKey;
     PANSI_STRING                Alias;
-    HANDLE                      ClassKey;
-    HANDLE                      AliasSoftwareKey;
-    PANSI_STRING                DeviceInstanceID;
     PCHAR                       DeviceID;
     PCHAR                       InstanceID;
     PXENFILT_EMULATED_INTERFACE EmulatedInterface;
@@ -1122,37 +1032,20 @@ __PdoCheckForAlias(
     if (Alias->Length == 0)   // No alias
         goto done;
 
-    Trace("%Z\n", Alias);
-
-    status = RegistryOpenSubKey(NULL,
-                                CLASS_KEY,
-                                KEY_READ,
-                                &ClassKey);
-    if (!NT_SUCCESS(status))
+    DeviceID = strstr(Alias->Buffer, "Enum\\");
+    if (DeviceID == NULL)
         goto fail3;
 
-    status = RegistryOpenSubKey(ClassKey,
-                                Alias->Buffer,
-                                KEY_READ,
-                                &AliasSoftwareKey);
-    if (!NT_SUCCESS(status))
-        goto fail4;
-
-    status = __PdoGetDeviceInstanceIDFromAliasSoftwareKey(AliasSoftwareKey,
-                                                          &DeviceInstanceID);
-
-    if (!NT_SUCCESS(status))
-        goto fail5;
-
-    Trace("DeviceInstanceID = %Z\n", DeviceInstanceID);
-
-    DeviceID = DeviceInstanceID->Buffer;
+    DeviceID += 5;
 
     InstanceID = strrchr(DeviceID, '\\');
     if (InstanceID == NULL)
-        goto fail6;
+        goto fail4;
 
     *(InstanceID++) = '\0';
+
+    Trace("DeviceID: %s\n", DeviceID);
+    Trace("InstanceID: %s\n", InstanceID);
 
     EMULATED(Acquire, EmulatedInterface);
 
@@ -1162,41 +1055,23 @@ __PdoCheckForAlias(
                  DeviceID,
                  InstanceID)) {
         __PdoNotifyInstaller(Pdo);
-        goto fail7;
+        goto fail5;
     }
 
     EMULATED(Release, EmulatedInterface);
     
-    RegistryFreeSzValue(DeviceInstanceID);
-
-    RegistryCloseKey(AliasSoftwareKey);
-
-    RegistryCloseKey(ClassKey);
-
 done:
     RegistryFreeSzValue(Alias);
 
     return STATUS_SUCCESS;
 
-fail7:
-    Error("fail7\n");
-
-    EMULATED(Release, EmulatedInterface);
-
-fail6:
-    Error("fail6\n");
-
-    RegistryFreeSzValue(DeviceInstanceID);
-
 fail5:
     Error("fail5\n");
 
-    RegistryCloseKey(AliasSoftwareKey);
+    EMULATED(Release, EmulatedInterface);
 
 fail4:
     Error("fail4\n");
-
-    RegistryCloseKey(ClassKey);
 
 fail3:
     Error("fail3\n");
