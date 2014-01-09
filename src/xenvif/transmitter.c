@@ -2556,7 +2556,7 @@ RingReleaseLock(
 #define TIME_MS(_ms)        (TIME_US((_ms) * 1000))
 #define TIME_RELATIVE(_t)   (-(_t))
 
-#define RING_PERIOD         10000
+#define RING_PERIOD         30000
 
 static NTSTATUS
 RingWatchdog(
@@ -2601,28 +2601,41 @@ RingWatchdog(
                 Transmitter = Ring->Transmitter;
                 Frontend = Transmitter->Frontend;
 
-                Info("PATH: %s\n", FrontendGetPath(Frontend));
+                DEBUG(Printf,
+                      Transmitter->DebugInterface,
+                      Transmitter->DebugCallback,
+                      "WATCHDOG: %s\n",
+                      FrontendGetPath(Frontend));
 
-                Info("FRONT: req_prod_pvt = %u rsp_cons = %u nr_ents = %u sring = %p\n",
-                     Ring->Front.req_prod_pvt,
-                     Ring->Front.rsp_cons,
-                     Ring->Front.nr_ents,
-                     Ring->Front.sring);
+                DEBUG(Printf,
+                      Transmitter->DebugInterface,
+                      Transmitter->DebugCallback,
+                      "FRONT: req_prod_pvt = %u rsp_cons = %u nr_ents = %u sring = %p\n",
+                      Ring->Front.req_prod_pvt,
+                      Ring->Front.rsp_cons,
+                      Ring->Front.nr_ents,
+                      Ring->Front.sring);
 
-                Info("SHARED: req_prod = %u req_event = %u rsp_prod = %u rsp_event = %u\n",
-                     Ring->Shared->req_prod,
-                     Ring->Shared->req_event,
-                     Ring->Shared->rsp_prod,
-                     Ring->Shared->rsp_event);
+                DEBUG(Printf,
+                      Transmitter->DebugInterface,
+                      Transmitter->DebugCallback,
+                      "SHARED: req_prod = %u req_event = %u rsp_prod = %u rsp_event = %u\n",
+                      Ring->Shared->req_prod,
+                      Ring->Shared->req_event,
+                      Ring->Shared->rsp_prod,
+                      Ring->Shared->rsp_event);
 
-                Info("RequestsPosted = %u RequestsPushed = %u ResponsesProcessed = %u\n",
-                     Ring->RequestsPosted,
-                     Ring->RequestsPushed,
-                     Ring->ResponsesProcessed);
+                DEBUG(Printf,
+                      Transmitter->DebugInterface,
+                      Transmitter->DebugCallback,
+                      "RequestsPosted = %u RequestsPushed = %u ResponsesProcessed = %u\n",
+                      Ring->RequestsPosted,
+                      Ring->RequestsPushed,
+                      Ring->ResponsesProcessed);
 
                 // Try to move things along
                 NotifierSendTx(FrontendGetNotifier(Frontend));
-                NotifierTriggerTx(FrontendGetNotifier(Frontend));
+                RingPoll(Ring);
             }
 
             PacketsQueued = Ring->PacketsQueued;

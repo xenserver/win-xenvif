@@ -634,120 +634,6 @@ RingProcessChecksum(
     }
 }
 
-static FORCEINLINE VOID
-__drv_requiresIRQL(DISPATCH_LEVEL)
-__RingAcquireLock(
-    IN  PRECEIVER_RING  Ring
-    )
-{
-    ASSERT3U(KeGetCurrentIrql(), ==, DISPATCH_LEVEL);
-
-    KeAcquireSpinLockAtDpcLevel(&Ring->Lock);
-}
-
-static DECLSPEC_NOINLINE VOID
-RingAcquireLock(
-    IN  PRECEIVER_RING  Ring
-    )
-{
-    __RingAcquireLock(Ring);
-}
-
-static FORCEINLINE VOID
-__drv_requiresIRQL(DISPATCH_LEVEL)
-__RingReleaseLock(
-    IN  PRECEIVER_RING  Ring
-    )
-{
-    ASSERT3U(KeGetCurrentIrql(), ==, DISPATCH_LEVEL);
-
-#pragma prefast(disable:26110)
-    KeReleaseSpinLockFromDpcLevel(&Ring->Lock);
-}
-
-static DECLSPEC_NOINLINE VOID
-RingReleaseLock(
-    IN  PRECEIVER_RING  Ring
-    )
-{
-    __RingReleaseLock(Ring);
-}
-
-static FORCEINLINE VOID
-__RingStop(
-    IN  PRECEIVER_RING  Ring
-    )
-{
-    Info("<===>\n");
-
-    Ring->Stopped = TRUE;
-}
-
-static FORCEINLINE VOID
-__RingStart(
-    IN  PRECEIVER_RING  Ring
-    )
-{
-    Ring->Stopped = FALSE;
-}
-
-static FORCEINLINE BOOLEAN
-__RingIsStopped(
-    IN  PRECEIVER_RING  Ring
-    )
-{
-    return Ring->Stopped;
-}
-
-static FORCEINLINE VOID
-__RingReturnPacket(
-    IN  PRECEIVER_RING          Ring,
-    IN  PXENVIF_RECEIVER_PACKET Packet,
-    IN  BOOLEAN                 Locked
-    )
-{
-    PMDL                        Mdl;
-
-    Mdl = &Packet->Mdl;
-
-    while (Mdl != NULL) {
-        PMDL    Next;
-
-        Next = Mdl->Next;
-        Mdl->Next = NULL;
-
-        __RingPutMdl(Ring, Mdl, Locked);
-
-        Mdl = Next;
-    }
-
-    if (__RingIsStopped(Ring)) {
-        KIRQL   Irql;
-
-        KeRaiseIrql(DISPATCH_LEVEL, &Irql);
-
-        if (!Locked)
-            __RingAcquireLock(Ring);
-
-        if (__RingIsStopped(Ring)) {
-            PXENVIF_RECEIVER    Receiver;
-            PXENVIF_FRONTEND    Frontend;
-
-            __RingStart(Ring);
-
-            Receiver = Ring->Receiver;
-            Frontend = Receiver->Frontend;
-
-            NotifierTriggerRx(FrontendGetNotifier(Frontend));
-        }
-
-        if (!Locked)
-            __RingReleaseLock(Ring);
-
-        KeLowerIrql(Irql);
-    }
-}
-
 static BOOLEAN
 ReceiverPullup(
     IN      PVOID                   Argument,
@@ -1384,6 +1270,145 @@ RingProcessPackets(
         Packet->Cookie = Ring;
 
         (*Count)++;
+    }
+}
+
+static FORCEINLINE VOID
+__drv_requiresIRQL(DISPATCH_LEVEL)
+__RingAcquireLock(
+    IN  PRECEIVER_RING  Ring
+    )
+{
+    ASSERT3U(KeGetCurrentIrql(), ==, DISPATCH_LEVEL);
+
+    KeAcquireSpinLockAtDpcLevel(&Ring->Lock);
+}
+
+static DECLSPEC_NOINLINE VOID
+RingAcquireLock(
+    IN  PRECEIVER_RING  Ring
+    )
+{
+    __RingAcquireLock(Ring);
+}
+
+static FORCEINLINE VOID
+__drv_requiresIRQL(DISPATCH_LEVEL)
+__RingReleaseLock(
+    IN  PRECEIVER_RING  Ring
+    )
+{
+    PXENVIF_RECEIVER    Receiver;
+    PXENVIF_FRONTEND    Frontend;
+    LIST_ENTRY          List;
+    ULONG               Count;
+
+    ASSERT3U(KeGetCurrentIrql(), ==, DISPATCH_LEVEL);
+
+    Receiver = Ring->Receiver;
+    Frontend = Receiver->Frontend;
+
+    InitializeListHead(&List);
+    Count = 0;
+
+    RingProcessPackets(Ring, &List, &Count);
+    ASSERT(EQUIV(IsListEmpty(&List), Count == 0));
+    ASSERT(IsListEmpty(&Ring->PacketList));
+
+    // We need to bump Loaned before dropping the lock to avoid VifDisable()
+    // returning prematurely.
+    if (!IsListEmpty(&List))
+        __InterlockedAdd(&Receiver->Loaned, Count);
+
+#pragma prefast(disable:26110)
+    KeReleaseSpinLockFromDpcLevel(&Ring->Lock);
+
+    if (!IsListEmpty(&List))
+        VifReceivePackets(Receiver->VifInterface, &List);
+
+    ASSERT(IsListEmpty(&List));
+}
+
+static DECLSPEC_NOINLINE VOID
+RingReleaseLock(
+    IN  PRECEIVER_RING  Ring
+    )
+{
+    __RingReleaseLock(Ring);
+}
+
+static FORCEINLINE VOID
+__RingStop(
+    IN  PRECEIVER_RING  Ring
+    )
+{
+    Info("<===>\n");
+
+    Ring->Stopped = TRUE;
+}
+
+static FORCEINLINE VOID
+__RingStart(
+    IN  PRECEIVER_RING  Ring
+    )
+{
+    Ring->Stopped = FALSE;
+}
+
+static FORCEINLINE BOOLEAN
+__RingIsStopped(
+    IN  PRECEIVER_RING  Ring
+    )
+{
+    return Ring->Stopped;
+}
+
+static FORCEINLINE VOID
+__RingReturnPacket(
+    IN  PRECEIVER_RING          Ring,
+    IN  PXENVIF_RECEIVER_PACKET Packet,
+    IN  BOOLEAN                 Locked
+    )
+{
+    PMDL                        Mdl;
+
+    Mdl = &Packet->Mdl;
+
+    while (Mdl != NULL) {
+        PMDL    Next;
+
+        Next = Mdl->Next;
+        Mdl->Next = NULL;
+
+        __RingPutMdl(Ring, Mdl, Locked);
+
+        Mdl = Next;
+    }
+
+    if (__RingIsStopped(Ring)) {
+        KIRQL   Irql;
+
+        KeRaiseIrql(DISPATCH_LEVEL, &Irql);
+
+        if (!Locked)
+            __RingAcquireLock(Ring);
+
+        if (__RingIsStopped(Ring)) {
+            PXENVIF_RECEIVER    Receiver;
+            PXENVIF_FRONTEND    Frontend;
+
+            __RingStart(Ring);
+
+            Receiver = Ring->Receiver;
+            Frontend = Receiver->Frontend;
+
+            NotifierTriggerRx(FrontendGetNotifier(Frontend));
+        }
+
+        if (!Locked)
+            __RingReleaseLock(Ring);
+
+        KeLowerIrql(Irql);
     }
 }
 
@@ -2034,11 +2059,177 @@ __RingDebugCallback(
           Ring->OffloadStatistics.TagRemoved);
 }
 
+static DECLSPEC_NOINLINE VOID
+RingPoll(
+    IN  PRECEIVER_RING  Ring
+    )
+{
+#define RING_BATCH(_Ring) (RING_SIZE(&(_Ring)->Front) / 4)
+
+    PXENVIF_RECEIVER    Receiver;
+    PXENVIF_FRONTEND    Frontend;
+
+    if (!(Ring->Enabled))
+        return;
+
+    Receiver = Ring->Receiver;
+    Frontend = Receiver->Frontend;
+
+    for (;;) {
+        BOOLEAN                 Error;
+        PXENVIF_RECEIVER_PACKET Packet;
+        uint16_t                flags;
+        USHORT                  MaximumSegmentSize;
+        PMDL                    TailMdl;
+        RING_IDX                rsp_prod;
+        RING_IDX                rsp_cons;
+
+        Error = FALSE;
+        Packet = NULL;
+        flags = 0;
+        MaximumSegmentSize = 0;
+        TailMdl = NULL;
+
+        KeMemoryBarrier();
+
+        rsp_prod = Ring->Shared->rsp_prod;
+        rsp_cons = Ring->Front.rsp_cons;
+
+        KeMemoryBarrier();
+
+        if (rsp_cons == rsp_prod)
+            break;
+
+        while (rsp_cons != rsp_prod) {
+            netif_rx_response_t *rsp;
+            uint16_t            id;
+            netif_rx_request_t  *req;
+            PRECEIVER_TAG       Tag;
+            PMDL                Mdl;
+            RING_IDX            req_prod;
+
+            rsp = RING_GET_RESPONSE(&Ring->Front, rsp_cons);
+            rsp_cons++;
+            Ring->ResponsesProcessed++;
+
+            ASSERT3U((rsp->id & REQ_ID_INTEGRITY_CHECK), ==, REQ_ID_INTEGRITY_CHECK);
+            id = rsp->id & ~REQ_ID_INTEGRITY_CHECK;
+
+            ASSERT3U(id, <, MAXIMUM_TAG_COUNT);
+            req = &Ring->Pending[id];
+
+            ASSERT3U(req->id, ==, rsp->id);
+            RtlZeroMemory(req, sizeof (netif_rx_request_t));
+
+            Tag = &Ring->Tag[id];
+
+            Mdl = Tag->Context;
+            Tag->Context = NULL;
+
+            RingReleaseTag(Ring, Tag);
+            Tag = NULL;
+
+            ASSERT(Mdl != NULL);
+
+            if (rsp->status < 0)
+                Error = TRUE;
+
+            if (rsp->flags & NETRXF_gso_prefix) {
+                __RingPutMdl(Ring, Mdl, TRUE);
+
+                flags = NETRXF_gso_prefix;
+                MaximumSegmentSize = rsp->offset;
+
+                ASSERT(rsp->flags & NETRXF_more_data);
+                continue;
+            } else {
+                Mdl->ByteOffset = rsp->offset;
+                Mdl->MappedSystemVa = (PUCHAR)Mdl->StartVa + rsp->offset;
+                Mdl->ByteCount = rsp->status;
+            }
+
+            if (Packet == NULL) {   // SOP
+                Packet = CONTAINING_RECORD(Mdl, XENVIF_RECEIVER_PACKET, Mdl);
+
+                ASSERT3P(TailMdl, ==, NULL);
+                TailMdl = Mdl;
+
+                ASSERT3U((flags & ~NETRXF_gso_prefix), ==, 0);
+                flags |= rsp->flags;
+
+                Packet->Length = Mdl->ByteCount;
+            } else {
+                ASSERT3P(Mdl->Next, ==, NULL);
+
+                ASSERT(TailMdl != NULL);
+                TailMdl->Next = Mdl;
+                TailMdl = Mdl;
+
+                flags |= rsp->flags;
+
+                Packet->Length += Mdl->ByteCount;
+            }
+
+            if (~rsp->flags & NETRXF_more_data) {  // EOP
+                ASSERT(Packet != NULL);
+                ASSERT3P(Packet->Cookie, ==, NULL);
+
+                if (Error) {
+                    Ring->PacketStatistics.BackendError++;
+
+                    __RingReturnPacket(Ring, Packet, TRUE);
+                } else {
+                    if (flags & NETRXF_gso_prefix) {
+                        ASSERT(MaximumSegmentSize != 0);
+                        Packet->MaximumSegmentSize = MaximumSegmentSize;
+                    }
+
+                    Packet->Cookie = (PVOID)(flags & (NETRXF_csum_blank | NETRXF_data_validated));
+
+                    ASSERT(IsZeroMemory(&Packet->ListEntry, sizeof (LIST_ENTRY)));
+                    InsertTailList(&Ring->PacketList, &Packet->ListEntry);
+                }
+
+                Error = FALSE;
+                Packet = NULL;
+                flags = 0;
+                MaximumSegmentSize = 0;
+                TailMdl = NULL;
+            }
+
+            KeMemoryBarrier();
+
+            req_prod = Ring->Front.req_prod_pvt;
+
+            if (req_prod - rsp_cons < RING_BATCH(Ring) &&
+                !__RingIsStopped(Ring)) {
+                Ring->Front.rsp_cons = rsp_cons;
+                RingFill(Ring);
+            }
+        }
+        ASSERT(!Error);
+        ASSERT3P(Packet, ==, NULL);
+        ASSERT3U(flags, ==, 0);
+        ASSERT3U(MaximumSegmentSize, ==, 0);
+        ASSERT3P(TailMdl, ==, NULL);
+
+        KeMemoryBarrier();
+
+        Ring->Front.rsp_cons = rsp_cons;
+        Ring->Shared->rsp_event = rsp_cons + 1;
+    }
+
+    if (!__RingIsStopped(Ring))
+        RingFill(Ring);
+
+#undef  RING_BATCH
+}
+
 #define TIME_US(_us)        ((_us) * 10)
 #define TIME_MS(_ms)        (TIME_US((_ms) * 1000))
 #define TIME_RELATIVE(_t)   (-(_t))
 
-#define RING_PERIOD         5000
+#define RING_PERIOD         30000
 
 static NTSTATUS
 RingWatchdog(
@@ -2088,6 +2279,12 @@ RingWatchdog(
                 Receiver = Ring->Receiver;
                 Frontend = Receiver->Frontend;
 
+                DEBUG(Printf,
+                      Receiver->DebugInterface,
+                      Receiver->DebugCallback,
+                      "WATCHDOG: %s\n",
+                      FrontendGetPath(Frontend));
+
                 // Dump front ring
                 DEBUG(Printf,
                       Receiver->DebugInterface,
@@ -2117,8 +2314,8 @@ RingWatchdog(
                       Ring->ResponsesProcessed);
 
                 // Try to move things along
+                RingPoll(Ring);
                 NotifierSendRx(FrontendGetNotifier(Frontend));
-                NotifierTriggerRx(FrontendGetNotifier(Frontend));
             }
 
             KeMemoryBarrier();
@@ -2374,172 +2571,6 @@ fail1:
 }
 
 static FORCEINLINE VOID
-__RingPoll(
-    IN  PRECEIVER_RING  Ring
-    )
-{
-#define RING_BATCH(_Ring) (RING_SIZE(&(_Ring)->Front) / 4)
-
-    PXENVIF_RECEIVER    Receiver;
-    PXENVIF_FRONTEND    Frontend;
-
-    if (!(Ring->Enabled))
-        return;
-
-    Receiver = Ring->Receiver;
-    Frontend = Receiver->Frontend;
-
-    for (;;) {
-        BOOLEAN                 Error;
-        PXENVIF_RECEIVER_PACKET Packet;
-        uint16_t                flags;
-        USHORT                  MaximumSegmentSize;
-        PMDL                    TailMdl;
-        RING_IDX                rsp_prod;
-        RING_IDX                rsp_cons;
-
-        Error = FALSE;
-        Packet = NULL;
-        flags = 0;
-        MaximumSegmentSize = 0;
-        TailMdl = NULL;
-
-        KeMemoryBarrier();
-
-        rsp_prod = Ring->Shared->rsp_prod;
-        rsp_cons = Ring->Front.rsp_cons;
-
-        KeMemoryBarrier();
-
-        if (rsp_cons == rsp_prod)
-            break;
-
-        while (rsp_cons != rsp_prod) {
-            netif_rx_response_t *rsp;
-            uint16_t            id;
-            netif_rx_request_t  *req;
-            PRECEIVER_TAG       Tag;
-            PMDL                Mdl;
-            RING_IDX            req_prod;
-
-            rsp = RING_GET_RESPONSE(&Ring->Front, rsp_cons);
-            rsp_cons++;
-            Ring->ResponsesProcessed++;
-
-            ASSERT3U((rsp->id & REQ_ID_INTEGRITY_CHECK), ==, REQ_ID_INTEGRITY_CHECK);
-            id = rsp->id & ~REQ_ID_INTEGRITY_CHECK;
-
-            ASSERT3U(id, <, MAXIMUM_TAG_COUNT);
-            req = &Ring->Pending[id];
-
-            ASSERT3U(req->id, ==, rsp->id);
-            RtlZeroMemory(req, sizeof (netif_rx_request_t));
-
-            Tag = &Ring->Tag[id];
-
-            Mdl = Tag->Context;
-            Tag->Context = NULL;
-
-            RingReleaseTag(Ring, Tag);
-            Tag = NULL;
-
-            ASSERT(Mdl != NULL);
-
-            if (rsp->status < 0)
-                Error = TRUE;
-
-            if (rsp->flags & NETRXF_gso_prefix) {
-                __RingPutMdl(Ring, Mdl, TRUE);
-
-                flags = NETRXF_gso_prefix;
-                MaximumSegmentSize = rsp->offset;
-
-                ASSERT(rsp->flags & NETRXF_more_data);
-                continue;
-            } else {
-                Mdl->ByteOffset = rsp->offset;
-                Mdl->MappedSystemVa = (PUCHAR)Mdl->StartVa + rsp->offset;
-                Mdl->ByteCount = rsp->status;
-            }
-
-            if (Packet == NULL) {   // SOP
-                Packet = CONTAINING_RECORD(Mdl, XENVIF_RECEIVER_PACKET, Mdl);
-
-                ASSERT3P(TailMdl, ==, NULL);
-                TailMdl = Mdl;
-
-                ASSERT3U((flags & ~NETRXF_gso_prefix), ==, 0);
-                flags |= rsp->flags;
-
-                Packet->Length = Mdl->ByteCount;
-            } else {
-                ASSERT3P(Mdl->Next, ==, NULL);
-
-                ASSERT(TailMdl != NULL);
-                TailMdl->Next = Mdl;
-                TailMdl = Mdl;
-
-                flags |= rsp->flags;
-
-                Packet->Length += Mdl->ByteCount;
-            }
-
-            if (~rsp->flags & NETRXF_more_data) {  // EOP
-                ASSERT(Packet != NULL);
-                ASSERT3P(Packet->Cookie, ==, NULL);
-
-                if (Error) {
-                    Ring->PacketStatistics.BackendError++;
-
-                    __RingReturnPacket(Ring, Packet, TRUE);
-                } else {
-                    if (flags & NETRXF_gso_prefix) {
-                        ASSERT(MaximumSegmentSize != 0);
-                        Packet->MaximumSegmentSize = MaximumSegmentSize;
-                    }
-
-                    Packet->Cookie = (PVOID)(flags & (NETRXF_csum_blank | NETRXF_data_validated));
-
-                    ASSERT(IsZeroMemory(&Packet->ListEntry, sizeof (LIST_ENTRY)));
-                    InsertTailList(&Ring->PacketList, &Packet->ListEntry);
-                }
-
-                Error = FALSE;
-                Packet = NULL;
-                flags = 0;
-                MaximumSegmentSize = 0;
-                TailMdl = NULL;
-            }
-
-            KeMemoryBarrier();
-
-            req_prod = Ring->Front.req_prod_pvt;
-
-            if (req_prod - rsp_cons < RING_BATCH(Ring) &&
-                !__RingIsStopped(Ring)) {
-                Ring->Front.rsp_cons = rsp_cons;
-                RingFill(Ring);
-            }
-        }
-        ASSERT(!Error);
-        ASSERT3P(Packet, ==, NULL);
-        ASSERT3U(flags, ==, 0);
-        ASSERT3U(MaximumSegmentSize, ==, 0);
-        ASSERT3P(TailMdl, ==, NULL);
-
-        KeMemoryBarrier();
-
-        Ring->Front.rsp_cons = rsp_cons;
-        Ring->Shared->rsp_event = rsp_cons + 1;
-    }
-
-    if (!__RingIsStopped(Ring))
-        RingFill(Ring);
-
-#undef  RING_BATCH
-}
-
-static FORCEINLINE VOID
 __RingDisable(
     IN  PRECEIVER_RING  Ring
     )
@@ -2651,36 +2682,11 @@ __RingNotify(
     IN  PRECEIVER_RING  Ring
     )
 {
-    PXENVIF_RECEIVER    Receiver;
-    PXENVIF_FRONTEND    Frontend;
-    LIST_ENTRY          List;
-    ULONG               Count;
-
-    Receiver = Ring->Receiver;
-    Frontend = Receiver->Frontend;
-
-    InitializeListHead(&List);
-    Count = 0;
-
     __RingAcquireLock(Ring);
 
-    __RingPoll(Ring);
-
-    RingProcessPackets(Ring, &List, &Count);
-    ASSERT(EQUIV(IsListEmpty(&List), Count == 0));
-    ASSERT(IsListEmpty(&Ring->PacketList));
-
-    // We need to bump Loaned before dropping the lock to avoid VifDisable()
-    // returning prematurely.
-    if (!IsListEmpty(&List))
-        __InterlockedAdd(&Receiver->Loaned, Count);
+    RingPoll(Ring);
 
     __RingReleaseLock(Ring);
-
-    if (!IsListEmpty(&List))
-        VifReceivePackets(Receiver->VifInterface, &List);
-
-    ASSERT(IsListEmpty(&List));
 }
 
 static FORCEINLINE VOID
