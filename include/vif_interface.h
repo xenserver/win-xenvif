@@ -190,15 +190,15 @@ typedef struct _XENVIF_TRANSMITTER_PACKET_METADATA {
 } XENVIF_TRANSMITTER_PACKET_METADATA, *PXENVIF_TRANSMITTER_PACKET_METADATA;
 
 typedef struct _XENVIF_TRANSMITTER_PACKET_STATISTICS {
-    ULONG   Drop;
-    ULONG   BackendError;
-    ULONG   FrontendError;
-    ULONG   Unicast;
-    ULONG   UnicastBytes;
-    ULONG   Multicast;
-    ULONG   MulticastBytes;
-    ULONG   Broadcast;
-    ULONG   BroadcastBytes;
+    ULONGLONG   Drop;
+    ULONGLONG   BackendError;
+    ULONGLONG   FrontendError;
+    ULONGLONG   Unicast;
+    ULONGLONG   UnicastBytes;
+    ULONGLONG   Multicast;
+    ULONGLONG   MulticastBytes;
+    ULONGLONG   Broadcast;
+    ULONGLONG   BroadcastBytes;
 } XENVIF_TRANSMITTER_PACKET_STATISTICS, *PXENVIF_TRANSMITTER_PACKET_STATISTICS;
 
 typedef struct _XENVIF_PACKET_STATISTICS {
@@ -415,7 +415,7 @@ DEFINE_GUID(GUID_VIF_INTERFACE,
             0x95,
             0xc3);
 
-#define VIF_INTERFACE_VERSION    13
+#define VIF_INTERFACE_VERSION    14
 
 #define VIF_OPERATIONS(_Interface) \
         (PXENVIF_VIF_OPERATIONS *)((ULONG_PTR)(_Interface))
