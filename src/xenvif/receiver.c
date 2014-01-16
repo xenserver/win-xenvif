@@ -478,6 +478,12 @@ RingProcessChecksum(
                 Calculated = ChecksumPseudoHeader(StartVa, Info);
                 Calculated = ChecksumTcpPacket(StartVa, Info, Calculated, &Payload);
 
+                // Windows seems to take RFC 2460 a bit too far and replace zero
+                // TCP checksum with 0xFFFF even though there was never a provision
+                // for in 'no checksum' option for TCP.
+                if (Embedded == 0xFFFF)
+                    Embedded = 0;
+
                 if (IpHeader->Version == 4) {
                     Ring->OffloadStatistics.IpVersion4TcpChecksumCalculated++;
 
@@ -492,12 +498,6 @@ RingProcessChecksum(
                     }
                 } else {
                     Ring->OffloadStatistics.IpVersion6TcpChecksumCalculated++;
-
-                    // Windows seems to take RFC 2460 a bit too far and replace zero
-                    // TCP checksum in IPv6 packets with 0xFFFF even though there was
-                    // never a provision for in 'no checksum' option for TCP in IPv4.
-                    if (Embedded == 0xFFFF)
-                        Embedded = 0;
 
                     if (Embedded == Calculated) {
                         Packet->Flags.TcpChecksumSucceeded = 1;
@@ -525,6 +525,11 @@ RingProcessChecksum(
                     Ring->OffloadStatistics.IpVersion4TcpChecksumCalculated++;
                 else
                     Ring->OffloadStatistics.IpVersion6TcpChecksumCalculated++;
+
+                // RFC 2460 should not be applicable to TCP, but Microsoft seems
+                // to think it is.
+                if (Calculated == 0)
+                    Calculated = 0xFFFF;
 
                 TcpHeader->Checksum = Calculated;
             }
@@ -572,15 +577,26 @@ RingProcessChecksum(
                 if (IpHeader->Version == 4) {
                     Ring->OffloadStatistics.IpVersion4UdpChecksumCalculated++;
 
-                    if (Embedded == 0 ||    // Tolarate zero checksum for IPv4/UDP
-                        Embedded == Calculated) {
+                    if (Embedded == 0) {    // Tolarate zero checksum for IPv4/UDP
                         Packet->Flags.UdpChecksumSucceeded = 1;
 
                         Ring->OffloadStatistics.IpVersion4UdpChecksumSucceeded++;
                     } else {
-                        Packet->Flags.UdpChecksumFailed = 1;
+                        // RFC 2460 should not be applicable to IPv4 but it looks
+                        // like Microsoft screwed things up in its stack so we have
+                        // to cope.
+                        if (Embedded == 0xFFFF)
+                            Embedded = 0;
 
-                        Ring->OffloadStatistics.IpVersion4UdpChecksumFailed++;
+                        if ( Embedded == Calculated) {
+                            Packet->Flags.UdpChecksumSucceeded = 1;
+
+                            Ring->OffloadStatistics.IpVersion4UdpChecksumSucceeded++;
+                        } else {
+                            Packet->Flags.UdpChecksumFailed = 1;
+
+                            Ring->OffloadStatistics.IpVersion4UdpChecksumFailed++;
+                        }
                     }
                 } else {
                     Ring->OffloadStatistics.IpVersion6UdpChecksumCalculated++;
@@ -611,15 +627,15 @@ RingProcessChecksum(
                 Calculated = ChecksumPseudoHeader(StartVa, Info);
                 Calculated = ChecksumUdpPacket(StartVa, Info, Calculated, &Payload);
 
-                if (IpHeader->Version == 4) {
+                if (IpHeader->Version == 4)
                     Ring->OffloadStatistics.IpVersion4UdpChecksumCalculated++;
-                } else {
+                else
                     Ring->OffloadStatistics.IpVersion6UdpChecksumCalculated++;
 
-                    // See RFC 2460
-                    if (Calculated == 0)
-                        Calculated = 0xFFFF;
-                }
+                // RFC 2460 should only be applicable to IPv6 but Microsoft seems
+                // to think it applies to the IPv4 too.
+                if (Calculated == 0)
+                    Calculated = 0xFFFF;
 
                 UdpHeader->Checksum = Calculated;
             }
