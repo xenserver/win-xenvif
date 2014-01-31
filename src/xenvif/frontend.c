@@ -55,6 +55,7 @@
 #include "assert.h"
 
 struct _XENVIF_FRONTEND {
+    ULONG                       Magic;
     PXENVIF_PDO                 Pdo;
     PCHAR                       Path;
     PCHAR                       Prefix;
@@ -79,6 +80,8 @@ struct _XENVIF_FRONTEND {
     PXENBUS_DEBUG_CALLBACK      DebugCallback;
     HANDLE                      Handle;
 };
+
+#define FRONTEND_MAGIC  0xf00ba4ed
 
 static const PCHAR
 FrontendStateName(
@@ -662,6 +665,8 @@ FrontendIpAddressChange(
 
     UNREFERENCED_PARAMETER(_Row);
     UNREFERENCED_PARAMETER(NotificationType);
+
+    ASSERT3U(Frontend->Magic, ==, FRONTEND_MAGIC);
 
     ThreadWake(Frontend->MibThread);
 }
@@ -1555,6 +1560,8 @@ FrontendInitialize(
 
     Trace("====>\n");
 
+    ASSERT3U(KeGetCurrentIrql(), ==, PASSIVE_LEVEL);
+
     Name = PdoGetName(Pdo);
 
     Length = sizeof ("devices/vif/") + (ULONG)strlen(Name);
@@ -1624,6 +1631,9 @@ FrontendInitialize(
     if (!NT_SUCCESS(status))
         goto fail11;
 
+    (*Frontend)->Magic = FRONTEND_MAGIC;
+    _ReadWriteBarrier();
+
     status = NotifyUnicastIpAddressChange(AF_UNSPEC,
                                           FrontendIpAddressChange,
                                           *Frontend,
@@ -1636,7 +1646,12 @@ FrontendInitialize(
         // If IP Helper isn't available (as in Windows PE) then
         // NotifyUnicastIpAddressChange will not be supported
         Warning("Cannot record or update network info to XAPI %x\n", status);
-        (*Frontend)->Handle = NULL;
+        // The documentation states that in the error case, the handle is
+        // always populated with NULL.
+        ASSERT((*Frontend)->Handle == NULL);
+    } else {
+        // By inference the handle should not be NULL in the success case
+        ASSERT((*Frontend)->Handle != NULL);
     }
 
     Trace("<====\n");
@@ -1645,6 +1660,8 @@ FrontendInitialize(
 
 fail12:
     Error("fail12\n");
+
+    (*Frontend)->Magic = 0;
 
     ThreadAlert((*Frontend)->MibThread);
     ThreadJoin((*Frontend)->MibThread);
@@ -1726,13 +1743,22 @@ FrontendTeardown(
 {
     Trace("====>\n");
 
+    ASSERT3U(KeGetCurrentIrql(), ==, PASSIVE_LEVEL);
+
     ASSERT(Frontend->State != FRONTEND_ENABLED);
     ASSERT(Frontend->State != FRONTEND_CONNECTED);
 
     if (Frontend->Handle != NULL) {
-        CancelMibChangeNotify2(Frontend->Handle);
+        NTSTATUS    status;
+
+        status = CancelMibChangeNotify2(Frontend->Handle);
+        ASSERT(NT_SUCCESS(status));
+
         Frontend->Handle = NULL;
     }
+
+    _ReadWriteBarrier();
+    Frontend->Magic = 0;
 
     if (Frontend->State == FRONTEND_PREPARED) {
 
