@@ -85,4 +85,10 @@ ChecksumUdpPacket(
     IN  PXENVIF_PACKET_PAYLOAD  Payload
     );
 
+extern BOOLEAN
+ChecksumVerify(
+    IN  USHORT  Calculated,
+    IN  USHORT  Embedded
+    );
+
 #endif  // _XENVIF_CHECKSUM_H

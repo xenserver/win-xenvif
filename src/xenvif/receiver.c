@@ -426,7 +426,7 @@ RingProcessChecksum(
             Calculated = ChecksumIpVersion4Header(StartVa, Info);
             Ring->OffloadStatistics.IpVersion4HeaderChecksumCalculated++;
 
-            if (Embedded == Calculated) {
+            if (ChecksumVerify(Calculated, Embedded)) {
                 Packet->Flags.IpChecksumSucceeded = 1;
                 Ring->OffloadStatistics.IpVersion4HeaderChecksumSucceeded++;
             } else {
@@ -478,16 +478,10 @@ RingProcessChecksum(
                 Calculated = ChecksumPseudoHeader(StartVa, Info);
                 Calculated = ChecksumTcpPacket(StartVa, Info, Calculated, &Payload);
 
-                // Windows seems to take RFC 2460 a bit too far and replace zero
-                // TCP checksum with 0xFFFF even though there was never a provision
-                // for in 'no checksum' option for TCP.
-                if (Embedded == 0xFFFF)
-                    Embedded = 0;
-
                 if (IpHeader->Version == 4) {
                     Ring->OffloadStatistics.IpVersion4TcpChecksumCalculated++;
 
-                    if (Embedded == Calculated) {
+                    if (ChecksumVerify(Calculated, Embedded)) {
                         Packet->Flags.TcpChecksumSucceeded = 1;
 
                         Ring->OffloadStatistics.IpVersion4TcpChecksumSucceeded++;
@@ -499,7 +493,7 @@ RingProcessChecksum(
                 } else {
                     Ring->OffloadStatistics.IpVersion6TcpChecksumCalculated++;
 
-                    if (Embedded == Calculated) {
+                    if (ChecksumVerify(Calculated, Embedded)) {
                         Packet->Flags.TcpChecksumSucceeded = 1;
 
                         Ring->OffloadStatistics.IpVersion6TcpChecksumSucceeded++;
@@ -525,11 +519,6 @@ RingProcessChecksum(
                     Ring->OffloadStatistics.IpVersion4TcpChecksumCalculated++;
                 else
                     Ring->OffloadStatistics.IpVersion6TcpChecksumCalculated++;
-
-                // RFC 2460 should not be applicable to TCP, but Microsoft seems
-                // to think it is.
-                if (Calculated == 0)
-                    Calculated = 0xFFFF;
 
                 TcpHeader->Checksum = Calculated;
             }
@@ -582,13 +571,7 @@ RingProcessChecksum(
 
                         Ring->OffloadStatistics.IpVersion4UdpChecksumSucceeded++;
                     } else {
-                        // RFC 2460 should not be applicable to IPv4 but it looks
-                        // like Microsoft screwed things up in its stack so we have
-                        // to cope.
-                        if (Embedded == 0xFFFF)
-                            Embedded = 0;
-
-                        if ( Embedded == Calculated) {
+                        if (ChecksumVerify(Calculated, Embedded)) {
                             Packet->Flags.UdpChecksumSucceeded = 1;
 
                             Ring->OffloadStatistics.IpVersion4UdpChecksumSucceeded++;
@@ -601,11 +584,7 @@ RingProcessChecksum(
                 } else {
                     Ring->OffloadStatistics.IpVersion6UdpChecksumCalculated++;
 
-                    // See RFC 2460
-                    if (Embedded == 0xFFFF)
-                        Embedded = 0;
-
-                    if (Embedded == Calculated) {
+                    if (ChecksumVerify(Calculated, Embedded)) {
                         Packet->Flags.UdpChecksumSucceeded = 1;
 
                         Ring->OffloadStatistics.IpVersion6UdpChecksumSucceeded++;
@@ -631,11 +610,6 @@ RingProcessChecksum(
                     Ring->OffloadStatistics.IpVersion4UdpChecksumCalculated++;
                 else
                     Ring->OffloadStatistics.IpVersion6UdpChecksumCalculated++;
-
-                // RFC 2460 should only be applicable to IPv6 but Microsoft seems
-                // to think it applies to the IPv4 too.
-                if (Calculated == 0)
-                    Calculated = 0xFFFF;
 
                 UdpHeader->Checksum = Calculated;
             }
