@@ -79,6 +79,20 @@ AccumulateChecksum(
     __AccumulateChecksum(Accumulator, MappedSystemVa, ByteCount);
 }
 
+BOOLEAN
+ChecksumVerify(
+    IN  USHORT  Calculated,
+    IN  USHORT  Embedded
+    )
+{
+    ULONG       Accumulator = ~Calculated;
+
+    // See RFC 1624, section 5
+    __AccumulateChecksum(&Accumulator, (PUCHAR)&Embedded, sizeof (USHORT));
+
+    return (Accumulator == 0xFFFF) ? TRUE : FALSE;
+}
+
 static FORCEINLINE USHORT
 __ChecksumIpVersion4PseudoHeader(
     IN  PIPV4_ADDRESS   SourceAddress,
