@@ -37,66 +37,56 @@ typedef enum _XENBUS_GNTTAB_ENTRY_TYPE {
     GNTTAB_ENTRY_FULL_PAGE
 } XENBUS_GNTTAB_ENTRY_TYPE, *PXENBUS_GNTTAB_ENTRY_TYPE;
 
-typedef struct _XENBUS_GNTTAB_COPY_OPERATION {
-    LIST_ENTRY  ListEntry;
-    USHORT      RemoteDomain;
-    ULONG       RemoteReference;
-    ULONG       RemoteOffset;
-    PFN_NUMBER  Pfn;
-    ULONG       Offset;
-    ULONG       Length;
-} XENBUS_GNTTAB_COPY_OPERATION, *PXENBUS_GNTTAB_COPY_OPERATION;
+typedef struct _XENBUS_GNTTAB_DESCRIPTOR    XENBUS_GNTTAB_DESCRIPTOR, *PXENBUS_GNTTAB_DESCRIPTOR;
 
 #define DEFINE_GNTTAB_OPERATIONS                                    \
         GNTTAB_OPERATION(VOID,                                      \
                          Acquire,                                   \
                          (                                          \
-                         IN  PXENBUS_GNTTAB_CONTEXT  Context        \
+                         IN  PXENBUS_GNTTAB_CONTEXT     Context     \
                          )                                          \
                          )                                          \
         GNTTAB_OPERATION(VOID,                                      \
                          Release,                                   \
                          (                                          \
-                         IN  PXENBUS_GNTTAB_CONTEXT  Context        \
+                         IN  PXENBUS_GNTTAB_CONTEXT     Context     \
                          )                                          \
                          )                                          \
-        GNTTAB_OPERATION(NTSTATUS,                                  \
+        GNTTAB_OPERATION(PXENBUS_GNTTAB_DESCRIPTOR,                 \
                          Get,                                       \
                          (                                          \
-                         IN  PXENBUS_GNTTAB_CONTEXT  Context,       \
-                         OUT PULONG                  Reference      \
+                         IN  PXENBUS_GNTTAB_CONTEXT     Context     \
                          )                                          \
                          )                                          \
         GNTTAB_OPERATION(VOID,                                      \
                          Put,                                       \
                          (                                          \
-                         IN  PXENBUS_GNTTAB_CONTEXT  Context,       \
-                         IN  ULONG                   Reference      \
+                         IN  PXENBUS_GNTTAB_CONTEXT     Context,    \
+                         IN  PXENBUS_GNTTAB_DESCRIPTOR  Descriptor  \
                          )                                          \
                          )                                          \
         GNTTAB_OPERATION(NTSTATUS,                                  \
                          PermitForeignAccess,                       \
                          (                                          \
-                         IN  PXENBUS_GNTTAB_CONTEXT   Context,      \
-                         IN  ULONG                    Reference,    \
-                         IN  USHORT                   Domain,       \
-                         IN  XENBUS_GNTTAB_ENTRY_TYPE Type,         \
+                         IN  PXENBUS_GNTTAB_CONTEXT     Context,    \
+                         IN  PXENBUS_GNTTAB_DESCRIPTOR  Descriptor, \
+                         IN  USHORT                     Domain,     \
+                         IN  XENBUS_GNTTAB_ENTRY_TYPE   Type,       \
                          ...                                        \
                          )                                          \
                          )                                          \
         GNTTAB_OPERATION(NTSTATUS,                                  \
                          RevokeForeignAccess,                       \
                          (                                          \
-                         IN  PXENBUS_GNTTAB_CONTEXT  Context,       \
-                         IN  ULONG                   Reference      \
+                         IN  PXENBUS_GNTTAB_CONTEXT     Context,    \
+                         IN  PXENBUS_GNTTAB_DESCRIPTOR  Descriptor  \
                          )                                          \
                          )                                          \
-        GNTTAB_OPERATION(NTSTATUS,                                  \
-                         Copy,                                      \
+        GNTTAB_OPERATION(ULONG,                                     \
+                         Reference,                                 \
                          (                                          \
-                         IN  PXENBUS_GNTTAB_CONTEXT  Context,       \
-                         IN  PLIST_ENTRY             List,          \
-                         IN  ULONG                   Count          \
+                         IN  PXENBUS_GNTTAB_CONTEXT     Context,    \
+                         IN  PXENBUS_GNTTAB_DESCRIPTOR  Descriptor  \
                          )                                          \
                          )
 
@@ -127,7 +117,7 @@ DEFINE_GUID(GUID_GNTTAB_INTERFACE,
             0xd6,
             0xe);
 
-#define GNTTAB_INTERFACE_VERSION    3
+#define GNTTAB_INTERFACE_VERSION    4
 
 #define GNTTAB_OPERATIONS(_Interface) \
         (PXENBUS_GNTTAB_OPERATIONS *)((ULONG_PTR)(_Interface))

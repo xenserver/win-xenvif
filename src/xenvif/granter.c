@@ -125,20 +125,21 @@ GranterPermitAccess(
     )
 {
     PXENVIF_FRONTEND            Frontend;
-    ULONG                       Reference;
+    PXENBUS_GNTTAB_DESCRIPTOR   Descriptor;
     NTSTATUS                    status;
 
     Frontend = Granter->Frontend;
 
-    status = GNTTAB(Get,
-                    Granter->GnttabInterface,
-                    &Reference);
-    if (!NT_SUCCESS(status))
+    Descriptor = GNTTAB(Get,
+                        Granter->GnttabInterface);
+
+    status = STATUS_INSUFFICIENT_RESOURCES;
+    if (Descriptor == NULL)
         goto fail1;
 
     status = GNTTAB(PermitForeignAccess,
                     Granter->GnttabInterface,
-                    Reference,
+                    Descriptor,
                     FrontendGetBackendDomain(Frontend),
                     GNTTAB_ENTRY_FULL_PAGE,
                     Pfn,
@@ -146,7 +147,7 @@ GranterPermitAccess(
     if (!NT_SUCCESS(status))
         goto fail2;
 
-    *Handle = (XENVIF_GRANTER_HANDLE)(ULONG_PTR)Reference;
+    *Handle = Descriptor;
     return STATUS_SUCCESS;
 
 fail2:
@@ -154,7 +155,7 @@ fail2:
 
     GNTTAB(Put,
            Granter->GnttabInterface,
-           Reference);
+           Descriptor);
 
 fail1:
     Error("fail1 (%08x)\n", status);
@@ -168,20 +169,18 @@ GranterRevokeAccess(
     IN  XENVIF_GRANTER_HANDLE   Handle
     )
 {
-    ULONG_PTR                   Reference;
+    PXENBUS_GNTTAB_DESCRIPTOR   Descriptor = Handle;
     NTSTATUS                    status;
-
-    Reference = (ULONG_PTR)Handle;
 
     status = GNTTAB(RevokeForeignAccess,
                     Granter->GnttabInterface,
-                    (ULONG)Reference);
+                    Descriptor);
     if (!NT_SUCCESS(status))
         goto fail1;
 
     GNTTAB(Put,
            Granter->GnttabInterface,
-           (ULONG)Reference);
+           Descriptor);
 
     return;
 
@@ -195,9 +194,13 @@ GranterGetReference(
     IN  XENVIF_GRANTER_HANDLE   Handle
     )
 {
-    UNREFERENCED_PARAMETER(Granter);
+    PXENBUS_GNTTAB_DESCRIPTOR   Descriptor;
 
-    return (ULONG)(ULONG_PTR)Handle;
+    Descriptor = (PXENBUS_GNTTAB_DESCRIPTOR)Handle;
+
+    return GNTTAB(Reference,
+                  Granter->GnttabInterface,
+                  Descriptor);
 }
 
 VOID
