@@ -1783,6 +1783,8 @@ __RingPostTags(
 #define RING_SLOTS_AVAILABLE(_Front, _req_prod, _rsp_cons)   \
         (RING_SIZE(_Front) - ((_req_prod) - (_rsp_cons)))
 
+    PXENVIF_TRANSMITTER         Transmitter;
+    PXENVIF_FRONTEND            Frontend;
     PTRANSMITTER_STATE          State;
     PXENVIF_TRANSMITTER_PACKET  Packet;
     PXENVIF_PACKET_PAYLOAD      Payload;
@@ -1793,6 +1795,9 @@ __RingPostTags(
     BOOLEAN                     FirstRequest;
     netif_tx_request_t          *req;
     NTSTATUS                    status;
+
+    Transmitter = Ring->Transmitter;
+    Frontend = Transmitter->Frontend;
 
     State = &Ring->State;
     Packet = State->Packet;
@@ -1842,7 +1847,8 @@ __RingPostTags(
         id = (USHORT)(Tag - &Ring->Tag[0]);
 
         req->id = id | REQ_ID_INTEGRITY_CHECK;
-        req->gref = GranterGetReference(Tag->Handle);
+        req->gref = GranterGetReference(FrontendGetGranter(Frontend),
+                                        Tag->Handle);
         req->offset = (USHORT)Tag->Offset;
         req->size = (USHORT)Tag->Length;
         req->flags = NETTXF_more_data;
@@ -3034,7 +3040,8 @@ __RingStoreWrite(
                    FrontendGetPath(Frontend),
                    "tx-ring-ref",
                    "%u",
-                   GranterGetReference(Ring->Handle));
+                   GranterGetReference(FrontendGetGranter(Frontend),
+                                       Ring->Handle));
 
     if (!NT_SUCCESS(status))
         goto fail1;

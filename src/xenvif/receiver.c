@@ -51,6 +51,7 @@
 #include "checksum.h"
 #include "parse.h"
 #include "granter.h"
+#include "notifier.h"
 #include "mac.h"
 #include "vif.h"
 #include "receiver.h"
@@ -1519,8 +1520,13 @@ RingFill(
     IN  PRECEIVER_RING  Ring
     )
 {
+    PXENVIF_RECEIVER    Receiver;
+    PXENVIF_FRONTEND    Frontend;
     RING_IDX            req_prod;
     RING_IDX            rsp_cons;
+
+    Receiver = Ring->Receiver;
+    Frontend = Receiver->Frontend;
 
     KeMemoryBarrier();
 
@@ -1553,7 +1559,8 @@ RingFill(
         ASSERT3U(id, <, MAXIMUM_TAG_COUNT);
 
         req->id = id | REQ_ID_INTEGRITY_CHECK;
-        req->gref = GranterGetReference(Tag->Handle);
+        req->gref = GranterGetReference(FrontendGetGranter(Frontend),
+                                        Tag->Handle);
 
         // Store a copy of the request in case we need to fake a response ourselves
         ASSERT(IsZeroMemory(&Ring->Pending[id], sizeof (netif_rx_request_t)));
@@ -2473,7 +2480,8 @@ __RingStoreWrite(
                    FrontendGetPath(Frontend),
                    "rx-ring-ref",
                    "%u",
-                   GranterGetReference(Ring->Handle));
+                   GranterGetReference(FrontendGetGranter(Frontend),
+                                       Ring->Handle));
 
     if (!NT_SUCCESS(status))
         goto fail1;

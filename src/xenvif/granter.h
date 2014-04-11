@@ -71,6 +71,7 @@ GranterRevokeAccess(
 
 ULONG
 GranterGetReference(
+    IN  PXENVIF_GRANTER         Granter,
     IN  XENVIF_GRANTER_HANDLE   Handle
     );
 

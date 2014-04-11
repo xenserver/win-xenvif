@@ -191,9 +191,12 @@ fail1:
 
 ULONG
 GranterGetReference(
+    IN  PXENVIF_GRANTER         Granter,
     IN  XENVIF_GRANTER_HANDLE   Handle
     )
 {
+    UNREFERENCED_PARAMETER(Granter);
+
     return (ULONG)(ULONG_PTR)Handle;
 }
 
