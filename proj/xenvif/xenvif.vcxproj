@@ -85,6 +85,7 @@
 		<ClCompile Include="../../src/xenvif/frontend.c" />
 		<ClCompile Include="../../src/xenvif/mac.c" />
 		<ClCompile Include="../../src/xenvif/notifier.c" />
+		<ClCompile Include="../../src/xenvif/granter.c" />
 		<ClCompile Include="../../src/xenvif/parse.c" />
 		<ClCompile Include="../../src/xenvif/pdo.c" />
 		<ClCompile Include="../../src/xenvif/pool.c" />
