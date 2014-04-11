@@ -56,27 +56,15 @@ GranterEnable(
     );
 
 NTSTATUS
-GranterGet(
-    IN  PXENVIF_GRANTER         Granter,
-    OUT PXENVIF_GRANTER_HANDLE  Handle
-    );
-
-NTSTATUS
 GranterPermitAccess(
     IN  PXENVIF_GRANTER         Granter,
-    IN  XENVIF_GRANTER_HANDLE   Handle,
     IN  PFN_NUMBER              Pfn,
-    IN  BOOLEAN                 ReadOnly
+    IN  BOOLEAN                 ReadOnly,
+    OUT PXENVIF_GRANTER_HANDLE  Handle
     );
 
 VOID
 GranterRevokeAccess(
-    IN  PXENVIF_GRANTER         Granter,
-    IN  XENVIF_GRANTER_HANDLE   Handle
-    );
-
-VOID
-GranterPut(
     IN  PXENVIF_GRANTER         Granter,
     IN  XENVIF_GRANTER_HANDLE   Handle
     );

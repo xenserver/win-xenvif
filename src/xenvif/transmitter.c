@@ -770,9 +770,9 @@ __RingCopyPayload(
         Pfn = MmGetMdlPfnArray(Mdl)[0];
 
         status = GranterPermitAccess(FrontendGetGranter(Frontend),
-                                     Tag->Handle,
                                      Pfn,
-                                     TRUE);
+                                     TRUE,
+                                     &Tag->Handle);
         ASSERT(NT_SUCCESS(status));
 
         Tag->Offset = 0;
@@ -809,6 +809,7 @@ fail1:
 
         GranterRevokeAccess(FrontendGetGranter(Frontend),
                             Tag->Handle);
+        Tag->Handle = NULL;
 
         ASSERT3U(Tag->Type, ==, TAG_BUFFER);
         Buffer = Tag->Context;
@@ -886,9 +887,9 @@ __RingGrantPayload(
             PageLength = __min(MdlLength, PAGE_SIZE - PageOffset);
 
             status = GranterPermitAccess(FrontendGetGranter(Frontend),
-                                         Tag->Handle,
                                          Pfn,
-                                         TRUE);
+                                         TRUE,
+                                         &Tag->Handle);
             ASSERT(NT_SUCCESS(status));
 
             Tag->Offset = PageOffset;
@@ -942,6 +943,7 @@ fail1:
 
         GranterRevokeAccess(FrontendGetGranter(Frontend),
                             Tag->Handle);
+        Tag->Handle = NULL;
 
         Tag->Context = NULL;
         Tag->Type = TAG_TYPE_INVALID;
@@ -1016,9 +1018,9 @@ __RingPrepareHeader(
     Pfn = MmGetMdlPfnArray(Mdl)[0];
 
     status = GranterPermitAccess(FrontendGetGranter(Frontend),
-                                 Tag->Handle,
                                  Pfn,
-                                 TRUE);
+                                 TRUE,
+                                 &Tag->Handle);
     ASSERT(NT_SUCCESS(status));
 
     Tag->Offset = 0;
@@ -1216,6 +1218,7 @@ fail3:
 
     GranterRevokeAccess(FrontendGetGranter(Frontend),
                         Tag->Handle);
+    Tag->Handle = NULL;
 
     Tag->Context = NULL;
     Tag->Type = TAG_TYPE_INVALID;
@@ -1278,6 +1281,7 @@ __RingUnprepareTags(
 
         GranterRevokeAccess(FrontendGetGranter(Frontend),
                             Tag->Handle);
+        Tag->Handle = NULL;
 
         switch (Tag->Type) {
         case TAG_BUFFER: {
@@ -1601,9 +1605,9 @@ __RingPrepareGratuitousArp(
     Pfn = MmGetMdlPfnArray(Mdl)[0];
 
     status = GranterPermitAccess(FrontendGetGranter(Frontend),
-                                 Tag->Handle,
                                  Pfn,
-                                 TRUE);
+                                 TRUE,
+                                 &Tag->Handle);
     ASSERT(NT_SUCCESS(status));
 
     Tag->Offset = 0;
@@ -1747,9 +1751,9 @@ __RingPrepareNeighbourAdvertisement(
     Pfn = MmGetMdlPfnArray(Mdl)[0];
 
     status = GranterPermitAccess(FrontendGetGranter(Frontend),
-                                 Tag->Handle,
                                  Pfn,
-                                 TRUE);
+                                 TRUE,
+                                 &Tag->Handle);
     ASSERT(NT_SUCCESS(status));
 
     Tag->Offset = 0;
@@ -2019,6 +2023,7 @@ __RingReleaseTag(
 
     GranterRevokeAccess(FrontendGetGranter(Frontend),
                         Tag->Handle);
+    Tag->Handle = NULL;
 
     __TransmitterPutTag(Ring, Tag);
 }
@@ -2965,19 +2970,9 @@ __RingConnect(
     FRONT_RING_INIT(&Ring->Front, Ring->Shared, PAGE_SIZE);
     ASSERT3P(Ring->Front.sring, ==, Ring->Shared);
 
-    status = GranterGet(FrontendGetGranter(Frontend),
-                        &Ring->Handle);
-    if (!NT_SUCCESS(status))
-        goto fail2;
-
     Ring->HeadFreeTag = TAG_INDEX_INVALID;
     for (Index = 0; Index < MAXIMUM_TAG_COUNT; Index++) {
         PTRANSMITTER_TAG Tag = &Ring->Tag[Index];
-
-        status = GranterGet(FrontendGetGranter(Frontend),
-                            &Tag->Handle);
-        if (!NT_SUCCESS(status))
-            goto fail3;
 
         Tag->Next = Ring->HeadFreeTag;
         Ring->HeadFreeTag = Index;
@@ -2986,36 +2981,26 @@ __RingConnect(
     Pfn = MmGetMdlPfnArray(Ring->Mdl)[0];
 
     status = GranterPermitAccess(FrontendGetGranter(Frontend),
-                                 Ring->Handle,
                                  Pfn,
-                                 FALSE);
-    ASSERT(NT_SUCCESS(status));
+                                 FALSE,
+                                 &Ring->Handle);
+    if (!NT_SUCCESS(status))
+        goto fail2;
 
     Ring->Connected = TRUE;
 
     return STATUS_SUCCESS;
 
-fail3:
-    Error("fail3\n");
+fail2:
+    Error("fail2\n");
 
     while (Ring->HeadFreeTag != TAG_INDEX_INVALID) {
         PTRANSMITTER_TAG    Tag = &Ring->Tag[Ring->HeadFreeTag];
 
         Ring->HeadFreeTag = Tag->Next;
         Tag->Next = 0;
-
-        GranterPut(FrontendGetGranter(Frontend),
-                   Tag->Handle);
-        Tag->Handle = NULL;
     }
     Ring->HeadFreeTag = 0;
-
-    GranterPut(FrontendGetGranter(Frontend),
-               Ring->Handle);
-    Ring->Handle = NULL;
-
-fail2:
-    Error("fail2\n");
 
     RtlZeroMemory(&Ring->Front, sizeof (netif_tx_front_ring_t));
     RtlZeroMemory(Ring->Shared, PAGE_SIZE);
@@ -3172,6 +3157,7 @@ __RingDisconnect(
 
     GranterRevokeAccess(FrontendGetGranter(Frontend),
                         Ring->Handle);
+    Ring->Handle = NULL;
 
     Count = 0;
     while (Ring->HeadFreeTag != TAG_INDEX_INVALID) {
@@ -3181,19 +3167,11 @@ __RingDisconnect(
         Ring->HeadFreeTag = Tag->Next;
         Tag->Next = 0;
 
-        GranterPut(FrontendGetGranter(Frontend),
-                   Tag->Handle);
-        Tag->Handle = NULL;
-
         Count++;
     }
     ASSERT3U(Count, ==, MAXIMUM_TAG_COUNT);
 
     Ring->HeadFreeTag = 0;
-
-    GranterPut(FrontendGetGranter(Frontend),
-               Ring->Handle);
-    Ring->Handle = NULL;
 
     RtlZeroMemory(&Ring->Front, sizeof (netif_tx_front_ring_t));
     RtlZeroMemory(Ring->Shared, PAGE_SIZE);

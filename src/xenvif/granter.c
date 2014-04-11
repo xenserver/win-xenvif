@@ -117,13 +117,18 @@ GranterEnable(
 }
 
 NTSTATUS
-GranterGet(
+GranterPermitAccess(
     IN  PXENVIF_GRANTER         Granter,
+    IN  PFN_NUMBER              Pfn,
+    IN  BOOLEAN                 ReadOnly,
     OUT PXENVIF_GRANTER_HANDLE  Handle
     )
 {
+    PXENVIF_FRONTEND            Frontend;
     ULONG                       Reference;
     NTSTATUS                    status;
+
+    Frontend = Granter->Frontend;
 
     status = GNTTAB(Get,
                     Granter->GnttabInterface,
@@ -131,42 +136,25 @@ GranterGet(
     if (!NT_SUCCESS(status))
         goto fail1;
 
-    *Handle = (XENVIF_GRANTER_HANDLE)(ULONG_PTR)Reference;
-    return STATUS_SUCCESS;
-
-fail1:
-    Error("fail1 (%08x)\n", status);
-
-    return status;
-}
-
-NTSTATUS
-GranterPermitAccess(
-    IN  PXENVIF_GRANTER         Granter,
-    IN  XENVIF_GRANTER_HANDLE   Handle,
-    IN  PFN_NUMBER              Pfn,
-    IN  BOOLEAN                 ReadOnly
-    )
-{
-    PXENVIF_FRONTEND            Frontend;
-    ULONG_PTR                   Reference;
-    NTSTATUS                    status;
-
-    Frontend = Granter->Frontend;
-
-    Reference = (ULONG_PTR)Handle;
-
     status = GNTTAB(PermitForeignAccess,
                     Granter->GnttabInterface,
-                    (ULONG)Reference,
+                    Reference,
                     FrontendGetBackendDomain(Frontend),
                     GNTTAB_ENTRY_FULL_PAGE,
                     Pfn,
                     ReadOnly);
     if (!NT_SUCCESS(status))
-        goto fail1;
+        goto fail2;
 
+    *Handle = (XENVIF_GRANTER_HANDLE)(ULONG_PTR)Reference;
     return STATUS_SUCCESS;
+
+fail2:
+    Error("fail2\n");
+
+    GNTTAB(Put,
+           Granter->GnttabInterface,
+           Reference);
 
 fail1:
     Error("fail1 (%08x)\n", status);
@@ -181,27 +169,24 @@ GranterRevokeAccess(
     )
 {
     ULONG_PTR                   Reference;
+    NTSTATUS                    status;
 
     Reference = (ULONG_PTR)Handle;
 
-    (VOID) GNTTAB(RevokeForeignAccess,
-                  Granter->GnttabInterface,
-                  (ULONG)Reference);
-}
-
-VOID
-GranterPut(
-    IN  PXENVIF_GRANTER         Granter,
-    IN  XENVIF_GRANTER_HANDLE   Handle
-    )
-{
-    ULONG_PTR                   Reference;
-
-    Reference = (ULONG_PTR)Handle;
+    status = GNTTAB(RevokeForeignAccess,
+                    Granter->GnttabInterface,
+                    (ULONG)Reference);
+    if (!NT_SUCCESS(status))
+        goto fail1;
 
     GNTTAB(Put,
            Granter->GnttabInterface,
            (ULONG)Reference);
+
+    return;
+
+fail1:
+    Error("fail1 (%08x)\n", status);
 }
 
 ULONG
