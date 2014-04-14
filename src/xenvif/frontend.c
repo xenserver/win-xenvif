@@ -32,7 +32,6 @@
 #include <ntddk.h>
 #include <ntstrsafe.h>
 #include <stdlib.h>
-#include <netioapi.h>
 #include <util.h>
 #include <xen.h>
 #include <store_interface.h>
@@ -51,6 +50,7 @@
 #include "tcpip.h"
 #include "receiver.h"
 #include "transmitter.h"
+#include "netio.h"
 #include "dbg_print.h"
 #include "assert.h"
 
@@ -78,7 +78,6 @@ struct _XENVIF_FRONTEND {
 
     PXENBUS_SUSPEND_CALLBACK    SuspendCallbackLate;
     PXENBUS_DEBUG_CALLBACK      DebugCallback;
-    HANDLE                      Handle;
 };
 
 #define FRONTEND_MAGIC  0xf00ba4ed
@@ -592,66 +591,19 @@ __FrontendGetAddressTable(
     ASSERT3U(Count, ==, *AddressCount);
 
 done:
-    FreeMibTable(Table);
+    (VOID) FreeMibTable(Table);
 
     return STATUS_SUCCESS;
 
 fail2:
     Error("fail2\n");
 
-    FreeMibTable(Table);
+    (VOID) FreeMibTable(Table);
 
 fail1:
     Error("fail1 (%08x)\n", status);
 
     return status;
-}
-
-static DECLSPEC_NOINLINE NTSTATUS
-FrontendMib(
-    IN  PXENVIF_THREAD  Self,
-    IN  PVOID           Context
-    )
-{
-    PXENVIF_FRONTEND    Frontend = Context;
-    PKEVENT             Event;
-
-    Trace("====>\n");
-
-    Event = ThreadGetEvent(Self);
-
-    for (;;) { 
-        PSOCKADDR_INET  Table;
-        ULONG           Count;
-        NTSTATUS        status;
-
-        (VOID) KeWaitForSingleObject(Event,
-                                     Executive,
-                                     KernelMode,
-                                     FALSE,
-                                     NULL);
-        KeClearEvent(Event);
-
-        if (ThreadIsAlerted(Self))
-            break;
-
-        status = __FrontendGetAddressTable(Frontend,
-                                           &Table,
-                                           &Count);
-        if (!NT_SUCCESS(status))
-            continue;
-
-        TransmitterUpdateAddressTable(__FrontendGetTransmitter(Frontend),
-                                      Table,
-                                      Count);
-
-        if (Count != 0)
-            __FrontendFree(Table);
-    }
-
-    Trace("<====\n");
-
-    return STATUS_SUCCESS;
 }
 
 static VOID
@@ -675,6 +627,107 @@ FrontendIpAddressChange(
 #define TIME_MS(_ms)            (TIME_US((_ms) * 1000))
 #define TIME_S(_s)              (TIME_MS((_s) * 1000))
 #define TIME_RELATIVE(_t)       (-(_t))
+
+static DECLSPEC_NOINLINE NTSTATUS
+FrontendMib(
+    IN  PXENVIF_THREAD  Self,
+    IN  PVOID           Context
+    )
+{
+    PXENVIF_FRONTEND    Frontend = Context;
+    PKEVENT             Event;
+    HANDLE              Handle;
+    NTSTATUS            status;
+
+    Trace("====>\n");
+
+    Event = ThreadGetEvent(Self);
+
+again:
+    if (ThreadIsAlerted(Self))
+        goto done;
+
+    status = NetioInitialize();
+    if (!NT_SUCCESS(status)) {
+        if (status == STATUS_RETRY) {
+            LARGE_INTEGER  Timeout;
+
+            // The IP helper has not shown up yet so sleep for a while and
+            // try again.
+            Warning("waiting for IP helper\n");
+
+            Timeout.QuadPart = TIME_RELATIVE(TIME_S(10));
+
+            KeDelayExecutionThread(KernelMode, 
+                                   FALSE,
+                                   &Timeout);
+            goto again;
+        }
+
+        goto fail1;
+    }
+
+    status = NotifyUnicastIpAddressChange(AF_UNSPEC,
+                                          FrontendIpAddressChange,
+                                          Frontend,
+                                          TRUE,
+                                          &Handle);
+    if (!NT_SUCCESS(status))
+        goto fail2;
+
+    for (;;) { 
+#if 0
+        PSOCKADDR_INET  Table;
+        ULONG           Count;
+        NTSTATUS        status;
+#endif
+
+        (VOID) KeWaitForSingleObject(Event,
+                                     Executive,
+                                     KernelMode,
+                                     FALSE,
+                                     NULL);
+        KeClearEvent(Event);
+
+        if (ThreadIsAlerted(Self))
+            break;
+
+#if 0
+        status = __FrontendGetAddressTable(Frontend,
+                                           &Table,
+                                           &Count);
+        if (!NT_SUCCESS(status))
+            continue;
+
+        TransmitterUpdateAddressTable(__FrontendGetTransmitter(Frontend),
+                                      Table,
+                                      Count);
+
+        if (Count != 0)
+            __FrontendFree(Table);
+#endif
+    }
+
+    status = CancelMibChangeNotify2(Handle);
+    ASSERT(NT_SUCCESS(status));
+
+done:
+    NetioTeardown();
+
+    Trace("<====\n");
+
+    return STATUS_SUCCESS;
+
+fail2:
+    Error("fail2\n");
+
+    NetioTeardown();
+
+fail1:
+    Error("fail1 (%08x)\n", status);
+
+    return status;
+}
 
 static FORCEINLINE NTSTATUS
 __FrontendWaitForStateChange(
@@ -1634,38 +1687,9 @@ FrontendInitialize(
     (*Frontend)->Magic = FRONTEND_MAGIC;
     _ReadWriteBarrier();
 
-    status = NotifyUnicastIpAddressChange(AF_UNSPEC,
-                                          FrontendIpAddressChange,
-                                          *Frontend,
-                                          TRUE,
-                                          &(*Frontend)->Handle);
-    if (!NT_SUCCESS(status)) {
-        if (status != STATUS_NOT_SUPPORTED) 
-            goto fail12;
-        
-        // If IP Helper isn't available (as in Windows PE) then
-        // NotifyUnicastIpAddressChange will not be supported
-        Warning("Cannot record or update network info to XAPI %x\n", status);
-        // The documentation states that in the error case, the handle is
-        // always populated with NULL.
-        ASSERT((*Frontend)->Handle == NULL);
-    } else {
-        // By inference the handle should not be NULL in the success case
-        ASSERT((*Frontend)->Handle != NULL);
-    }
-
     Trace("<====\n");
 
     return STATUS_SUCCESS;
-
-fail12:
-    Error("fail12\n");
-
-    (*Frontend)->Magic = 0;
-
-    ThreadAlert((*Frontend)->MibThread);
-    ThreadJoin((*Frontend)->MibThread);
-    (*Frontend)->MibThread = NULL;
 
 fail11:
     Error("fail11\n");
@@ -1747,15 +1771,6 @@ FrontendTeardown(
 
     ASSERT(Frontend->State != FRONTEND_ENABLED);
     ASSERT(Frontend->State != FRONTEND_CONNECTED);
-
-    if (Frontend->Handle != NULL) {
-        NTSTATUS    status;
-
-        status = CancelMibChangeNotify2(Frontend->Handle);
-        ASSERT(NT_SUCCESS(status));
-
-        Frontend->Handle = NULL;
-    }
 
     _ReadWriteBarrier();
     Frontend->Magic = 0;

@@ -45,7 +45,7 @@
 		</ClCompile>
 		<Link>
 			<ImageHasSafeExceptionHandlers>false</ImageHasSafeExceptionHandlers>
-			<AdditionalDependencies>$(DDK_LIB_PATH)/libcntpr.lib;$(DDK_LIB_PATH)/netio.lib;%(AdditionalDependencies)</AdditionalDependencies>
+			<AdditionalDependencies>$(DDK_LIB_PATH)/libcntpr.lib;$(DDK_LIB_PATH)/aux_klib.lib;%(AdditionalDependencies)</AdditionalDependencies>
 			<EnableCOMDATFolding>false</EnableCOMDATFolding>
 		</Link>
 		<Inf>
@@ -93,6 +93,15 @@
 		<ClCompile Include="../../src/xenvif/thread.c" />
 		<ClCompile Include="../../src/xenvif/transmitter.c" />
 		<ClCompile Include="../../src/xenvif/vif.c" />
+		<ClCompile Include="../../src/xenvif/netio.c" />
+	</ItemGroup>
+        <ItemGroup>
+                <MASM Include="../../src/xenvif\amd64\netio_thunk.asm">
+                        <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+                </MASM>
+                <MASM Include="../../src/xenvif/i386\netio_thunk.asm">
+                        <ExcludedFromBuild Condition="'$(Platform)'=='x64'">true</ExcludedFromBuild>
+                </MASM>
 	</ItemGroup>
 	<ItemGroup>
 		<ResourceCompile Include="..\..\src\xenvif\xenvif.rc" />

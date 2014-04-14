@@ -32,7 +32,6 @@
 #include <ntddk.h>
 #include <ntstrsafe.h>
 #include <stdlib.h>
-#include <netioapi.h>
 #include <util.h>
 #include <xen.h>
 #include <debug_interface.h>
