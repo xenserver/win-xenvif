@@ -46,6 +46,7 @@
 #include "thread.h"
 #include "frontend.h"
 #include "names.h"
+#include "granter.h"
 #include "notifier.h"
 #include "mac.h"
 #include "tcpip.h"
@@ -67,6 +68,7 @@ struct _XENVIF_FRONTEND {
     PXENBUS_STORE_WATCH         Watch;
     PCHAR                       BackendPath;
     USHORT                      BackendDomain;
+    PXENVIF_GRANTER             Granter;
     PXENVIF_NOTIFIER            Notifier;
     PXENVIF_MAC                 Mac;
     PXENVIF_RECEIVER            Receiver;
@@ -290,6 +292,22 @@ FrontendGetBackendDomain(
     )
 {
     return __FrontendGetBackendDomain(Frontend);
+}
+
+static FORCEINLINE PXENVIF_GRANTER
+__FrontendGetGranter(
+    IN  PXENVIF_FRONTEND    Frontend
+    )
+{
+    return Frontend->Granter;
+}
+
+PXENVIF_GRANTER
+FrontendGetGranter(
+    IN  PXENVIF_FRONTEND    Frontend
+    )
+{
+    return __FrontendGetGranter(Frontend);
 }
 
 static FORCEINLINE PXENVIF_NOTIFIER
@@ -1043,21 +1061,25 @@ __FrontendConnect(
     if (!NT_SUCCESS(status))
         goto fail1;
 
-    status = MacConnect(__FrontendGetMac(Frontend));
+    status = GranterConnect(__FrontendGetGranter(Frontend));
     if (!NT_SUCCESS(status))
         goto fail2;
 
-    status = ReceiverConnect(__FrontendGetReceiver(Frontend));
+    status = MacConnect(__FrontendGetMac(Frontend));
     if (!NT_SUCCESS(status))
         goto fail3;
 
-    status = TransmitterConnect(__FrontendGetTransmitter(Frontend));
+    status = ReceiverConnect(__FrontendGetReceiver(Frontend));
     if (!NT_SUCCESS(status))
         goto fail4;
 
-    status = NotifierConnect(__FrontendGetNotifier(Frontend));
+    status = TransmitterConnect(__FrontendGetTransmitter(Frontend));
     if (!NT_SUCCESS(status))
         goto fail5;
+
+    status = NotifierConnect(__FrontendGetNotifier(Frontend));
+    if (!NT_SUCCESS(status))
+        goto fail6;
 
     Attempt = 0;
     do {
@@ -1102,7 +1124,7 @@ abort:
     } while (status == STATUS_RETRY);
 
     if (!NT_SUCCESS(status))
-        goto fail6;
+        goto fail7;
 
     status = STORE(Printf,
                    Frontend->StoreInterface,
@@ -1112,19 +1134,22 @@ abort:
                    "%u",
                    XenbusStateConnected);
     if (!NT_SUCCESS(status))
-        goto fail7;
+        goto fail8;
 
     State = XenbusStateInitWait;
     status = __FrontendWaitForStateChange(Frontend, Path, &State);
     if (!NT_SUCCESS(status))
-        goto fail8;
+        goto fail9;
 
     status = STATUS_UNSUCCESSFUL;
     if (State != XenbusStateConnected)
-        goto fail9;
+        goto fail10;
 
     Trace("<====\n");
     return STATUS_SUCCESS;
+
+fail10:
+    Error("fail10\n");
 
 fail9:
     Error("fail9\n");
@@ -1135,25 +1160,27 @@ fail8:
 fail7:
     Error("fail7\n");
 
-fail6:
-    Error("fail7\n");
-
     NotifierDisconnect(__FrontendGetNotifier(Frontend));
+
+fail6:
+    Error("fail6\n");
+
+    TransmitterDisconnect(__FrontendGetTransmitter(Frontend));
 
 fail5:
     Error("fail5\n");
 
-    TransmitterDisconnect(__FrontendGetTransmitter(Frontend));
+    ReceiverDisconnect(__FrontendGetReceiver(Frontend));
 
 fail4:
     Error("fail4\n");
 
-    ReceiverDisconnect(__FrontendGetReceiver(Frontend));
+    MacDisconnect(__FrontendGetMac(Frontend));
 
 fail3:
     Error("fail3\n");
 
-    MacDisconnect(__FrontendGetMac(Frontend));
+    GranterDisconnect(__FrontendGetGranter(Frontend));
 
 fail2:
     Error("fail2\n");
@@ -1184,6 +1211,7 @@ __FrontendDisconnect(
     TransmitterDisconnect(__FrontendGetTransmitter(Frontend));
     ReceiverDisconnect(__FrontendGetReceiver(Frontend));
     MacDisconnect(__FrontendGetMac(Frontend));
+    GranterDisconnect(__FrontendGetGranter(Frontend));
 
     DEBUG(Deregister,
           Frontend->DebugInterface,
@@ -1205,39 +1233,48 @@ __FrontendEnable(
 
     Trace("====>\n");
 
-    status = MacEnable(__FrontendGetMac(Frontend));
+    status = GranterEnable(__FrontendGetGranter(Frontend));
     if (!NT_SUCCESS(status))
         goto fail1;
 
-    status = ReceiverEnable(__FrontendGetReceiver(Frontend));
+    status = MacEnable(__FrontendGetMac(Frontend));
     if (!NT_SUCCESS(status))
         goto fail2;
 
-    status = TransmitterEnable(__FrontendGetTransmitter(Frontend));
+    status = ReceiverEnable(__FrontendGetReceiver(Frontend));
     if (!NT_SUCCESS(status))
         goto fail3;
 
-    status = NotifierEnable(__FrontendGetNotifier(Frontend));
+    status = TransmitterEnable(__FrontendGetTransmitter(Frontend));
     if (!NT_SUCCESS(status))
         goto fail4;
+
+    status = NotifierEnable(__FrontendGetNotifier(Frontend));
+    if (!NT_SUCCESS(status))
+        goto fail5;
 
     Trace("<====\n");
     return STATUS_SUCCESS;
 
+fail5:
+    Error("fail5\n");
+
+    TransmitterDisable(__FrontendGetTransmitter(Frontend));
+
 fail4:
     Error("fail4\n");
 
-    TransmitterDisable(__FrontendGetTransmitter(Frontend));
+    ReceiverDisable(__FrontendGetReceiver(Frontend));
 
 fail3:
     Error("fail3\n");
 
-    ReceiverDisable(__FrontendGetReceiver(Frontend));
+    MacDisable(__FrontendGetMac(Frontend));
 
 fail2:
     Error("fail2\n");
 
-    MacDisable(__FrontendGetMac(Frontend));
+    GranterDisable(__FrontendGetGranter(Frontend));
 
 fail1:
     Error("fail1 (%08x)\n", status);
@@ -1256,6 +1293,7 @@ __FrontendDisable(
     TransmitterDisable(__FrontendGetTransmitter(Frontend));
     ReceiverDisable(__FrontendGetReceiver(Frontend));
     MacDisable(__FrontendGetMac(Frontend));
+    GranterDisable(__FrontendGetGranter(Frontend));
 
     Trace("<====\n");
 }
@@ -1611,7 +1649,7 @@ FrontendInitialize(
     if (!NT_SUCCESS(status))
         goto fail6;
 
-    status = MacInitialize(*Frontend, &(*Frontend)->Mac);
+    status = GranterInitialize(*Frontend, &(*Frontend)->Granter);
     if (!NT_SUCCESS(status))
         goto fail7;
 
@@ -1619,17 +1657,21 @@ FrontendInitialize(
     if (!NT_SUCCESS(status))
         goto fail8;
 
-    status = ReceiverInitialize(*Frontend, 1, &(*Frontend)->Receiver);
+    status = MacInitialize(*Frontend, &(*Frontend)->Mac);
     if (!NT_SUCCESS(status))
         goto fail9;
 
-    status = TransmitterInitialize(*Frontend, 1, &(*Frontend)->Transmitter);
+    status = ReceiverInitialize(*Frontend, 1, &(*Frontend)->Receiver);
     if (!NT_SUCCESS(status))
         goto fail10;
 
-    status = ThreadCreate(FrontendMib, *Frontend, &(*Frontend)->MibThread);
+    status = TransmitterInitialize(*Frontend, 1, &(*Frontend)->Transmitter);
     if (!NT_SUCCESS(status))
         goto fail11;
+
+    status = ThreadCreate(FrontendMib, *Frontend, &(*Frontend)->MibThread);
+    if (!NT_SUCCESS(status))
+        goto fail12;
 
     (*Frontend)->Magic = FRONTEND_MAGIC;
     _ReadWriteBarrier();
@@ -1641,7 +1683,7 @@ FrontendInitialize(
                                           &(*Frontend)->Handle);
     if (!NT_SUCCESS(status)) {
         if (status != STATUS_NOT_SUPPORTED) 
-            goto fail12;
+            goto fail13;
         
         // If IP Helper isn't available (as in Windows PE) then
         // NotifyUnicastIpAddressChange will not be supported
@@ -1658,8 +1700,8 @@ FrontendInitialize(
 
     return STATUS_SUCCESS;
 
-fail12:
-    Error("fail12\n");
+fail13:
+    Error("fail13\n");
 
     (*Frontend)->Magic = 0;
 
@@ -1667,17 +1709,23 @@ fail12:
     ThreadJoin((*Frontend)->MibThread);
     (*Frontend)->MibThread = NULL;
 
-fail11:
-    Error("fail11\n");
+fail12:
+    Error("fail12\n");
 
     TransmitterTeardown(__FrontendGetTransmitter(*Frontend));
     (*Frontend)->Transmitter = NULL;
 
-fail10:
-    Error("fail10\n");
+fail11:
+    Error("fail11\n");
 
     ReceiverTeardown(__FrontendGetReceiver(*Frontend));
     (*Frontend)->Receiver = NULL;
+
+fail10:
+    Error("fail10\n");
+
+    MacTeardown(__FrontendGetMac(*Frontend));
+    (*Frontend)->Mac = NULL;
 
 fail9:
     Error("fail9\n");
@@ -1688,8 +1736,8 @@ fail9:
 fail8:
     Error("fail8\n");
 
-    MacTeardown(__FrontendGetMac(*Frontend));
-    (*Frontend)->Mac = NULL;
+    GranterTeardown(__FrontendGetGranter(*Frontend));
+    (*Frontend)->Granter = NULL;
 
 fail7:
     Error("fail7\n");
@@ -1792,11 +1840,14 @@ FrontendTeardown(
     ReceiverTeardown(__FrontendGetReceiver(Frontend));
     Frontend->Receiver = NULL;
 
+    MacTeardown(__FrontendGetMac(Frontend));
+    Frontend->Mac = NULL;
+
     NotifierTeardown(__FrontendGetNotifier(Frontend));
     Frontend->Notifier = NULL;
 
-    MacTeardown(__FrontendGetMac(Frontend));
-    Frontend->Mac = NULL;
+    GranterTeardown(__FrontendGetGranter(Frontend));
+    Frontend->Granter = NULL;
 
     ThreadAlert(Frontend->EjectThread);
     ThreadJoin(Frontend->EjectThread);

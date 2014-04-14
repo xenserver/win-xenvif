@@ -114,6 +114,13 @@ FrontendGetBackendDomain(
     IN  PXENVIF_FRONTEND    Frontend
     );
 
+#include "granter.h"
+
+extern PXENVIF_GRANTER
+FrontendGetGranter(
+    IN  PXENVIF_FRONTEND    Frontend
+    );
+
 #include "notifier.h"
 
 extern PXENVIF_NOTIFIER

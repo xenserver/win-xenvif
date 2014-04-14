@@ -37,7 +37,6 @@
 #include <xen.h>
 #include <debug_interface.h>
 #include <store_interface.h>
-#include <gnttab_interface.h>
 
 // This should be in public/io/netif.h
 #define _NETRXF_gso_prefix     (4)
@@ -51,6 +50,8 @@
 #include "pool.h"
 #include "checksum.h"
 #include "parse.h"
+#include "granter.h"
+#include "notifier.h"
 #include "mac.h"
 #include "vif.h"
 #include "receiver.h"
@@ -62,10 +63,10 @@
 #define RECEIVER_POOL    'ECER'
 
 typedef struct _RECEIVER_TAG {
-    LIST_ENTRY  ListEntry;
-    ULONG       Next;
-    PVOID       Context;
-    ULONG       Reference;
+    LIST_ENTRY              ListEntry;
+    ULONG                   Next;
+    PVOID                   Context;
+    XENVIF_GRANTER_HANDLE   Handle;
 } RECEIVER_TAG, *PRECEIVER_TAG;
 
 typedef struct _RECEIVER_OFFLOAD_STATISTICS {
@@ -112,7 +113,7 @@ typedef struct _RECEIVER_RING {
     PMDL                                Mdl;
     netif_rx_front_ring_t               Front;
     netif_rx_sring_t                    *Shared;
-    ULONG                               Reference;
+    XENVIF_GRANTER_HANDLE               Handle;
     ULONG                               HeadFreeTag;
     RECEIVER_TAG                        Tag[MAXIMUM_TAG_COUNT];
     netif_rx_request_t                  Pending[MAXIMUM_TAG_COUNT];
@@ -147,7 +148,6 @@ struct _XENVIF_RECEIVER {
 
     PXENBUS_DEBUG_INTERFACE     DebugInterface;
     PXENBUS_STORE_INTERFACE     StoreInterface;
-    PXENBUS_GNTTAB_INTERFACE    GnttabInterface;
     PXENVIF_VIF_INTERFACE       VifInterface;
 
     PXENBUS_DEBUG_CALLBACK      DebugCallback;
@@ -1456,13 +1456,10 @@ __RingPreparePacket(
 
     Tag->Context = Mdl;
 
-    status = GNTTAB(PermitForeignAccess,
-                    Receiver->GnttabInterface,
-                    Tag->Reference,
-                    FrontendGetBackendDomain(Frontend),
-                    GNTTAB_ENTRY_FULL_PAGE,
-                    MmGetMdlPfnArray(Mdl)[0],
-                    FALSE);
+    status = GranterPermitAccess(FrontendGetGranter(Frontend),
+                                 MmGetMdlPfnArray(Mdl)[0],
+                                 FALSE,
+                                 &Tag->Handle);
     ASSERT(NT_SUCCESS(status));
 
     return Tag;
@@ -1475,14 +1472,14 @@ RingReleaseTag(
     )
 {
     PXENVIF_RECEIVER    Receiver;
-    NTSTATUS            status;
+    PXENVIF_FRONTEND    Frontend;
 
     Receiver = Ring->Receiver;
+    Frontend = Receiver->Frontend;
 
-    status = GNTTAB(RevokeForeignAccess,
-                    Receiver->GnttabInterface,
-                    Tag->Reference);
-    ASSERT(NT_SUCCESS(status));
+    GranterRevokeAccess(FrontendGetGranter(Frontend),
+                        Tag->Handle);
+    Tag->Handle = NULL;
 
     __RingPutTag(Ring, Tag);
 }
@@ -1523,8 +1520,13 @@ RingFill(
     IN  PRECEIVER_RING  Ring
     )
 {
+    PXENVIF_RECEIVER    Receiver;
+    PXENVIF_FRONTEND    Frontend;
     RING_IDX            req_prod;
     RING_IDX            rsp_cons;
+
+    Receiver = Ring->Receiver;
+    Frontend = Receiver->Frontend;
 
     KeMemoryBarrier();
 
@@ -1557,7 +1559,8 @@ RingFill(
         ASSERT3U(id, <, MAXIMUM_TAG_COUNT);
 
         req->id = id | REQ_ID_INTEGRITY_CHECK;
-        req->gref = Tag->Reference;
+        req->gref = GranterGetReference(FrontendGetGranter(Frontend),
+                                        Tag->Handle);
 
         // Store a copy of the request in case we need to fake a response ourselves
         ASSERT(IsZeroMemory(&Ring->Pending[id], sizeof (netif_rx_request_t)));
@@ -2414,25 +2417,9 @@ __RingConnect(
     FRONT_RING_INIT(&Ring->Front, Ring->Shared, PAGE_SIZE);
     ASSERT3P(Ring->Front.sring, ==, Ring->Shared);
 
-    Receiver->GnttabInterface = FrontendGetGnttabInterface(Frontend);
-
-    GNTTAB(Acquire, Receiver->GnttabInterface);
-
-    status = GNTTAB(Get,
-                    Receiver->GnttabInterface,
-                    &Ring->Reference);
-    if (!NT_SUCCESS(status))
-        goto fail2;
-
     Ring->HeadFreeTag = TAG_INDEX_INVALID;
     for (Index = 0; Index < MAXIMUM_TAG_COUNT; Index++) {
         PRECEIVER_TAG   Tag = &Ring->Tag[Index];
-
-        status = GNTTAB(Get,
-                        Receiver->GnttabInterface,
-                        &Tag->Reference);
-        if (!NT_SUCCESS(status))
-            goto fail3;
 
         Tag->Next = Ring->HeadFreeTag;
         Ring->HeadFreeTag = Index;
@@ -2440,43 +2427,25 @@ __RingConnect(
 
     Pfn = MmGetMdlPfnArray(Ring->Mdl)[0];
     
-    status = GNTTAB(PermitForeignAccess,
-                    Receiver->GnttabInterface,
-                    Ring->Reference,
-                    FrontendGetBackendDomain(Frontend),
-                    GNTTAB_ENTRY_FULL_PAGE,
-                    Pfn,
-                    FALSE);
-    ASSERT(NT_SUCCESS(status));
+    status = GranterPermitAccess(FrontendGetGranter(Frontend),
+                                 Pfn,
+                                 FALSE,
+                                 &Ring->Handle);
+    if (!NT_SUCCESS(status))
+        goto fail2;
 
     return STATUS_SUCCESS;
 
-fail3:
-    Error("fail3\n");
+fail2:
+    Error("fail2\n");
 
     while (Ring->HeadFreeTag != TAG_INDEX_INVALID) {
         PRECEIVER_TAG   Tag = &Ring->Tag[Ring->HeadFreeTag];
 
         Ring->HeadFreeTag = Tag->Next;
         Tag->Next = 0;
-
-        GNTTAB(Put,
-               Receiver->GnttabInterface,
-               Tag->Reference);
-        Tag->Reference = 0;
     }
     Ring->HeadFreeTag = 0;
-
-    GNTTAB(Put,
-           Receiver->GnttabInterface,
-           Ring->Reference);
-    Ring->Reference = 0;
-
-fail2:
-    Error("fail2\n");
-
-    GNTTAB(Release, Receiver->GnttabInterface);
-    Receiver->GnttabInterface = NULL;
 
     RtlZeroMemory(&Ring->Front, sizeof (netif_rx_front_ring_t));
     RtlZeroMemory(Ring->Shared, PAGE_SIZE);
@@ -2511,7 +2480,8 @@ __RingStoreWrite(
                    FrontendGetPath(Frontend),
                    "rx-ring-ref",
                    "%u",
-                   Ring->Reference);
+                   GranterGetReference(FrontendGetGranter(Frontend),
+                                       Ring->Handle));
 
     if (!NT_SUCCESS(status))
         goto fail1;
@@ -2583,7 +2553,6 @@ __RingDisconnect(
     PXENVIF_RECEIVER    Receiver;
     PXENVIF_FRONTEND    Frontend;
     ULONG               Count;
-    NTSTATUS            status;
 
     Receiver = Ring->Receiver;
     Frontend = Receiver->Frontend;
@@ -2597,10 +2566,9 @@ __RingDisconnect(
     Ring->RequestsPushed = 0;
     Ring->RequestsPosted = 0;
 
-    status = GNTTAB(RevokeForeignAccess,
-                    Receiver->GnttabInterface,
-                    Ring->Reference);
-    ASSERT(NT_SUCCESS(status));
+    GranterRevokeAccess(FrontendGetGranter(Frontend),
+                        Ring->Handle);
+    Ring->Handle = NULL;
 
     Count = 0;
     while (Ring->HeadFreeTag != TAG_INDEX_INVALID) {
@@ -2610,24 +2578,11 @@ __RingDisconnect(
         Ring->HeadFreeTag = Tag->Next;
         Tag->Next = 0;
 
-        GNTTAB(Put,
-               Receiver->GnttabInterface,
-               Tag->Reference);
-        Tag->Reference = 0;
-
         Count++;
     }
     ASSERT3U(Count, ==, MAXIMUM_TAG_COUNT);
 
     Ring->HeadFreeTag = 0;
-
-    GNTTAB(Put,
-           Receiver->GnttabInterface,
-           Ring->Reference);
-    Ring->Reference = 0;
-
-    GNTTAB(Release, Receiver->GnttabInterface);
-    Receiver->GnttabInterface = NULL;
 
     RtlZeroMemory(&Ring->Front, sizeof (netif_rx_front_ring_t));
     RtlZeroMemory(Ring->Shared, PAGE_SIZE);
