@@ -35,6 +35,10 @@
 #include <ntddk.h>
 #include <stdarg.h>
 
+#ifdef  _SDV_
+#define __MODULE__ ""
+#endif
+
 #pragma warning(disable:4127)   // conditional expression is constant
 
 static __inline VOID
