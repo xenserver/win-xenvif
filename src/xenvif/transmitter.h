@@ -33,10 +33,10 @@
 #define _XENVIF_TRANSMITTER_H
 
 #include <ntddk.h>
-#include <netioapi.h>
 #include <vif_interface.h>
 
 #include "frontend.h"
+#include "netio.h"
 
 typedef struct _XENVIF_TRANSMITTER XENVIF_TRANSMITTER, *PXENVIF_TRANSMITTER;
 

@@ -32,7 +32,6 @@
 #include <ntddk.h>
 #include <ntstrsafe.h>
 #include <stdlib.h>
-#include <netioapi.h>
 #include <util.h>
 #include <xen.h>
 #include <debug_interface.h>
@@ -52,6 +51,7 @@
 #include "vif.h"
 #include "thread.h"
 #include "registry.h"
+#include "netio.h"
 #include "dbg_print.h"
 #include "assert.h"
 
@@ -2731,7 +2731,7 @@ __RingDumpAddressTable(
             if (IpVersion4Count == 0) {
                 status = STORE(Printf,
                                Transmitter->StoreInterface,
-                               NULL,
+                               Transaction,
                                FrontendGetPrefix(Frontend),
                                "ip",
                                "%u.%u.%u.%u",

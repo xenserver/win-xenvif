@@ -29,6 +29,8 @@
  * SUCH DAMAGE.
  */
 
+#include <ws2def.h>
+
 #include "ethernet.h"
 
 #ifndef _TCPIP_H
@@ -164,11 +166,6 @@ typedef union _IP_HEADER {
         IPV4_HEADER_LENGTH(&(_Header)->Version4) :  \
         IPV6_HEADER_LENGTH(&(_Header)->Version6))
 
-#define IPPROTO_HOP_OPTIONS 0
-#define IPPROTO_DST_OPTIONS 60
-#define IPPROTO_ROUTING     43
-#define IPPROTO_FRAGMENT    44
-
 // Options
 
 typedef struct _IPV6_OPTION_HEADER {
@@ -192,8 +189,6 @@ typedef struct _IPV6_FRAGMENT_HEADER {
         ((_FragmentOffsetAndFlags) & 0x0001)
 #define IPV6_IS_A_FRAGMENT(_FragmentOffsetAndFlags)     \
         ((_FragmentOffsetAndFlags) & 0xfff9)
-
-#define IPPROTO_TCP         6
 
 // TCP
 
@@ -230,8 +225,6 @@ typedef struct _TCP_HEADER {
 #define TCPOPT_TIMESTAMP    8
 #define TCPOLEN_TIMESTAMP   10
 
-#define IPPROTO_UDP         17
-
 // UDP
 
 typedef struct _UDP_HEADER {
@@ -243,8 +236,6 @@ typedef struct _UDP_HEADER {
 
 #define UDP_HEADER_LENGTH(_Header)  \
         (ULONG)(sizeof (UDP_HEADER))
-
-#define IPPROTO_ICMPV6      58
 
 // ICMPV6
 
@@ -260,8 +251,6 @@ typedef struct _ICMPV6_HEADER {
 #define ICMPV6_TYPE_NS  135
 #define ICMPV6_TYPE_NA  136
 
-#define IPPROTO_AH          51
-
 // AH
 
 typedef struct _IP_AUTHENTICATION_HEADER {
@@ -272,8 +261,6 @@ typedef struct _IP_AUTHENTICATION_HEADER {
     ULONG   Seq;
     UCHAR   Icv[0];
 } IP_AUTHENTICATION_HEADER, *PIP_AUTHENTICATION_HEADER;
-
-#define IPPROTO_NONE        59
 
 // Checksum
 

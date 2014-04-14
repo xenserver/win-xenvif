@@ -309,8 +309,8 @@ __ParseIpVersion6Header(
             NextHeader = Authentication->NextHeader;
             break;
         }
-        case IPPROTO_HOP_OPTIONS:
-        case IPPROTO_DST_OPTIONS:
+        case IPPROTO_HOPOPTS:
+        case IPPROTO_DSTOPTS:
         case IPPROTO_ROUTING: {
             PIPV6_OPTION_HEADER Option;
             ULONG               Extra;

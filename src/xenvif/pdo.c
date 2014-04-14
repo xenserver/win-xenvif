@@ -36,7 +36,6 @@
 #include <devguid.h>
 #include <ntstrsafe.h>
 #include <stdlib.h>
-#include <netioapi.h>
 #include <util.h>
 #include <xen.h>
 #include <store_interface.h>
