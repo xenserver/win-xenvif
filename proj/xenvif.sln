@@ -1,13 +1,14 @@
 Microsoft Visual Studio Solution File, Format Version 12.00
-# Visual Studio 11
+# Visual Studio 2012
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "xenvif", "xenvif\xenvif.vcxproj", "{C3F96D4C-E441-47F7-A44C-D2D0543C1D18}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "xenvif_coinst", "xenvif_coinst\xenvif_coinst.vcxproj", "{2BFAC7E6-3420-47A5-A092-BDC5C9D78A44}"
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "package", "package\package.vcxproj", "{73768CC9-DB26-4297-9EC8-1042F815EB15}"
 	ProjectSection(ProjectDependencies) = postProject
+		{C3F96D4C-E441-47F7-A44C-D2D0543C1D18} = {C3F96D4C-E441-47F7-A44C-D2D0543C1D18}
 		{2BFAC7E6-3420-47A5-A092-BDC5C9D78A44} = {2BFAC7E6-3420-47A5-A092-BDC5C9D78A44}
 	EndProjectSection
-EndProject
-Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "xenvif_coinst", "xenvif_coinst\xenvif_coinst.vcxproj", "{2BFAC7E6-3420-47A5-A092-BDC5C9D78A44}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution

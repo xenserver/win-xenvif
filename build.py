@@ -6,6 +6,7 @@ import re
 import glob
 import tarfile
 import subprocess
+import shutil
 
 def next_build_number():
     try:
@@ -111,8 +112,8 @@ def get_expired_symbols(name, age = 30):
     return expired
 
 
-def get_configuration(debug):
-    configuration = 'Windows Vista'
+def get_configuration(release, debug):
+    configuration = release
 
     if debug:
         configuration += ' Debug'
@@ -121,20 +122,10 @@ def get_configuration(debug):
 
     return configuration
 
-def get_configuration_name(debug):
-    configuration = 'WindowsVista'
-
-    if debug:
-        configuration += 'Debug'
-    else:
-        configuration += 'Release'
-
-    return configuration
-
-def get_target_path(arch, debug):
-    configuration = get_configuration_name(debug)
-
-    target = { 'x86': os.sep.join([configuration, 'Win32']), 'x64': os.sep.join([configuration, 'x64']) }
+def get_target_path(release, arch, debug):
+    configuration = get_configuration(release, debug)
+    name = ''.join(configuration.split(' '))
+    target = { 'x86': os.sep.join([name, 'Win32']), 'x64': os.sep.join([name, 'x64']) }
     target_path = os.sep.join(['proj', target[arch]])
 
     return target_path
@@ -158,27 +149,75 @@ class msbuild_failure(Exception):
     def __str__(self):
         return repr(self.value)
 
-def msbuild(name, arch, debug):
-    cwd = os.getcwd()
-    configuration = get_configuration(debug)
-
-    if arch == 'x86':
-        os.environ['PLATFORM'] = 'Win32'
-    elif arch == 'x64':
-        os.environ['PLATFORM'] = 'x64'
-
+def msbuild(platform, configuration, target, file, args, dir):
+    os.environ['PLATFORM'] = platform
     os.environ['CONFIGURATION'] = configuration
-    os.environ['TARGET'] = 'Build'
-    os.environ['BUILD_ARGS'] = ''
-    os.environ['BUILD_FILE'] = name + '.sln'
+    os.environ['TARGET'] = target
+    os.environ['FILE'] = file
+    os.environ['EXTRA'] = args
 
-    os.chdir('proj')
-    status = shell('msbuild.bat')
+    cwd = os.getcwd()
+    bin = os.path.join(cwd, 'msbuild.bat')
+
+    print(bin)
+    print(dir)
+
+    os.chdir(dir)
+    status = shell(bin)
     os.chdir(cwd)
 
     if (status != None):
         raise msbuild_failure(configuration)
 
+def build_sln(name, release, arch, debug):
+    configuration = get_configuration(release, debug)
+
+    if arch == 'x86':
+        platform = 'Win32'
+    elif arch == 'x64':
+        platform = 'x64'
+
+    cwd = os.getcwd()
+
+    msbuild(platform, configuration, 'Build', name + '.sln', '', 'proj')
+
+def remove_timestamps(path):
+    try:
+        os.unlink(path + '.orig')
+    except OSError:
+        pass
+
+    os.rename(path, path + '.orig')
+
+    src = open(path + '.orig', 'r')
+    dst = open(path, 'w')
+
+    for line in src:
+        if line.find('TimeStamp') == -1:
+            dst.write(line)
+
+    dst.close()
+    src.close()
+
+def run_sdv(name, dir):
+    configuration = get_configuration('Windows 8', False)
+    platform = 'x64'
+
+    msbuild(platform, configuration, 'Build', name + '.vcxproj',
+            '', os.path.join('proj', name))
+    msbuild(platform, configuration, 'sdv', name + '.vcxproj',
+            '/p:Inputs="/clean"', os.path.join('proj', name))
+    msbuild(platform, configuration, 'sdv', name + '.vcxproj',
+            '/p:Inputs="/check:default.sdv"', os.path.join('proj', name))
+
+    path = ['proj', name, 'sdv', 'SDV.DVL.xml']
+    remove_timestamps(os.path.join(*path))
+
+    msbuild(platform, configuration, 'dvl', name + '.vcxproj',
+            '', os.path.join('proj', name))
+
+    path = ['proj', name, name + '.DVL.XML']
+    shutil.copy(os.path.join(*path), dir)
 
 def symstore_del(name, age):
     symstore_path = [os.environ['KIT'], 'Debuggers']
@@ -200,10 +239,9 @@ def symstore_del(name, age):
 
         shell(' '.join(command))
 
-def symstore_add(name, arch, debug):
+def symstore_add(name, release, arch, debug):
     cwd = os.getcwd()
-    configuration = get_configuration_name(debug)
-    target_path = get_target_path(arch, debug)
+    target_path = get_target_path(release, arch, debug)
 
     symstore_path = [os.environ['KIT'], 'Debuggers']
     if os.environ['PROCESSOR_ARCHITECTURE'] == 'x86':
@@ -287,11 +325,16 @@ if __name__ == '__main__':
 
     symstore_del(driver, 30)
 
-    msbuild(driver, 'x86', debug[sys.argv[1]])
-    msbuild(driver, 'x64', debug[sys.argv[1]])
+    release = 'Windows Vista'
 
-    symstore_add(driver, 'x86', debug[sys.argv[1]])
-    symstore_add(driver, 'x64', debug[sys.argv[1]])
+    build_sln(driver, release, 'x86', debug[sys.argv[1]])
+    build_sln(driver, release, 'x64', debug[sys.argv[1]])
+
+    symstore_add(driver, release, 'x86', debug[sys.argv[1]])
+    symstore_add(driver, release, 'x64', debug[sys.argv[1]])
+
+    if len(sys.argv) <= 2 or sys.argv[2] != 'nosdv':
+        run_sdv(driver, driver)
 
     listfile = callfnout(['git','ls-tree', '-r', '--name-only', 'HEAD'])   
     archive(driver + '\\source.tgz', listfile.splitlines(), tgz=True)
