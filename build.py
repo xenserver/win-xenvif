@@ -262,11 +262,6 @@ def run_sdv(name, dir):
     msbuild(platform, configuration, 'sdv', name + '.vcxproj',
             '/p:Inputs="/check:default.sdv"', os.path.join('proj', name))
 
-    path = ['proj', name, 'refine.sdv']
-    if os.path.isfile(os.path.join(*path)):
-        msbuild(platform, configuration, 'sdv', name + '.vcxproj',
-                '/p:Inputs=/refine', os.path.join('proj', name))
-
     path = ['proj', name, 'sdv', 'SDV.DVL.xml']
     remove_timestamps(os.path.join(*path))
 
@@ -275,6 +270,11 @@ def run_sdv(name, dir):
 
     path = ['proj', name, name + '.DVL.XML']
     shutil.copy(os.path.join(*path), dir)
+
+    path = ['proj', name, 'refine.sdv']
+    if os.path.isfile(os.path.join(*path)):
+        msbuild(platform, configuration, 'sdv', name + '.vcxproj',
+                '/p:Inputs=/refine', os.path.join('proj', name))
 
 
 def symstore_del(name, age):
