@@ -689,11 +689,9 @@ again:
         goto fail2;
 
     for (;;) { 
-#if 0
         PSOCKADDR_INET  Table;
         ULONG           Count;
         NTSTATUS        status;
-#endif
 
         (VOID) KeWaitForSingleObject(Event,
                                      Executive,
@@ -705,7 +703,6 @@ again:
         if (ThreadIsAlerted(Self))
             break;
 
-#if 0
         status = __FrontendGetAddressTable(Frontend,
                                            &Table,
                                            &Count);
@@ -718,7 +715,6 @@ again:
 
         if (Count != 0)
             __FrontendFree(Table);
-#endif
     }
 
     status = CancelMibChangeNotify2(Handle);
