@@ -691,7 +691,6 @@ again:
     for (;;) { 
         PSOCKADDR_INET  Table;
         ULONG           Count;
-        NTSTATUS        status;
 
         (VOID) KeWaitForSingleObject(Event,
                                      Executive,
@@ -720,9 +719,9 @@ again:
     status = CancelMibChangeNotify2(Handle);
     ASSERT(NT_SUCCESS(status));
 
-done:
     NetioTeardown();
 
+done:
     Trace("<====\n");
 
     return STATUS_SUCCESS;
