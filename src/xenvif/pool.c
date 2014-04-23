@@ -34,7 +34,6 @@
 #include <util.h>
 
 #include "pool.h"
-#include "thread.h"
 #include "dbg_print.h"
 #include "assert.h"
 
@@ -62,7 +61,8 @@ struct _XENVIF_POOL {
     VOID            (*AcquireLock)(PVOID);
     VOID            (*ReleaseLock)(PVOID);
     PVOID           Argument;
-    PXENVIF_THREAD  Thread;
+    KTIMER          Timer;
+    KDPC            Dpc;
     LIST_ENTRY      GetList;
     PLIST_ENTRY     PutList;
     POOL_MAGAZINE   Magazine[MAXIMUM_PROCESSORS];
@@ -424,51 +424,33 @@ __PoolEmpty(
 
 #define POOL_PERIOD  1000
 
-static NTSTATUS
-PoolMonitor(
-    IN  PXENVIF_THREAD  Self,
-    IN  PVOID           Context
+KDEFERRED_ROUTINE   PoolDpc;
+
+VOID
+PoolDpc(
+    IN  PKDPC       Dpc,
+    IN  PVOID       Context,
+    IN  PVOID       Argument1,
+    IN  PVOID       Argument2
     )
 {
-    PXENVIF_POOL        Pool = Context;
-    LARGE_INTEGER       Timeout;
+    PXENVIF_POOL    Pool = Context;
+    LIST_ENTRY      List;
 
-    Trace("====> (%s)\n", Pool->Name);
+    UNREFERENCED_PARAMETER(Dpc);
+    UNREFERENCED_PARAMETER(Argument1);
+    UNREFERENCED_PARAMETER(Argument2);
 
-    Timeout.QuadPart = TIME_RELATIVE(TIME_MS(POOL_PERIOD));
+    ASSERT(Pool != NULL);
 
-    for (;;) {
-        PKEVENT     Event;
-        KIRQL       Irql;
-        LIST_ENTRY  List;
+    InitializeListHead(&List);
 
-        Event = ThreadGetEvent(Self);
+    Pool->AcquireLock(Pool->Argument);
+    __PoolTrimShared(Pool, &List);
+    Pool->ReleaseLock(Pool->Argument);
 
-        (VOID) KeWaitForSingleObject(Event,
-                                     Executive,
-                                     KernelMode,
-                                     FALSE,
-                                     &Timeout);
-        KeClearEvent(Event);
-
-        if (ThreadIsAlerted(Self))
-            break;
-
-        InitializeListHead(&List);
-
-        KeRaiseIrql(DISPATCH_LEVEL, &Irql);
-        Pool->AcquireLock(Pool->Argument);
-        __PoolTrimShared(Pool, &List);
-        Pool->ReleaseLock(Pool->Argument);
-        KeLowerIrql(Irql);
-
-        __PoolEmpty(Pool, &List);
-        ASSERT(IsListEmpty(&List));
-    }
-
-    Trace("<==== (%s)\n", Pool->Name);
-
-    return STATUS_SUCCESS;
+    __PoolEmpty(Pool, &List);
+    ASSERT(IsListEmpty(&List));
 }
 
 NTSTATUS
@@ -483,6 +465,7 @@ PoolInitialize(
     OUT PXENVIF_POOL    *Pool
     )
 {
+    LARGE_INTEGER       Timeout;
     NTSTATUS            status;
 
     *Pool = __PoolAllocate(sizeof (XENVIF_POOL));
@@ -501,28 +484,19 @@ PoolInitialize(
 
     InitializeListHead(&(*Pool)->GetList);
 
-    status = ThreadCreate(PoolMonitor, *Pool, &(*Pool)->Thread);
-    if (!NT_SUCCESS(status))
-        goto fail2;
+    KeInitializeDpc(&(*Pool)->Dpc,
+                    PoolDpc,
+                    (*Pool));
+
+    Timeout.QuadPart = TIME_RELATIVE(TIME_MS(POOL_PERIOD));
+
+    KeInitializeTimer(&(*Pool)->Timer);
+    KeSetTimerEx(&(*Pool)->Timer,
+                 Timeout,
+                 POOL_PERIOD,
+                 &(*Pool)->Dpc);
 
     return STATUS_SUCCESS;
-
-fail2:
-    Error("fail2\n");
-
-    RtlZeroMemory(&(*Pool)->GetList, sizeof (LIST_ENTRY));
-
-    (*Pool)->Argument = NULL;
-    (*Pool)->ReleaseLock = NULL;
-    (*Pool)->AcquireLock = NULL;
-    (*Pool)->Dtor = NULL;
-    (*Pool)->Ctor = NULL;
-    (*Pool)->Size = 0;
-    (*Pool)->Name = NULL;
-
-    ASSERT(IsZeroMemory(*Pool, sizeof (XENVIF_POOL)));
-    __PoolFree(*Pool);
-    *Pool = NULL;
 
 fail1:
     Error("fail1 (%08x)\n", status);
@@ -537,9 +511,11 @@ PoolTeardown(
 {
     LIST_ENTRY          List;
 
-    ThreadAlert(Pool->Thread);
-    ThreadJoin(Pool->Thread);
-    Pool->Thread = NULL;
+    KeCancelTimer(&Pool->Timer);
+    KeFlushQueuedDpcs();
+
+    RtlZeroMemory(&Pool->Timer, sizeof (KTIMER));
+    RtlZeroMemory(&Pool->Dpc, sizeof (KDPC));
 
     InitializeListHead(&List);
 
