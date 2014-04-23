@@ -126,11 +126,18 @@ __Bug(
 
 #else   // DBG
 
-#pragma warning(disable:4100)
+static FORCEINLINE VOID
+_IgnoreAssertion(
+    IN  BOOLEAN Value
+    )
+{
+    UNREFERENCED_PARAMETER(Value);
+}
 
-#define ASSERT(_EXP)                    \
-        do {                            \
-            __analysis_assume(_EXP);    \
+#define ASSERT(_EXP)                        \
+        do {                                \
+            _IgnoreAssertion(_EXP);         \
+            __analysis_assume(_EXP);        \
         } while (FALSE)
 
 #define ASSERT3U(_X, _OP, _Y)           \

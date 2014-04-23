@@ -981,7 +981,7 @@ __RingProcessLargePacket(
         InsertTailList(List, &Segment->ListEntry);
 
         if (Offload) {
-            ASSERT(Ring->OffloadOptions.NeedLargePacketSplit);
+            ASSERT(Ring->OffloadOptions.NeedLargePacketSplit != 0);
             break;
         }
     }
