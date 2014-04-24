@@ -638,6 +638,7 @@ __FdoEnumerate(
 
         if (Missing &&
             !PdoIsMissing(Pdo) &&
+            !PdoIsEjectRequested(Pdo) &&
             PdoGetDevicePnpState(Pdo) != Deleted) {
             PdoSetMissing(Pdo, "device disappeared");
 

@@ -63,7 +63,6 @@ struct _XENVIF_FRONTEND {
     KSPIN_LOCK                  Lock;
     PXENVIF_THREAD              MibThread;
     PXENVIF_THREAD              EjectThread;
-    BOOLEAN                     EjectRequested;
     PXENBUS_STORE_WATCH         Watch;
     PCHAR                       BackendPath;
     USHORT                      BackendDomain;
@@ -424,10 +423,10 @@ FrontendEject(
     Event = ThreadGetEvent(Self);
 
     for (;;) {
-        KIRQL               Irql;
         BOOLEAN             Online;
         XenbusState         State;
         ULONG               Attempt;
+        KIRQL               Irql;
         NTSTATUS            status;
 
         KeWaitForSingleObject(Event,
@@ -523,7 +522,6 @@ abort:
             Info("%s: requesting device eject\n", __FrontendGetPath(Frontend));
 
             PdoRequestEject(Frontend->Pdo);
-            Frontend->EjectRequested = TRUE;
         }
 
         STORE(Release, Frontend->StoreInterface);
@@ -801,14 +799,18 @@ __FrontendWaitForStateChange(
                        Path,
                        "state",
                        &Buffer);
-        if (!NT_SUCCESS(status))
-            goto fail2;
+        if (!NT_SUCCESS(status)) {
+            if (status != STATUS_OBJECT_NAME_NOT_FOUND)
+                goto fail2;
 
-        *State = (XenbusState)strtol(Buffer, NULL, 10);
+            *State = XenbusStateUnknown;
+        } else {
+            *State = (XenbusState)strtol(Buffer, NULL, 10);
 
-        STORE(Free,
-              Frontend->StoreInterface,
-              Buffer);
+            STORE(Free,
+                  Frontend->StoreInterface,
+                  Buffer);
+        }
 
         KeQuerySystemTime(&Now);
 
@@ -1873,7 +1875,7 @@ FrontendTeardown(
 }
 
 VOID
-FrontendRemoveFailed(
+FrontendEjectFailed(
     IN PXENVIF_FRONTEND Frontend
     )
 {
@@ -1883,10 +1885,6 @@ FrontendRemoveFailed(
     NTSTATUS            status;
 
     KeAcquireSpinLock(&Frontend->Lock, &Irql);
-    if (!Frontend->EjectRequested)
-        goto done;
-
-    Frontend->EjectRequested = FALSE;
 
     Info("%s: device eject failed\n", __FrontendGetPath(Frontend));
 
@@ -1913,7 +1911,6 @@ FrontendRemoveFailed(
 
     __FrontendFree(Path);
 
-done:        
     KeReleaseSpinLock(&Frontend->Lock, Irql);
     return;
 

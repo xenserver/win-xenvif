@@ -64,7 +64,7 @@ FrontendTeardown(
     );
 
 extern VOID
-FrontendRemoveFailed(
+FrontendEjectFailed(
     IN PXENVIF_FRONTEND Frontend
     );
 

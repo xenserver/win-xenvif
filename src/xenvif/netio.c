@@ -38,6 +38,7 @@
 #include "dbg_print.h"
 #include "assert.h"
 
+LONG    NetioReferences;
 PVOID   NetioGetUnicastIpAddressTable;
 PVOID   NetioNotifyUnicastIpAddressChange;
 PVOID   NetioCancelMibChangeNotify2;
@@ -135,11 +136,6 @@ __NetioLink(
              Function);
     }
 
-    ASSERT(NetioGetUnicastIpAddressTable != NULL);
-    ASSERT(NetioNotifyUnicastIpAddressChange != NULL);
-    ASSERT(NetioCancelMibChangeNotify2 != NULL);
-    ASSERT(NetioFreeMibTable != NULL);
-
     Trace("<====\n");
 
     return STATUS_SUCCESS;
@@ -160,14 +156,16 @@ NetioInitialize(
     VOID
     )
 {
-    static BOOLEAN              Linked;
+    LONG                        References;
     ULONG                       BufferSize;
     ULONG                       Count;
     PAUX_MODULE_EXTENDED_INFO   QueryInfo;
     ULONG                       Index;
     NTSTATUS                    status;
 
-    if (Linked)
+    References = InterlockedIncrement(&NetioReferences);
+
+    if (References > 1)
         goto done;
 
     (VOID) AuxKlibInitialize();
@@ -213,9 +211,12 @@ found:
     if (!NT_SUCCESS(status))
         goto fail6;
 
-    Linked = TRUE;
-
 done:
+    ASSERT(NetioGetUnicastIpAddressTable != NULL);
+    ASSERT(NetioNotifyUnicastIpAddressChange != NULL);
+    ASSERT(NetioCancelMibChangeNotify2 != NULL);
+    ASSERT(NetioFreeMibTable != NULL);
+
     return STATUS_SUCCESS;
 
 fail6:
@@ -238,6 +239,8 @@ fail2:
 fail1:
     Error("fail1 (%08x)\n", status);
 
+    (VOID) InterlockedDecrement(&NetioReferences);
+
     return status;
 }
 
@@ -246,6 +249,14 @@ NetioTeardown(
     VOID
     )
 {
+    LONG    References;
+
+    References = InterlockedDecrement(&NetioReferences);
+
+    ASSERT(References >= 0);
+    if (References != 0)
+        return;
+
     NetioGetUnicastIpAddressTable = NULL;
     NetioNotifyUnicastIpAddressChange = NULL;
     NetioCancelMibChangeNotify2 = NULL;

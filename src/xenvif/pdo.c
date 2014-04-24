@@ -66,6 +66,8 @@ struct _XENVIF_PDO {
     PXENVIF_FDO                 Fdo;
     BOOLEAN                     Missing;
     const CHAR                  *Reason;
+    BOOLEAN                     EjectRequested;
+    KSPIN_LOCK                  EjectLock;
 
     ETHERNET_ADDRESS            PermanentMacAddress;
     NET_LUID                    NetLuid;
@@ -226,6 +228,57 @@ PdoIsMissing(
     )
 {
     return __PdoIsMissing(Pdo);
+}
+
+static FORCEINLINE VOID
+__PdoSetEjectRequested(
+    IN  PXENVIF_PDO Pdo
+    )
+{
+    KIRQL           Irql;
+
+    KeAcquireSpinLock(&Pdo->EjectLock, &Irql);
+    Pdo->EjectRequested = TRUE;
+    KeReleaseSpinLock(&Pdo->EjectLock, Irql);
+}
+
+static FORCEINLINE BOOLEAN
+__PdoClearEjectRequested(
+    IN  PXENVIF_PDO Pdo
+    )
+{
+    KIRQL           Irql;
+    BOOLEAN         EjectRequested;
+
+    KeAcquireSpinLock(&Pdo->EjectLock, &Irql);
+    EjectRequested = Pdo->EjectRequested;
+    Pdo->EjectRequested = FALSE;
+    KeReleaseSpinLock(&Pdo->EjectLock, Irql);
+
+    return EjectRequested;
+}
+
+static FORCEINLINE BOOLEAN
+__PdoIsEjectRequested(
+    IN  PXENVIF_PDO Pdo
+    )
+{
+    KIRQL           Irql;
+    BOOLEAN         EjectRequested;
+
+    KeAcquireSpinLock(&Pdo->EjectLock, &Irql);
+    EjectRequested = Pdo->EjectRequested;
+    KeReleaseSpinLock(&Pdo->EjectLock, Irql);
+
+    return EjectRequested;
+}
+
+BOOLEAN
+PdoIsEjectRequested(
+    IN  PXENVIF_PDO Pdo
+    )
+{
+    return __PdoIsEjectRequested(Pdo);
 }
 
 static FORCEINLINE VOID
@@ -810,6 +863,7 @@ PdoRequestEject(
     IN  PXENVIF_PDO Pdo
     )
 {
+    __PdoSetEjectRequested(Pdo);
     IoRequestDeviceEject(__PdoGetDeviceObject(Pdo));
 }
 
@@ -1237,7 +1291,8 @@ PdoCancelRemoveDevice(
 {
     NTSTATUS        status;
 
-    FrontendRemoveFailed(__PdoGetFrontend(Pdo));
+    if (__PdoClearEjectRequested(Pdo))
+        FrontendEjectFailed(__PdoGetFrontend(Pdo));
 
     __PdoRestoreDevicePnpState(Pdo, RemovePending);
 
@@ -1869,6 +1924,8 @@ PdoEject(
 
     Trace("%s\n", __PdoGetName(Pdo));
 
+    __PdoClearEjectRequested(Pdo);
+
     FdoAcquireMutex(Fdo);
 
     __PdoSetDevicePnpState(Pdo, Deleted);
@@ -2418,6 +2475,8 @@ PdoCreate(
 
     Dx->Pdo = Pdo;
     PhysicalDeviceObject->Flags &= ~DO_DEVICE_INITIALIZING;
+
+    KeInitializeSpinLock(&Pdo->EjectLock);
 
     __PdoLink(Pdo, Fdo);
 

@@ -62,7 +62,7 @@ PdoIsMissing(
     );
 
 extern BOOLEAN
-PdoIsEjected(
+PdoIsEjectRequested(
     IN  PXENVIF_PDO Pdo
     );
 
