@@ -418,13 +418,13 @@ FrontendEject(
 {
     PXENVIF_FRONTEND    Frontend = Context;
     PKEVENT             Event;
+    KIRQL               Irql;
 
     Trace("%s: ====>\n", __FrontendGetPath(Frontend));
 
     Event = ThreadGetEvent(Self);
 
     for (;;) {
-        KIRQL               Irql;
         BOOLEAN             Online;
         XenbusState         State;
         ULONG               Attempt;
@@ -530,6 +530,10 @@ abort:
 
         KeReleaseSpinLock(&Frontend->Lock, Irql);
     }
+
+    KeAcquireSpinLock(&Frontend->Lock, &Irql);
+    Frontend->EjectRequested = FALSE;
+    KeReleaseSpinLock(&Frontend->Lock, Irql);
 
     Trace("%s: <====\n", __FrontendGetPath(Frontend));
 
@@ -801,14 +805,18 @@ __FrontendWaitForStateChange(
                        Path,
                        "state",
                        &Buffer);
-        if (!NT_SUCCESS(status))
-            goto fail2;
+        if (!NT_SUCCESS(status)) {
+            if (status != STATUS_OBJECT_NAME_NOT_FOUND)
+                goto fail2;
 
-        *State = (XenbusState)strtol(Buffer, NULL, 10);
+            *State = XenbusStateUnknown;
+        } else {
+            *State = (XenbusState)strtol(Buffer, NULL, 10);
 
-        STORE(Free,
-              Frontend->StoreInterface,
-              Buffer);
+            STORE(Free,
+                  Frontend->StoreInterface,
+                  Buffer);
+        }
 
         KeQuerySystemTime(&Now);
 
