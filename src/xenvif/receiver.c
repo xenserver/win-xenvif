@@ -1459,9 +1459,15 @@ __RingPreparePacket(
                                  MmGetMdlPfnArray(Mdl)[0],
                                  FALSE,
                                  &Tag->Handle);
-    ASSERT(NT_SUCCESS(status));
+    if (NT_SUCCESS(status))
+        goto fail1;
 
     return Tag;
+
+fail1:
+    __RingPutTag(Ring, Tag);
+    
+    return NULL;
 }
 
 static VOID
@@ -1548,7 +1554,11 @@ RingFill(
         }
 
         Tag = __RingPreparePacket(Ring, &Packet->Mdl);
-        ASSERT(Tag != NULL);
+        
+        if (Tag == NULL) {
+            __RingPutPacket(Ring, Packet, TRUE);
+            break;
+        }
 
         req = RING_GET_REQUEST(&Ring->Front, req_prod);
         req_prod++;

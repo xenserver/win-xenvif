@@ -773,7 +773,8 @@ __RingCopyPayload(
                                      Pfn,
                                      TRUE,
                                      &Tag->Handle);
-        ASSERT(NT_SUCCESS(status));
+        if (!NT_SUCCESS(status))
+            goto fail2;
 
         Tag->Offset = 0;
         Tag->Length = Mdl->ByteCount;
@@ -787,6 +788,26 @@ __RingCopyPayload(
 
     Ring->PacketsCopied++;
     return STATUS_SUCCESS;
+
+fail2:
+    Error("fail2\n");
+
+    ASSERT3U(Tag->Type, ==, TAG_BUFFER);
+    ASSERT3P(Buffer, ==, Tag->Context);
+    Tag->Context = NULL;
+    Tag->Type = TAG_TYPE_INVALID;
+
+    ASSERT(Buffer->Reference != 0);
+    --Buffer->Reference;
+
+    __TransmitterPutTag(Ring, Tag);
+
+    ASSERT3P(Buffer->Context, ==, Packet);
+    Buffer->Context = NULL;        
+
+    DECREMENT_PACKET_REFERENCE(Packet);
+
+    __TransmitterPutBuffer(Ring, Buffer);
 
 fail1:
     Error("fail1 (%08x)\n", status);
@@ -845,6 +866,7 @@ __RingGrantPayload(
     PMDL                        Mdl;
     ULONG                       Offset;
     ULONG                       Length;
+    PTRANSMITTER_TAG            Tag;
     NTSTATUS                    status;
 
     Transmitter = Ring->Transmitter;
@@ -871,7 +893,6 @@ __RingGrantPayload(
         MdlLength = __min(MdlByteCount, Length);
 
         while (MdlLength != 0) {
-            PTRANSMITTER_TAG    Tag;
             PFN_NUMBER          Pfn;
             ULONG               PageOffset;
             ULONG               PageLength;
@@ -890,7 +911,8 @@ __RingGrantPayload(
                                          Pfn,
                                          TRUE,
                                          &Tag->Handle);
-            ASSERT(NT_SUCCESS(status));
+            if (!NT_SUCCESS(status))
+                goto fail1;
 
             Tag->Offset = PageOffset;
             Tag->Length = PageLength;
@@ -899,10 +921,12 @@ __RingGrantPayload(
             InsertTailList(&State->List, &Tag->ListEntry);
             State->Count++;
 
+            Tag = NULL;
+
             // Bounce the packet if it is too highly fragmented
             status = STATUS_BUFFER_OVERFLOW;
             if (State->Count > MAX_SKB_FRAGS + 1)
-                goto fail1;
+                goto fail2;
 
             MdlOffset += PageLength;
 
@@ -920,13 +944,22 @@ __RingGrantPayload(
     Ring->PacketsGranted++;
     return STATUS_SUCCESS;
 
+fail2:
 fail1:
     if (status != STATUS_BUFFER_OVERFLOW)
         Error("fail1 (%08x)\n", status);
 
+    if (Tag != NULL) {
+        Tag->Context = NULL;
+        Tag->Type = TAG_TYPE_INVALID;
+
+        DECREMENT_PACKET_REFERENCE(Packet);
+
+        __TransmitterPutTag(Ring, Tag);
+    }
+
     while (PACKET_REFERENCE(Packet) != 1) {
         PLIST_ENTRY         ListEntry;
-        PTRANSMITTER_TAG    Tag;
 
         ASSERT(State->Count != 0);
         --State->Count;
@@ -1021,7 +1054,8 @@ __RingPrepareHeader(
                                  Pfn,
                                  TRUE,
                                  &Tag->Handle);
-    ASSERT(NT_SUCCESS(status));
+    if (!NT_SUCCESS(status))
+        goto fail3;
 
     Tag->Offset = 0;
     Tag->Length = Mdl->ByteCount + Payload->Length;
@@ -1165,7 +1199,7 @@ __RingPrepareHeader(
         
         if (Tag->Length > MaximumFrameSize) {
             status = STATUS_INVALID_PARAMETER;
-            goto fail3;
+            goto fail4;
         }
     }
 
@@ -1203,9 +1237,9 @@ __RingPrepareHeader(
 
     return STATUS_SUCCESS;
 
-fail3:
+fail4:
     if (status != STATUS_INVALID_PARAMETER)
-        Error("fail2\n");
+        Error("fail4\n");
 
     ASSERT(State->Count != 0);
     --State->Count;
@@ -1219,6 +1253,10 @@ fail3:
     GranterRevokeAccess(FrontendGetGranter(Frontend),
                         Tag->Handle);
     Tag->Handle = NULL;
+
+fail3:
+    if (status != STATUS_INVALID_PARAMETER)
+        Error("fail3\n");
 
     Tag->Context = NULL;
     Tag->Type = TAG_TYPE_INVALID;
@@ -1608,7 +1646,8 @@ __RingPrepareGratuitousArp(
                                  Pfn,
                                  TRUE,
                                  &Tag->Handle);
-    ASSERT(NT_SUCCESS(status));
+    if (!NT_SUCCESS(status))
+        goto fail2;
 
     Tag->Offset = 0;
     Tag->Length = Mdl->ByteCount;
@@ -1620,6 +1659,21 @@ __RingPrepareGratuitousArp(
     State->Count++;
 
     return STATUS_SUCCESS;
+
+fail2:
+    Error("fail2\n");
+
+    ASSERT3U(Tag->Type, ==, TAG_BUFFER);
+    ASSERT3P(Buffer, ==, Tag->Context);
+    Tag->Context = NULL;
+    Tag->Type = TAG_TYPE_INVALID;
+
+    ASSERT(Buffer->Reference != 0);
+    --Buffer->Reference;
+
+    __TransmitterPutTag(Ring, Tag);
+
+    __TransmitterPutBuffer(Ring, Buffer);
 
 fail1:
     Error("fail1 (%08x)\n", status);
@@ -1754,7 +1808,8 @@ __RingPrepareNeighbourAdvertisement(
                                  Pfn,
                                  TRUE,
                                  &Tag->Handle);
-    ASSERT(NT_SUCCESS(status));
+    if (!NT_SUCCESS(status))
+        goto fail2;
 
     Tag->Offset = 0;
     Tag->Length = Mdl->ByteCount;
@@ -1766,6 +1821,21 @@ __RingPrepareNeighbourAdvertisement(
     State->Count++;
 
     return STATUS_SUCCESS;
+
+fail2:
+    Error("fail2\n");
+
+    ASSERT3U(Tag->Type, ==, TAG_BUFFER);
+    ASSERT3P(Buffer, ==, Tag->Context);
+    Tag->Context = NULL;
+    Tag->Type = TAG_TYPE_INVALID;
+
+    ASSERT(Buffer->Reference != 0);
+    --Buffer->Reference;
+
+    __TransmitterPutTag(Ring, Tag);
+
+    __TransmitterPutBuffer(Ring, Buffer);
 
 fail1:
     Error("fail1 (%08x)\n", status);
