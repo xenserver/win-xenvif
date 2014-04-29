@@ -1459,12 +1459,16 @@ __RingPreparePacket(
                                  MmGetMdlPfnArray(Mdl)[0],
                                  FALSE,
                                  &Tag->Handle);
-    if (NT_SUCCESS(status))
+    if (!NT_SUCCESS(status))
         goto fail1;
 
     return Tag;
 
 fail1:
+    Error("fail1 (%08x)\n", status);
+
+    Tag->Context = NULL;
+
     __RingPutTag(Ring, Tag);
     
     return NULL;
