@@ -1431,6 +1431,7 @@ FrontendSetState(
                     else
                         Frontend->State = FRONTEND_STATE_INVALID;
 
+                    __FrontendDisconnect(Frontend);
                     Failed = TRUE;
                 }
                 break;

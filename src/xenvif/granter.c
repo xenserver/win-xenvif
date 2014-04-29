@@ -151,14 +151,16 @@ GranterPermitAccess(
     return STATUS_SUCCESS;
 
 fail2:
-    Error("fail2\n");
+    if (status != STATUS_INSUFFICIENT_RESOURCES)
+        Error("fail2\n");
 
     GNTTAB(Put,
            Granter->GnttabInterface,
            Descriptor);
 
 fail1:
-    Error("fail1 (%08x)\n", status);
+    if (status != STATUS_INSUFFICIENT_RESOURCES)
+        Error("fail1 (%08x)\n", status);
 
     return status;
 }

@@ -790,7 +790,8 @@ __RingCopyPayload(
     return STATUS_SUCCESS;
 
 fail2:
-    Error("fail2\n");
+    if (status != STATUS_INSUFFICIENT_RESOURCES)
+        Error("fail2\n");
 
     ASSERT3U(Tag->Type, ==, TAG_BUFFER);
     ASSERT3P(Buffer, ==, Tag->Context);
@@ -810,7 +811,8 @@ fail2:
     __TransmitterPutBuffer(Ring, Buffer);
 
 fail1:
-    Error("fail1 (%08x)\n", status);
+    if (status != STATUS_INSUFFICIENT_RESOURCES)
+        Error("fail1 (%08x)\n", status);
 
     while (PACKET_REFERENCE(Packet) != 1) {
         PLIST_ENTRY         ListEntry;
@@ -946,7 +948,8 @@ __RingGrantPayload(
 
 fail2:
 fail1:
-    if (status != STATUS_BUFFER_OVERFLOW)
+    if (status != STATUS_INSUFFICIENT_RESOURCES &&
+        status != STATUS_BUFFER_OVERFLOW)
         Error("fail1 (%08x)\n", status);
 
     if (Tag != NULL) {
@@ -1255,7 +1258,8 @@ fail4:
     Tag->Handle = NULL;
 
 fail3:
-    if (status != STATUS_INVALID_PARAMETER)
+    if (status != STATUS_INSUFFICIENT_RESOURCES &&
+        status != STATUS_INVALID_PARAMETER)
         Error("fail3\n");
 
     Tag->Context = NULL;
@@ -1269,7 +1273,8 @@ fail3:
     Mdl->ByteCount = 0;
 
 fail2:
-    if (status != STATUS_INVALID_PARAMETER)
+    if (status != STATUS_INSUFFICIENT_RESOURCES &&
+        status != STATUS_INVALID_PARAMETER)
         Error("fail2\n");
 
     DECREMENT_PACKET_REFERENCE(Packet);
@@ -1278,7 +1283,8 @@ fail2:
     __TransmitterPutBuffer(Ring, Buffer);
 
 fail1:
-    if (status != STATUS_INVALID_PARAMETER)
+    if (status != STATUS_INSUFFICIENT_RESOURCES &&
+        status != STATUS_INVALID_PARAMETER)
         Error("fail1 (%08x)\n", status);
 
     ASSERT3U(PACKET_REFERENCE(Packet), ==, 0);
@@ -1482,13 +1488,15 @@ __RingPreparePacket(
     return STATUS_SUCCESS;
 
 fail2:
-    if (status != STATUS_INVALID_PARAMETER)
+    if (status != STATUS_INSUFFICIENT_RESOURCES &&
+        status != STATUS_INVALID_PARAMETER)
         Error("fail2\n");
 
     __RingUnprepareTags(Ring);
 
 fail1:
-    if (status != STATUS_INVALID_PARAMETER)
+    if (status != STATUS_INSUFFICIENT_RESOURCES &&
+        status != STATUS_INVALID_PARAMETER)
         Error("fail1 (%08x)\n", status);
 
     State->StartVa = NULL;
@@ -1661,7 +1669,8 @@ __RingPrepareGratuitousArp(
     return STATUS_SUCCESS;
 
 fail2:
-    Error("fail2\n");
+    if (status != STATUS_INSUFFICIENT_RESOURCES)
+        Error("fail2\n");
 
     ASSERT3U(Tag->Type, ==, TAG_BUFFER);
     ASSERT3P(Buffer, ==, Tag->Context);
@@ -1676,7 +1685,8 @@ fail2:
     __TransmitterPutBuffer(Ring, Buffer);
 
 fail1:
-    Error("fail1 (%08x)\n", status);
+    if (status != STATUS_INSUFFICIENT_RESOURCES)
+        Error("fail1 (%08x)\n", status);
 
     ASSERT(IsZeroMemory(&Ring->State, sizeof (TRANSMITTER_STATE)));
 
@@ -1823,7 +1833,8 @@ __RingPrepareNeighbourAdvertisement(
     return STATUS_SUCCESS;
 
 fail2:
-    Error("fail2\n");
+    if (status != STATUS_INSUFFICIENT_RESOURCES)
+        Error("fail2\n");
 
     ASSERT3U(Tag->Type, ==, TAG_BUFFER);
     ASSERT3P(Buffer, ==, Tag->Context);
@@ -1838,7 +1849,8 @@ fail2:
     __TransmitterPutBuffer(Ring, Buffer);
 
 fail1:
-    Error("fail1 (%08x)\n", status);
+    if (status != STATUS_INSUFFICIENT_RESOURCES)
+        Error("fail1 (%08x)\n", status);
 
     ASSERT(IsZeroMemory(&Ring->State, sizeof (TRANSMITTER_STATE)));
 

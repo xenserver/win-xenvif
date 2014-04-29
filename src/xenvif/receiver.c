@@ -1465,7 +1465,8 @@ __RingPreparePacket(
     return Tag;
 
 fail1:
-    Error("fail1 (%08x)\n", status);
+    if (status != STATUS_INSUFFICIENT_RESOURCES)
+        Error("fail1 (%08x)\n", status);
 
     Tag->Context = NULL;
 
