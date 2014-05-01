@@ -180,6 +180,7 @@ NetioInitialize(
     if (BufferSize == 0)
         goto fail2;
 
+again:
     Count = BufferSize / sizeof (AUX_MODULE_EXTENDED_INFO);
     QueryInfo = __NetioAllocate(sizeof (AUX_MODULE_EXTENDED_INFO) * Count);
 
@@ -190,8 +191,13 @@ NetioInitialize(
     status = AuxKlibQueryModuleInformation(&BufferSize,
                                            sizeof (AUX_MODULE_EXTENDED_INFO),
                                            QueryInfo);
-    if (!NT_SUCCESS(status))
-        goto fail4;
+    if (!NT_SUCCESS(status)) {
+        if (status != STATUS_BUFFER_TOO_SMALL)
+            goto fail4;
+
+        __NetioFree(QueryInfo);
+        goto again;
+    }
 
     for (Index = 0; Index < Count; Index++) {
         PCHAR   Name;
@@ -210,6 +216,8 @@ found:
     status = __NetioLink(QueryInfo[Index].BasicInfo.ImageBase);
     if (!NT_SUCCESS(status))
         goto fail6;
+
+    __NetioFree(QueryInfo);
 
 done:
     ASSERT(NetioGetUnicastIpAddressTable != NULL);
