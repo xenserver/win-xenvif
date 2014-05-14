@@ -219,6 +219,12 @@ found:
 
     __NetioFree(QueryInfo);
 
+    if (NetioGetUnicastIpAddressTable == NULL ||
+        NetioNotifyUnicastIpAddressChange == NULL ||
+        NetioCancelMibChangeNotify2 == NULL ||
+        NetioFreeMibTable == NULL)
+        goto retry;
+
 done:
     ASSERT(NetioGetUnicastIpAddressTable != NULL);
     ASSERT(NetioNotifyUnicastIpAddressChange != NULL);
@@ -246,6 +252,16 @@ fail2:
 
 fail1:
     Error("fail1 (%08x)\n", status);
+
+    (VOID) InterlockedDecrement(&NetioReferences);
+
+    return status;
+
+retry:
+    NetioGetUnicastIpAddressTable = NULL;
+    NetioNotifyUnicastIpAddressChange = NULL;
+    NetioCancelMibChangeNotify2 = NULL;
+    NetioFreeMibTable = NULL;
 
     (VOID) InterlockedDecrement(&NetioReferences);
 
