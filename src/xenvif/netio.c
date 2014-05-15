@@ -265,7 +265,7 @@ retry:
 
     (VOID) InterlockedDecrement(&NetioReferences);
 
-    return status;
+    return STATUS_RETRY;
 }
 
 VOID
