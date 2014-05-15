@@ -38,7 +38,7 @@
 #include "dbg_print.h"
 #include "assert.h"
 
-LONG    NetioReferences;
+LONG    NetioReferences = 0;
 PVOID   NetioGetUnicastIpAddressTable;
 PVOID   NetioNotifyUnicastIpAddressChange;
 PVOID   NetioCancelMibChangeNotify2;
