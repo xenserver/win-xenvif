@@ -38,7 +38,7 @@
 #include "dbg_print.h"
 #include "assert.h"
 
-LONG    NetioReferences;
+LONG    NetioReferences = 0;
 PVOID   NetioGetUnicastIpAddressTable;
 PVOID   NetioNotifyUnicastIpAddressChange;
 PVOID   NetioCancelMibChangeNotify2;
@@ -219,6 +219,12 @@ found:
 
     __NetioFree(QueryInfo);
 
+    if (NetioGetUnicastIpAddressTable == NULL ||
+        NetioNotifyUnicastIpAddressChange == NULL ||
+        NetioCancelMibChangeNotify2 == NULL ||
+        NetioFreeMibTable == NULL)
+        goto retry;
+
 done:
     ASSERT(NetioGetUnicastIpAddressTable != NULL);
     ASSERT(NetioNotifyUnicastIpAddressChange != NULL);
@@ -250,6 +256,16 @@ fail1:
     (VOID) InterlockedDecrement(&NetioReferences);
 
     return status;
+
+retry:
+    NetioGetUnicastIpAddressTable = NULL;
+    NetioNotifyUnicastIpAddressChange = NULL;
+    NetioCancelMibChangeNotify2 = NULL;
+    NetioFreeMibTable = NULL;
+
+    (VOID) InterlockedDecrement(&NetioReferences);
+
+    return STATUS_RETRY;
 }
 
 VOID
