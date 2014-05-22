@@ -36,6 +36,7 @@
 #include "registry.h"
 #include "fdo.h"
 #include "pdo.h"
+#include "netio.h"
 #include "receiver.h"
 #include "driver.h"
 #include "dbg_print.h"
@@ -335,6 +336,8 @@ DriverEntry(
          DAY,
          MONTH,
          YEAR);
+
+    NetioInitializeMutex();    
 
     status = RegistryInitialize(RegistryPath);
     if (!NT_SUCCESS(status))
