@@ -37,6 +37,9 @@
 #include "netio.h"
 #include "dbg_print.h"
 #include "assert.h"
+#include "mutex.h"
+
+static  MUTEX   NetioMutex;
 
 LONG    NetioReferences;
 PVOID   NetioGetUnicastIpAddressTable;
@@ -151,6 +154,14 @@ fail1:
 #undef  MK_PTR
 }
 
+VOID
+NetioInitializeMutex(
+    VOID
+    )
+{
+    InitializeMutex(&NetioMutex);
+}
+
 NTSTATUS
 NetioInitialize(
     VOID
@@ -162,6 +173,8 @@ NetioInitialize(
     PAUX_MODULE_EXTENDED_INFO   QueryInfo;
     ULONG                       Index;
     NTSTATUS                    status;
+
+    AcquireMutex(&NetioMutex);
 
     References = InterlockedIncrement(&NetioReferences);
 
@@ -225,6 +238,8 @@ done:
     ASSERT(NetioCancelMibChangeNotify2 != NULL);
     ASSERT(NetioFreeMibTable != NULL);
 
+    ReleaseMutex(&NetioMutex);
+
     return STATUS_SUCCESS;
 
 fail6:
@@ -248,6 +263,7 @@ fail1:
     Error("fail1 (%08x)\n", status);
 
     (VOID) InterlockedDecrement(&NetioReferences);
+    ReleaseMutex(&NetioMutex);
 
     return status;
 }

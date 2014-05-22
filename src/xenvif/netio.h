@@ -39,6 +39,11 @@ extern  PVOID   NetioNotifyUnicastIpAddressChange;
 extern  PVOID   NetioCancelMibChangeNotify2;
 extern  PVOID   NetioFreeMibTable;
 
+extern VOID
+NetioInitializeMutex(
+    VOID
+    );
+
 extern NTSTATUS
 NetioInitialize(
     VOID
