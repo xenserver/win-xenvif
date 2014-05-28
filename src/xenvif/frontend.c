@@ -535,6 +535,60 @@ abort:
 }
 
 static FORCEINLINE NTSTATUS
+__FrontendInsertAddress(
+    IN OUT  PSOCKADDR_INET      *AddressTable,
+    IN      const SOCKADDR_INET *Address,
+    IN OUT  PULONG              AddressCount
+    )
+{
+    ULONG                       Index;
+    PSOCKADDR_INET              Table;
+    NTSTATUS                    status;
+
+    for (Index = 0; Index < *AddressCount; Index++) {
+        if ((*AddressTable)[Index].si_family != Address->si_family)
+            continue;
+
+        if (Address->si_family == AF_INET) {
+            if (RtlCompareMemory(&Address->Ipv4.sin_addr.s_addr,
+                                 &(*AddressTable)[Index].Ipv4.sin_addr.s_addr,
+                                 IPV4_ADDRESS_LENGTH) == IPV4_ADDRESS_LENGTH)
+                goto done;
+        } else {
+            ASSERT3U(Address->si_family, ==, AF_INET6);
+
+            if (RtlCompareMemory(&Address->Ipv6.sin6_addr.s6_addr,
+                                 &(*AddressTable)[Index].Ipv6.sin6_addr.s6_addr,
+                                 IPV6_ADDRESS_LENGTH) == IPV6_ADDRESS_LENGTH)
+                goto done;
+        }
+    }
+
+    // We have an address we've not seen before so grow the table
+    Table = __FrontendAllocate(sizeof (SOCKADDR_INET) * (*AddressCount + 1));
+
+    status = STATUS_NO_MEMORY;
+    if (Table == NULL)
+        goto fail1;
+
+    RtlCopyMemory(Table, *AddressTable, sizeof (SOCKADDR_INET) * *AddressCount);
+    Table[(*AddressCount)++] = *Address;
+
+    if (*AddressTable != NULL)
+        __FrontendFree(*AddressTable);
+
+    *AddressTable = Table;
+
+done:
+    return STATUS_SUCCESS;
+
+fail1:
+    Error("fail1 (%08x)\n", status);
+
+    return status;
+}
+
+static FORCEINLINE NTSTATUS
 __FrontendGetAddressTable(
     IN  PXENVIF_FRONTEND            Frontend,
     OUT PSOCKADDR_INET              *AddressTable,
@@ -544,16 +598,25 @@ __FrontendGetAddressTable(
     PNET_LUID                       NetLuid;
     ULONG                           Index;
     PMIB_UNICASTIPADDRESS_TABLE     Table;
-    ULONG                           Count;
+    KIRQL                           Irql;
     NTSTATUS                        status;
-
-    NetLuid = __FrontendGetNetLuid(Frontend);
 
     status = GetUnicastIpAddressTable(AF_UNSPEC, &Table);
     if (!NT_SUCCESS(status))
         goto fail1;
 
+    *AddressTable = NULL;
     *AddressCount = 0;
+
+    KeAcquireSpinLock(&Frontend->Lock, &Irql);
+
+    // The NetLuid is not valid until we are in at least the connected state
+    if (Frontend->State != FRONTEND_CONNECTED &&
+        Frontend->State != FRONTEND_ENABLED)
+        goto done;
+
+    NetLuid = __FrontendGetNetLuid(Frontend);
+
     for (Index = 0; Index < Table->NumEntries; Index++) {
         PMIB_UNICASTIPADDRESS_ROW   Row = &Table->Table[Index];
 
@@ -567,49 +630,25 @@ __FrontendGetAddressTable(
             Row->Address.si_family != AF_INET6)
             continue;
 
-        (*AddressCount)++;
+        status = __FrontendInsertAddress(AddressTable, &Row->Address, AddressCount);
+        if (!NT_SUCCESS(status))
+            goto fail2;
     }
-
-    *AddressTable = NULL;
-
-    if (*AddressCount == 0)
-        goto done;
-
-    *AddressTable = __FrontendAllocate(sizeof (SOCKADDR_INET) * *AddressCount);
-
-    status = STATUS_NO_MEMORY;
-    if (*AddressTable == NULL)
-        goto fail2;
-
-    Count = 0;
-
-    for (Index = 0; Index < Table->NumEntries; Index++) {
-        PMIB_UNICASTIPADDRESS_ROW   Row = &Table->Table[Index];
-
-        if (Row->InterfaceLuid.Info.IfType != NetLuid->Info.IfType)
-            continue;
-
-        if (Row->InterfaceLuid.Info.NetLuidIndex != NetLuid->Info.NetLuidIndex)
-            continue;
-
-        switch (Row->Address.si_family) {
-        case AF_INET:
-        case AF_INET6:
-            (*AddressTable)[Count++] = Row->Address;
-            break;
-        default:
-            break;
-        }
-    }
-    ASSERT3U(Count, ==, *AddressCount);
 
 done:
+    KeReleaseSpinLock(&Frontend->Lock, Irql);
+
     (VOID) FreeMibTable(Table);
 
     return STATUS_SUCCESS;
 
 fail2:
     Error("fail2\n");
+
+    if (*AddressTable != NULL)
+        __FrontendFree(*AddressTable);
+
+    KeReleaseSpinLock(&Frontend->Lock, Irql);
 
     (VOID) FreeMibTable(Table);
 
@@ -1189,6 +1228,8 @@ abort:
     status = STATUS_UNSUCCESSFUL;
     if (State != XenbusStateConnected)
         goto fail10;
+
+    ThreadWake(Frontend->MibThread);
 
     Trace("<====\n");
     return STATUS_SUCCESS;
