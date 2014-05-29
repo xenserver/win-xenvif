@@ -36,6 +36,7 @@
 #include <evtchn_interface.h>
 #include <debug_interface.h>
 #include <store_interface.h>
+#include <cache_interface.h>
 #include <gnttab_interface.h>
 #include <suspend_interface.h>
 #include <emulated_interface.h>
@@ -142,6 +143,11 @@ FdoGetDebugInterface(
 
 extern PXENBUS_STORE_INTERFACE
 FdoGetStoreInterface(
+    IN  PXENVIF_FDO     Fdo
+    );
+
+extern PXENBUS_CACHE_INTERFACE
+FdoGetCacheInterface(
     IN  PXENVIF_FDO     Fdo
     );
 

@@ -36,6 +36,7 @@
 #include <xen.h>
 #include <debug_interface.h>
 #include <store_interface.h>
+#include <cache_interface.h>
 
 // This should be in public/io/netif.h
 #define _NETRXF_gso_prefix     (4)
@@ -46,7 +47,6 @@
 #include "pdo.h"
 #include "registry.h"
 #include "frontend.h"
-#include "pool.h"
 #include "checksum.h"
 #include "parse.h"
 #include "granter.h"
@@ -58,6 +58,8 @@
 #include "driver.h"
 #include "dbg_print.h"
 #include "assert.h"
+
+#define MAXNAMELEN  128
 
 #define RECEIVER_POOL    'ECER'
 
@@ -108,7 +110,7 @@ typedef struct _RECEIVER_RING {
     PXENVIF_RECEIVER                    Receiver;
     LIST_ENTRY                          ListEntry;
     KSPIN_LOCK                          Lock;
-    PXENVIF_POOL                        PacketPool;
+    PXENBUS_CACHE                       PacketCache;
     PMDL                                Mdl;
     netif_rx_front_ring_t               Front;
     netif_rx_sring_t                    *Shared;
@@ -147,6 +149,7 @@ struct _XENVIF_RECEIVER {
 
     PXENBUS_DEBUG_INTERFACE     DebugInterface;
     PXENBUS_STORE_INTERFACE     StoreInterface;
+    PXENBUS_CACHE_INTERFACE     CacheInterface;
     PXENVIF_VIF_INTERFACE       VifInterface;
 
     PXENBUS_DEBUG_CALLBACK      DebugCallback;
@@ -242,9 +245,15 @@ __RingGetPacket(
     IN  BOOLEAN             Locked
     )
 {
+    PXENVIF_RECEIVER        Receiver;
     PXENVIF_RECEIVER_PACKET Packet;
 
-    Packet = PoolGet(Ring->PacketPool, Locked);
+    Receiver = Ring->Receiver;
+
+    Packet = CACHE(Get,
+                   Receiver->CacheInterface,
+                   Ring->PacketCache,
+                   Locked);
 
     ASSERT(Packet == NULL || IsZeroMemory(Packet, FIELD_OFFSET(XENVIF_RECEIVER_PACKET, Mdl)));
 
@@ -258,7 +267,10 @@ __RingPutPacket(
     IN  BOOLEAN                 Locked
     )
 {
+    PXENVIF_RECEIVER            Receiver;
     PMDL                        Mdl = &Packet->Mdl;
+
+    Receiver = Ring->Receiver;
 
     RtlZeroMemory(Packet, FIELD_OFFSET(XENVIF_RECEIVER_PACKET, Mdl));
 
@@ -267,7 +279,11 @@ __RingPutPacket(
     Mdl->ByteCount = 0;
     ASSERT3P(Mdl->Next, ==, NULL);
 
-    PoolPut(Ring->PacketPool, Packet, Locked);
+    CACHE(Put,
+          Receiver->CacheInterface,
+          Ring->PacketCache,
+          Packet,
+          Locked);
 }
 
 static FORCEINLINE PMDL
@@ -1675,10 +1691,6 @@ __RingDebugCallback(
     )
 {
     PXENVIF_RECEIVER    Receiver;
-    ULONG               Allocated;
-    ULONG               MaximumAllocated;
-    ULONG               Count;
-    ULONG               MinimumCount;
 
     Receiver = Ring->Receiver;
 
@@ -1689,26 +1701,6 @@ __RingDebugCallback(
           Ring,
           (Ring->Enabled) ? "ENABLED" : "DISABLED",
           (__RingIsStopped(Ring)) ? "STOPPED" : "RUNNING");
-
-    PoolGetStatistics(Ring->PacketPool,
-                      &Allocated,
-                      &MaximumAllocated,
-                      &Count,
-                      &MinimumCount);
-
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "PACKET POOL: Allocated = %u (Maximum = %u)\n",
-          Allocated,
-          MaximumAllocated);
-
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "PACKET POOL: Count = %u (Minimum = %u)\n",
-          Count,
-          MinimumCount);
 
     // Dump front ring
     DEBUG(Printf,
@@ -2346,7 +2338,12 @@ __RingInitialize(
     OUT PRECEIVER_RING      *Ring
     )
 {
+    PXENVIF_FRONTEND        Frontend;
+    CHAR                    Name[MAXNAMELEN];
+    ULONG                   Index;
     NTSTATUS                status;
+
+    Frontend = Receiver->Frontend;
 
     *Ring = __ReceiverAllocate(sizeof (RECEIVER_RING));
 
@@ -2356,41 +2353,60 @@ __RingInitialize(
 
     KeInitializeSpinLock(&(*Ring)->Lock);
 
-    status = PoolInitialize("ReceiverPacket",
-                            sizeof (XENVIF_RECEIVER_PACKET),
-                            ReceiverPacketCtor,
-                            ReceiverPacketDtor,
-                            RingAcquireLock,
-                            RingReleaseLock,
-                            *Ring,
-                            &(*Ring)->PacketPool);
+    (*Ring)->Receiver = Receiver;
+
+    status = RtlStringCbPrintfA(Name,
+                                sizeof (Name),
+                                "%s_packet",
+                                FrontendGetPath(Frontend));
     if (!NT_SUCCESS(status))
         goto fail2;
 
-    InitializeListHead(&(*Ring)->PacketList);
+    for (Index = 0; Name[Index] != '\0'; Index++)
+        if (Name[Index] == '/')
+            Name[Index] = '_';
 
-    (*Ring)->Receiver = Receiver;
+    status = CACHE(Create,
+                   Receiver->CacheInterface,
+                   Name,
+                   sizeof (XENVIF_RECEIVER_PACKET),
+                   0,
+                   ReceiverPacketCtor,
+                   ReceiverPacketDtor,
+                   RingAcquireLock,
+                   RingReleaseLock,
+                   *Ring,
+                   &(*Ring)->PacketCache);
+    if (!NT_SUCCESS(status))
+        goto fail3;
+
+    InitializeListHead(&(*Ring)->PacketList);
 
     status = ThreadCreate(RingWatchdog,
                           *Ring,
                           &(*Ring)->Thread);
     if (!NT_SUCCESS(status))
-        goto fail3;
+        goto fail4;
 
     return STATUS_SUCCESS;
+
+fail4:
+    Error("fail4\n");
+
+    RtlZeroMemory(&(*Ring)->PacketList, sizeof (LIST_ENTRY));
+
+    CACHE(Destroy,
+          Receiver->CacheInterface,
+          (*Ring)->PacketCache);
+    (*Ring)->PacketCache = NULL;
 
 fail3:
     Error("fail3\n");
 
-    (*Ring)->Receiver = NULL;
-
-    RtlZeroMemory(&(*Ring)->PacketList, sizeof (LIST_ENTRY));
-
-    PoolTeardown((*Ring)->PacketPool);
-    (*Ring)->PacketPool = NULL;
-
 fail2:
     Error("fail2\n");
+
+    (*Ring)->Receiver = NULL;
 
     RtlZeroMemory(&(*Ring)->Lock, sizeof (KSPIN_LOCK));
 
@@ -2612,6 +2628,10 @@ __RingTeardown(
     IN  PRECEIVER_RING  Ring
     )
 {
+    PXENVIF_RECEIVER    Receiver;
+
+    Receiver = Ring->Receiver;
+
     Ring->OffloadOptions.Value = 0;
 
     RtlZeroMemory(&Ring->HeaderStatistics, sizeof (XENVIF_HEADER_STATISTICS));
@@ -2622,13 +2642,15 @@ __RingTeardown(
     ThreadJoin(Ring->Thread);
     Ring->Thread = NULL;
 
-    Ring->Receiver = NULL;
-
     ASSERT(IsListEmpty(&Ring->PacketList));
     RtlZeroMemory(&Ring->PacketList, sizeof (LIST_ENTRY));
 
-    PoolTeardown(Ring->PacketPool);
-    Ring->PacketPool = NULL;
+    CACHE(Destroy,
+          Receiver->CacheInterface,
+          Ring->PacketCache);
+    Ring->PacketCache = NULL;
+
+    Ring->Receiver = NULL;
 
     RtlZeroMemory(&Ring->Lock, sizeof (KSPIN_LOCK));
 
@@ -2787,6 +2809,12 @@ ReceiverInitialize(
     InitializeListHead(&(*Receiver)->List);
     KeInitializeEvent(&(*Receiver)->Event, NotificationEvent, FALSE);
 
+    (*Receiver)->CacheInterface = FrontendGetCacheInterface(Frontend);
+
+    CACHE(Acquire, (*Receiver)->CacheInterface);
+
+    (*Receiver)->Frontend = Frontend;
+
     Done = 0;
     while (Done < Count) {
         PRECEIVER_RING   Ring;
@@ -2798,8 +2826,6 @@ ReceiverInitialize(
         InsertTailList(&(*Receiver)->List, &Ring->ListEntry);
         Done++;
     }
-
-    (*Receiver)->Frontend = Frontend;
 
     return STATUS_SUCCESS;
 
@@ -2822,6 +2848,11 @@ fail2:
         --Done;
     }
     ASSERT3U(Done, ==, 0);
+
+    (*Receiver)->Frontend = NULL;
+
+    CACHE(Release, (*Receiver)->CacheInterface);
+    (*Receiver)->CacheInterface = NULL;
 
     RtlZeroMemory(&(*Receiver)->Event, sizeof (KEVENT));
     RtlZeroMemory(&(*Receiver)->List, sizeof (LIST_ENTRY));
@@ -3185,8 +3216,6 @@ ReceiverTeardown(
     Receiver->Loaned = 0;
     Receiver->Returned = 0;
 
-    Receiver->Frontend = NULL;
-
     while (!IsListEmpty(&Receiver->List)) {
         PLIST_ENTRY     ListEntry;
         PRECEIVER_RING  Ring;
@@ -3199,6 +3228,11 @@ ReceiverTeardown(
 
         __RingTeardown(Ring);
     }
+
+    Receiver->Frontend = NULL;
+
+    CACHE(Release, Receiver->CacheInterface);
+    Receiver->CacheInterface = NULL;
 
     RtlZeroMemory(&Receiver->Event, sizeof (KEVENT));
     RtlZeroMemory(&Receiver->List, sizeof (LIST_ENTRY));

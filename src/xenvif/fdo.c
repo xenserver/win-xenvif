@@ -97,6 +97,7 @@ struct _XENVIF_FDO {
     PXENBUS_EVTCHN_INTERFACE    EvtchnInterface;
     PXENBUS_DEBUG_INTERFACE     DebugInterface;
     PXENBUS_STORE_INTERFACE     StoreInterface;
+    PXENBUS_CACHE_INTERFACE     CacheInterface;
     PXENBUS_GNTTAB_INTERFACE    GnttabInterface;
     PXENBUS_SUSPEND_INTERFACE   SuspendInterface;
     PXENFILT_EMULATED_INTERFACE EmulatedInterface;
@@ -942,6 +943,14 @@ FdoGetStoreInterface(
     )
 {
     return Fdo->StoreInterface;
+}
+
+PXENBUS_CACHE_INTERFACE
+FdoGetCacheInterface(
+    IN  PXENVIF_FDO Fdo
+    )
+{
+    return Fdo->CacheInterface;
 }
 
 PXENBUS_GNTTAB_INTERFACE
@@ -2860,6 +2869,79 @@ fail1:
 }
 
 static NTSTATUS
+FdoQueryCacheInterface(
+    IN  PXENVIF_FDO     Fdo
+    )
+{
+    KEVENT              Event;
+    IO_STATUS_BLOCK     StatusBlock;
+    PIRP                Irp;
+    PIO_STACK_LOCATION  StackLocation;
+    INTERFACE           Interface;
+    NTSTATUS            status;
+
+    ASSERT3U(KeGetCurrentIrql(), ==, PASSIVE_LEVEL);
+
+    KeInitializeEvent(&Event, NotificationEvent, FALSE);
+    RtlZeroMemory(&StatusBlock, sizeof(IO_STATUS_BLOCK));
+    RtlZeroMemory(&Interface, sizeof(INTERFACE));
+
+    Irp = IoBuildSynchronousFsdRequest(IRP_MJ_PNP,
+                                       Fdo->LowerDeviceObject,
+                                       NULL,
+                                       0,
+                                       NULL,
+                                       &Event,
+                                       &StatusBlock);
+
+    status = STATUS_UNSUCCESSFUL;
+    if (Irp == NULL)
+        goto fail1;
+
+    StackLocation = IoGetNextIrpStackLocation(Irp);
+    StackLocation->MinorFunction = IRP_MN_QUERY_INTERFACE;
+
+    StackLocation->Parameters.QueryInterface.InterfaceType = &GUID_CACHE_INTERFACE;
+    StackLocation->Parameters.QueryInterface.Size = sizeof (INTERFACE);
+    StackLocation->Parameters.QueryInterface.Version = CACHE_INTERFACE_VERSION;
+    StackLocation->Parameters.QueryInterface.Interface = &Interface;
+    
+    Irp->IoStatus.Status = STATUS_NOT_SUPPORTED;
+
+    status = IoCallDriver(Fdo->LowerDeviceObject, Irp);
+    if (status == STATUS_PENDING) {
+        (VOID) KeWaitForSingleObject(&Event,
+                                     Executive,
+                                     KernelMode,
+                                     FALSE,
+                                     NULL);
+        status = StatusBlock.Status;
+    }
+
+    if (!NT_SUCCESS(status))
+        goto fail2;
+
+    status = STATUS_INVALID_PARAMETER;
+    if (Interface.Version != CACHE_INTERFACE_VERSION)
+        goto fail3;
+
+    Fdo->CacheInterface = Interface.Context;
+
+    return STATUS_SUCCESS;
+
+fail3:
+    Error("fail3\n");
+
+fail2:
+    Error("fail2\n");
+
+fail1:
+    Error("fail1 (%08x)\n", status);
+
+    return status;
+}
+
+static NTSTATUS
 FdoQueryGnttabInterface(
     IN  PXENVIF_FDO     Fdo
     )
@@ -3159,13 +3241,17 @@ FdoCreate(
     if (!NT_SUCCESS(status))
         goto fail9;
 
-    status = FdoQueryGnttabInterface(Fdo);
+    status = FdoQueryCacheInterface(Fdo);
     if (!NT_SUCCESS(status))
         goto fail10;
 
-    status = FdoQuerySuspendInterface(Fdo);
+    status = FdoQueryGnttabInterface(Fdo);
     if (!NT_SUCCESS(status))
         goto fail11;
+
+    status = FdoQuerySuspendInterface(Fdo);
+    if (!NT_SUCCESS(status))
+        goto fail12;
 
     status = FdoQueryEmulatedInterface(Fdo);
     ASSERT(IMPLY(!NT_SUCCESS(status),
@@ -3184,10 +3270,15 @@ FdoCreate(
 
     return STATUS_SUCCESS;
 
+fail12:
+    Error("fail12\n");
+
+    Fdo->GnttabInterface = NULL;
+
 fail11:
     Error("fail11\n");
 
-    Fdo->GnttabInterface = NULL;
+    Fdo->CacheInterface = NULL;
 
 fail10:
     Error("fail10\n");
@@ -3277,6 +3368,7 @@ FdoDestroy(
     Fdo->EmulatedInterface = NULL;
     Fdo->SuspendInterface = NULL;
     Fdo->GnttabInterface = NULL;
+    Fdo->CacheInterface = NULL;
     Fdo->StoreInterface = NULL;
     Fdo->DebugInterface = NULL;
     Fdo->EvtchnInterface = NULL;

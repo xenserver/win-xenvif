@@ -88,7 +88,6 @@
 		<ClCompile Include="../../src/xenvif/granter.c" />
 		<ClCompile Include="../../src/xenvif/parse.c" />
 		<ClCompile Include="../../src/xenvif/pdo.c" />
-		<ClCompile Include="../../src/xenvif/pool.c" />
 		<ClCompile Include="../../src/xenvif/receiver.c" />
 		<ClCompile Include="../../src/xenvif/registry.c" />
 		<ClCompile Include="../../src/xenvif/thread.c" />

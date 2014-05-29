@@ -169,6 +169,11 @@ FrontendGetStoreInterface(
     IN  PXENVIF_FRONTEND    Frontend
     );
 
+extern PXENBUS_CACHE_INTERFACE
+FrontendGetCacheInterface(
+    IN  PXENVIF_FRONTEND    Frontend
+    );
+
 extern PXENBUS_GNTTAB_INTERFACE
 FrontendGetGnttabInterface(
     IN  PXENVIF_FRONTEND    Frontend

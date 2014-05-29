@@ -36,13 +36,13 @@
 #include <xen.h>
 #include <debug_interface.h>
 #include <store_interface.h>
+#include <cache_interface.h>
 #include <gnttab_interface.h>
 
 #include "ethernet.h"
 #include "tcpip.h"
 #include "pdo.h"
 #include "frontend.h"
-#include "pool.h"
 #include "checksum.h"
 #include "parse.h"
 #include "transmitter.h"
@@ -58,6 +58,8 @@
 #ifndef XEN_NETIF_GSO_TYPE_TCPV6
 #define XEN_NETIF_GSO_TYPE_TCPV6    2
 #endif
+
+#define MAXNAMELEN  128
 
 #define TRANSMITTER_POOL    'NART'
 
@@ -119,7 +121,7 @@ typedef struct _TRANSMITTER_PACKET_LIST {
 typedef struct _TRANSMITTER_RING {
     PXENVIF_TRANSMITTER                     Transmitter;
     LIST_ENTRY                              ListEntry;
-    PXENVIF_POOL                            BufferPool;
+    PXENBUS_CACHE                           BufferCache;
     PMDL                                    Mdl;
     netif_tx_front_ring_t                   Front;
     netif_tx_sring_t                        *Shared;
@@ -166,6 +168,7 @@ struct _XENVIF_TRANSMITTER {
 
     PXENBUS_DEBUG_INTERFACE             DebugInterface;
     PXENBUS_STORE_INTERFACE             StoreInterface;
+    PXENBUS_CACHE_INTERFACE             CacheInterface;
     PXENVIF_VIF_INTERFACE               VifInterface;
 
     PXENBUS_DEBUG_CALLBACK              DebugCallback;
@@ -254,9 +257,15 @@ __TransmitterGetBuffer(
     IN  PTRANSMITTER_RING   Ring
     )
 {
+    PXENVIF_TRANSMITTER     Transmitter;
     PTRANSMITTER_BUFFER     Buffer;
 
-    Buffer = PoolGet(Ring->BufferPool, TRUE);
+    Transmitter = Ring->Transmitter;
+
+    Buffer = CACHE(Get,
+                   Transmitter->CacheInterface,
+                   Ring->BufferCache,
+                   TRUE);
 
     ASSERT(IMPLY(Buffer != NULL, Buffer->Mdl->ByteCount == 0));
 
@@ -269,12 +278,20 @@ __TransmitterPutBuffer(
     IN  PTRANSMITTER_BUFFER Buffer
     )
 {
+    PXENVIF_TRANSMITTER     Transmitter;
+
+    Transmitter = Ring->Transmitter;
+
     ASSERT3U(Buffer->Reference, ==, 0);
     ASSERT3P(Buffer->Context, ==, NULL);
 
     Buffer->Mdl->ByteCount = 0;
 
-    PoolPut(Ring->BufferPool, Buffer, TRUE);
+    CACHE(Put,
+          Transmitter->CacheInterface,
+          Ring->BufferCache,
+          Buffer,
+          TRUE);
 }
 
 static FORCEINLINE PTRANSMITTER_TAG
@@ -322,10 +339,6 @@ __RingDebugCallback(
     )
 {
     PXENVIF_TRANSMITTER     Transmitter;
-    ULONG                   Allocated;
-    ULONG                   MaximumAllocated;
-    ULONG                   Count;
-    ULONG                   MinimumCount;
 
     Transmitter = Ring->Transmitter;
 
@@ -335,26 +348,6 @@ __RingDebugCallback(
           "0x%p [%s]\n",
           Ring,
           (Ring->Enabled) ? "ENABLED" : "DISABLED");
-
-    PoolGetStatistics(Ring->BufferPool,
-                      &Allocated,
-                      &MaximumAllocated,
-                      &Count,
-                      &MinimumCount);
-
-    DEBUG(Printf,
-          Transmitter->DebugInterface,
-          Transmitter->DebugCallback,
-          "BUFFER POOL: Allocated = %u (Maximum = %u)\n",
-          Allocated,
-          MaximumAllocated);
-
-    DEBUG(Printf,
-          Transmitter->DebugInterface,
-          Transmitter->DebugCallback,
-          "BUFFER POOL: Count = %u (Minimum = %u)\n",
-          Count,
-          MinimumCount);
 
     // Dump front ring
     DEBUG(Printf,
@@ -2973,7 +2966,12 @@ __RingInitialize(
     OUT PTRANSMITTER_RING   *Ring
     )
 {
+    PXENVIF_FRONTEND        Frontend;
+    CHAR                    Name[MAXNAMELEN];
+    ULONG                   Index;
     NTSTATUS                status;
+
+    Frontend = Transmitter->Frontend;
 
     *Ring = __TransmitterAllocate(sizeof (TRANSMITTER_RING));
 
@@ -2981,43 +2979,62 @@ __RingInitialize(
     if (*Ring == NULL)
         goto fail1;
 
-    status = PoolInitialize("TransmitterBuffer",
-                            sizeof (TRANSMITTER_BUFFER),
-                            TransmitterBufferCtor,
-                            TransmitterBufferDtor,
-                            RingAcquireLock,
-                            RingReleaseLock,
-                            *Ring,
-                            &(*Ring)->BufferPool);
+    (*Ring)->Transmitter = Transmitter;
+
+    status = RtlStringCbPrintfA(Name,
+                                sizeof (Name),
+                                "%s_buffer",
+                                FrontendGetPath(Frontend));
     if (!NT_SUCCESS(status))
         goto fail2;
 
+    for (Index = 0; Name[Index] != '\0'; Index++)
+        if (Name[Index] == '/')
+            Name[Index] = '_';
+
+    status = CACHE(Create,
+                   Transmitter->CacheInterface,
+                   Name,
+                   sizeof (TRANSMITTER_BUFFER),
+                   0,
+                   TransmitterBufferCtor,
+                   TransmitterBufferDtor,
+                   RingAcquireLock,
+                   RingReleaseLock,
+                   *Ring,
+                   &(*Ring)->BufferCache);
+    if (!NT_SUCCESS(status))
+        goto fail3;
+
     (*Ring)->Queued.TailPacket = &(*Ring)->Queued.HeadPacket;
     (*Ring)->Completed.TailPacket = &(*Ring)->Completed.HeadPacket;
-
-    (*Ring)->Transmitter = Transmitter;
 
     status = ThreadCreate(RingWatchdog,
                           *Ring,
                           &(*Ring)->Thread);
     if (!NT_SUCCESS(status))
-        goto fail3;
+        goto fail4;
 
     return STATUS_SUCCESS;
 
-fail3:
-    Error("fail3\n");
-
-    (*Ring)->Transmitter = NULL;
+fail4:
+    Error("fail4\n");
 
     (*Ring)->Queued.TailPacket = NULL;
     (*Ring)->Completed.TailPacket = NULL;
 
-    PoolTeardown((*Ring)->BufferPool);
-    (*Ring)->BufferPool = NULL;
+    CACHE(Destroy,
+          Transmitter->CacheInterface,
+          (*Ring)->BufferCache);
+    (*Ring)->BufferCache = NULL;
+
+fail3:
+    Error("fail3\n");
 
 fail2:
     Error("fail2\n");
+
+    (*Ring)->Transmitter = NULL;
 
     ASSERT(IsZeroMemory(*Ring, sizeof (TRANSMITTER_RING)));
     __TransmitterFree(*Ring);
@@ -3311,16 +3328,18 @@ __RingTeardown(
     ThreadJoin(Ring->Thread);
     Ring->Thread = NULL;
 
-    Ring->Transmitter = NULL;
-
     ASSERT3P(Ring->Queued.TailPacket, ==, &Ring->Queued.HeadPacket);
     Ring->Queued.TailPacket = NULL;
 
     ASSERT3P(Ring->Completed.TailPacket, ==, &Ring->Completed.HeadPacket);
     Ring->Completed.TailPacket = NULL;
 
-    PoolTeardown(Ring->BufferPool);
-    Ring->BufferPool = NULL;
+    CACHE(Destroy,
+          Transmitter->CacheInterface,
+          Ring->BufferCache);
+    Ring->BufferCache = NULL;
+
+    Ring->Transmitter = NULL;
 
     ASSERT(IsZeroMemory(Ring, sizeof (TRANSMITTER_RING)));
     __TransmitterFree(Ring);
@@ -3524,6 +3543,12 @@ TransmitterInitialize(
 
     InitializeListHead(&(*Transmitter)->List);
 
+    (*Transmitter)->CacheInterface = FrontendGetCacheInterface(Frontend);
+
+    CACHE(Acquire, (*Transmitter)->CacheInterface);
+
+    (*Transmitter)->Frontend = Frontend;
+
     Done = 0;
     while (Done < Count) {
         PTRANSMITTER_RING   Ring;
@@ -3536,12 +3561,12 @@ TransmitterInitialize(
         Done++;
     }
 
-    (*Transmitter)->Frontend = Frontend;
-
     return STATUS_SUCCESS;
 
 fail2:
     Error("fail2\n");    
+
+    (*Transmitter)->Frontend = NULL;
 
     while (!IsListEmpty(&(*Transmitter)->List)) {
         PLIST_ENTRY         ListEntry;
@@ -3558,6 +3583,9 @@ fail2:
         --Done;
     }
     ASSERT3U(Done, ==, 0);
+
+    CACHE(Release, (*Transmitter)->CacheInterface);
+    (*Transmitter)->CacheInterface = NULL;
 
     RtlZeroMemory(&(*Transmitter)->List, sizeof (LIST_ENTRY));
 
@@ -3782,8 +3810,6 @@ TransmitterTeardown(
 {
     RtlZeroMemory(&Transmitter->Metadata, sizeof (XENVIF_TRANSMITTER_PACKET_METADATA));
 
-    Transmitter->Frontend = NULL;
-
     while (!IsListEmpty(&Transmitter->List)) {
         PLIST_ENTRY         ListEntry;
         PTRANSMITTER_RING   Ring;
@@ -3796,6 +3822,11 @@ TransmitterTeardown(
 
         __RingTeardown(Ring);
     }
+
+    Transmitter->Frontend = NULL;
+
+    CACHE(Release, Transmitter->CacheInterface);
+    Transmitter->CacheInterface = NULL;
 
     RtlZeroMemory(&Transmitter->List, sizeof (LIST_ENTRY));
 
