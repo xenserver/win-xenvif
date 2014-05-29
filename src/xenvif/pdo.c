@@ -1525,20 +1525,6 @@ PdoQueryInterface(
         }
     }
 
-    Trace("%s: (%08x-%04x-%04x-%02x%02x%02x%02x%02x%02x%02x%02x)\n",
-          __PdoGetName(Pdo),
-          InterfaceType->Data1,
-          InterfaceType->Data2,
-          InterfaceType->Data3,
-          InterfaceType->Data4[0],
-          InterfaceType->Data4[1],
-          InterfaceType->Data4[2],
-          InterfaceType->Data4[3],
-          InterfaceType->Data4[4],
-          InterfaceType->Data4[5],
-          InterfaceType->Data4[6],
-          InterfaceType->Data4[7]);
-
     status = __PdoDelegateIrp(Pdo, Irp);
 
 done:
