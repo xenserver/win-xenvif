@@ -32,62 +32,68 @@
 #ifndef _XENBUS_GNTTAB_INTERFACE_H
 #define _XENBUS_GNTTAB_INTERFACE_H
 
-typedef enum _XENBUS_GNTTAB_ENTRY_TYPE {
-    GNTTAB_ENTRY_TYPE_INVALID = 0,
-    GNTTAB_ENTRY_FULL_PAGE
-} XENBUS_GNTTAB_ENTRY_TYPE, *PXENBUS_GNTTAB_ENTRY_TYPE;
-
+typedef struct _XENBUS_GNTTAB_CACHE         XENBUS_GNTTAB_CACHE, *PXENBUS_GNTTAB_CACHE;
 typedef struct _XENBUS_GNTTAB_DESCRIPTOR    XENBUS_GNTTAB_DESCRIPTOR, *PXENBUS_GNTTAB_DESCRIPTOR;
 
-#define DEFINE_GNTTAB_OPERATIONS                                    \
-        GNTTAB_OPERATION(VOID,                                      \
-                         Acquire,                                   \
-                         (                                          \
-                         IN  PXENBUS_GNTTAB_CONTEXT     Context     \
-                         )                                          \
-                         )                                          \
-        GNTTAB_OPERATION(VOID,                                      \
-                         Release,                                   \
-                         (                                          \
-                         IN  PXENBUS_GNTTAB_CONTEXT     Context     \
-                         )                                          \
-                         )                                          \
-        GNTTAB_OPERATION(PXENBUS_GNTTAB_DESCRIPTOR,                 \
-                         Get,                                       \
-                         (                                          \
-                         IN  PXENBUS_GNTTAB_CONTEXT     Context     \
-                         )                                          \
-                         )                                          \
-        GNTTAB_OPERATION(VOID,                                      \
-                         Put,                                       \
-                         (                                          \
-                         IN  PXENBUS_GNTTAB_CONTEXT     Context,    \
-                         IN  PXENBUS_GNTTAB_DESCRIPTOR  Descriptor  \
-                         )                                          \
-                         )                                          \
-        GNTTAB_OPERATION(NTSTATUS,                                  \
-                         PermitForeignAccess,                       \
-                         (                                          \
-                         IN  PXENBUS_GNTTAB_CONTEXT     Context,    \
-                         IN  PXENBUS_GNTTAB_DESCRIPTOR  Descriptor, \
-                         IN  USHORT                     Domain,     \
-                         IN  XENBUS_GNTTAB_ENTRY_TYPE   Type,       \
-                         ...                                        \
-                         )                                          \
-                         )                                          \
-        GNTTAB_OPERATION(NTSTATUS,                                  \
-                         RevokeForeignAccess,                       \
-                         (                                          \
-                         IN  PXENBUS_GNTTAB_CONTEXT     Context,    \
-                         IN  PXENBUS_GNTTAB_DESCRIPTOR  Descriptor  \
-                         )                                          \
-                         )                                          \
-        GNTTAB_OPERATION(ULONG,                                     \
-                         Reference,                                 \
-                         (                                          \
-                         IN  PXENBUS_GNTTAB_CONTEXT     Context,    \
-                         IN  PXENBUS_GNTTAB_DESCRIPTOR  Descriptor  \
-                         )                                          \
+#define DEFINE_GNTTAB_OPERATIONS                                                \
+        GNTTAB_OPERATION(VOID,                                                  \
+                         Acquire,                                               \
+                         (                                                      \
+                         IN  PXENBUS_GNTTAB_CONTEXT     Context                 \
+                         )                                                      \
+                         )                                                      \
+        GNTTAB_OPERATION(VOID,                                                  \
+                         Release,                                               \
+                         (                                                      \
+                         IN  PXENBUS_GNTTAB_CONTEXT     Context                 \
+                         )                                                      \
+                         )                                                      \
+        GNTTAB_OPERATION(NTSTATUS,                                              \
+                         CreateCache,                                           \
+                         (                                                      \
+                         IN  PXENBUS_GNTTAB_CONTEXT     Context,                \
+                         IN  const CHAR                 *Name,                  \
+                         IN  ULONG                      Reservation,            \
+                         IN  VOID                       (*AcquireLock)(PVOID),  \
+                         IN  VOID                       (*ReleaseLock)(PVOID),  \
+                         IN  PVOID                      Argument,               \
+                         OUT PXENBUS_GNTTAB_CACHE       *Cache                  \
+                         )                                                      \
+                         )                                                      \
+        GNTTAB_OPERATION(VOID,                                                  \
+                         DestroyCache,                                          \
+                         (                                                      \
+                         IN  PXENBUS_GNTTAB_CONTEXT     Context,                \
+                         IN  PXENBUS_GNTTAB_CACHE       Cache                   \
+                         )                                                      \
+                         )                                                      \
+        GNTTAB_OPERATION(NTSTATUS,                                              \
+                         PermitForeignAccess,                                   \
+                         (                                                      \
+                         IN  PXENBUS_GNTTAB_CONTEXT     Context,                \
+                         IN  PXENBUS_GNTTAB_CACHE       Cache,                  \
+                         IN  BOOLEAN                    Locked,                 \
+                         IN  USHORT                     Domain,                 \
+                         IN  PFN_NUMBER                 Pfn,                    \
+                         IN  BOOLEAN                    ReadOnly,               \
+                         OUT PXENBUS_GNTTAB_DESCRIPTOR  *Descriptor             \
+                         )                                                      \
+                         )                                                      \
+        GNTTAB_OPERATION(NTSTATUS,                                              \
+                         RevokeForeignAccess,                                   \
+                         (                                                      \
+                         IN  PXENBUS_GNTTAB_CONTEXT     Context,                \
+                         IN  PXENBUS_GNTTAB_CACHE       Cache,                  \
+                         IN  BOOLEAN                    Locked,                 \
+                         IN  PXENBUS_GNTTAB_DESCRIPTOR  Descriptor              \
+                         )                                                      \
+                         )                                                      \
+        GNTTAB_OPERATION(ULONG,                                                 \
+                         Reference,                                             \
+                         (                                                      \
+                         IN  PXENBUS_GNTTAB_CONTEXT     Context,                \
+                         IN  PXENBUS_GNTTAB_DESCRIPTOR  Descriptor              \
+                         )                                                      \
                          )
 
 typedef struct _XENBUS_GNTTAB_CONTEXT   XENBUS_GNTTAB_CONTEXT, *PXENBUS_GNTTAB_CONTEXT;
@@ -117,7 +123,7 @@ DEFINE_GUID(GUID_GNTTAB_INTERFACE,
             0xd6,
             0xe);
 
-#define GNTTAB_INTERFACE_VERSION    4
+#define GNTTAB_INTERFACE_VERSION    5
 
 #define GNTTAB_OPERATIONS(_Interface) \
         (PXENBUS_GNTTAB_OPERATIONS *)((ULONG_PTR)(_Interface))
