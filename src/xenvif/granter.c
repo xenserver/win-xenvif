@@ -44,11 +44,14 @@
 
 struct _XENVIF_GRANTER {
     PXENVIF_FRONTEND            Frontend;
-
+    KSPIN_LOCK                  Lock;
     PXENBUS_GNTTAB_INTERFACE    GnttabInterface;
+    PXENBUS_GNTTAB_CACHE        Cache;
 };
 
 #define GRANTER_POOL    'NARG'
+
+#define MAXNAMELEN  128
 
 static FORCEINLINE PVOID
 __GranterAllocate(
@@ -66,12 +69,40 @@ __GranterFree(
     __FreePoolWithTag(Buffer, GRANTER_POOL);
 }
 
+static VOID
+__drv_requiresIRQL(DISPATCH_LEVEL)
+GranterAcquireLock(
+    IN  PVOID               Argument
+    )
+{
+    PXENVIF_GRANTER         Granter = Argument;
+
+    ASSERT3U(KeGetCurrentIrql(), ==, DISPATCH_LEVEL);
+
+    KeAcquireSpinLockAtDpcLevel(&Granter->Lock);
+}
+
+static VOID
+__drv_requiresIRQL(DISPATCH_LEVEL)
+GranterReleaseLock(
+    IN  PVOID               Argument
+    )
+{
+    PXENVIF_GRANTER         Granter = Argument;
+
+    ASSERT3U(KeGetCurrentIrql(), ==, DISPATCH_LEVEL);
+
+    KeReleaseSpinLockFromDpcLevel(&Granter->Lock);
+}
+
 NTSTATUS
 GranterInitialize(
     IN  PXENVIF_FRONTEND    Frontend,
     OUT PXENVIF_GRANTER     *Granter
     )
 {
+    CHAR                    Name[MAXNAMELEN];
+    ULONG                   Index;
     NTSTATUS                status;
 
     *Granter = __GranterAllocate(sizeof (XENVIF_GRANTER));
@@ -80,9 +111,48 @@ GranterInitialize(
     if (*Granter == NULL)
         goto fail1;
 
+    (*Granter)->GnttabInterface = FrontendGetGnttabInterface(Frontend);
+
+    GNTTAB(Acquire, (*Granter)->GnttabInterface);
+
+    status = RtlStringCbPrintfA(Name,
+                                sizeof (Name),
+                                "%s",
+                                FrontendGetPath(Frontend));
+    if (!NT_SUCCESS(status))
+        goto fail2;
+
+    for (Index = 0; Name[Index] != '\0'; Index++)
+        if (Name[Index] == '/')
+            Name[Index] = '_';
+
+    KeInitializeSpinLock(&(*Granter)->Lock);
+
+    status = GNTTAB(CreateCache,
+                    (*Granter)->GnttabInterface,
+                    Name,
+                    0,
+                    GranterAcquireLock,
+                    GranterReleaseLock,
+                    *Granter,
+                    &(*Granter)->Cache);
+    if (!NT_SUCCESS(status))
+        goto fail3;
+
     (*Granter)->Frontend = Frontend;
 
     return STATUS_SUCCESS;
+
+fail3:
+    Error("fail2\n");
+
+    RtlZeroMemory(&(*Granter)->Lock, sizeof (KSPIN_LOCK));
+
+fail2:
+    Error("fail2\n");
+
+    GNTTAB(Release, (*Granter)->GnttabInterface);
+    (*Granter)->GnttabInterface = NULL;
 
 fail1:
     Error("fail1 (%08x)\n", status);
@@ -95,13 +165,7 @@ GranterConnect(
     IN  PXENVIF_GRANTER     Granter
     )
 {
-    PXENVIF_FRONTEND        Frontend;
-
-    Frontend = Granter->Frontend;
-
-    Granter->GnttabInterface = FrontendGetGnttabInterface(Frontend);
-
-    GNTTAB(Acquire, Granter->GnttabInterface);
+    UNREFERENCED_PARAMETER(Granter);
 
     return STATUS_SUCCESS;
 }
@@ -130,37 +194,22 @@ GranterPermitAccess(
 
     Frontend = Granter->Frontend;
 
-    Descriptor = GNTTAB(Get,
-                        Granter->GnttabInterface);
-
-    status = STATUS_INSUFFICIENT_RESOURCES;
-    if (Descriptor == NULL)
-        goto fail1;
-
     status = GNTTAB(PermitForeignAccess,
                     Granter->GnttabInterface,
-                    Descriptor,
+                    Granter->Cache,
+                    FALSE,
                     FrontendGetBackendDomain(Frontend),
-                    GNTTAB_ENTRY_FULL_PAGE,
                     Pfn,
-                    ReadOnly);
+                    ReadOnly,
+                    &Descriptor);
     if (!NT_SUCCESS(status))
-        goto fail2;
+        goto fail1;
 
     *Handle = Descriptor;
     return STATUS_SUCCESS;
 
-fail2:
-    if (status != STATUS_INSUFFICIENT_RESOURCES)
-        Error("fail2\n");
-
-    GNTTAB(Put,
-           Granter->GnttabInterface,
-           Descriptor);
-
 fail1:
-    if (status != STATUS_INSUFFICIENT_RESOURCES)
-        Error("fail1 (%08x)\n", status);
+    Error("fail1 (%08x)\n", status);
 
     return status;
 }
@@ -176,13 +225,11 @@ GranterRevokeAccess(
 
     status = GNTTAB(RevokeForeignAccess,
                     Granter->GnttabInterface,
+                    Granter->Cache,
+                    FALSE,
                     Descriptor);
     if (!NT_SUCCESS(status))
         goto fail1;
-
-    GNTTAB(Put,
-           Granter->GnttabInterface,
-           Descriptor);
 
     return;
 
@@ -218,8 +265,7 @@ GranterDisconnect(
     IN  PXENVIF_GRANTER     Granter
     )
 {
-    GNTTAB(Release, Granter->GnttabInterface);
-    Granter->GnttabInterface = NULL;
+    UNREFERENCED_PARAMETER(Granter);
 }
 
 VOID
@@ -228,6 +274,16 @@ GranterTeardown(
     )
 {
     Granter->Frontend = NULL;
+
+    GNTTAB(DestroyCache,
+           Granter->GnttabInterface,
+           Granter->Cache);
+    Granter->Cache = NULL;
+
+    RtlZeroMemory(&Granter->Lock, sizeof (KSPIN_LOCK));
+
+    GNTTAB(Release, Granter->GnttabInterface);
+    Granter->GnttabInterface = NULL;
 
     ASSERT(IsZeroMemory(Granter, sizeof (XENVIF_GRANTER)));
 

@@ -193,6 +193,22 @@ FrontendGetStoreInterface(
     return __FrontendGetStoreInterface(Frontend);
 }
 
+static FORCEINLINE PXENBUS_CACHE_INTERFACE
+__FrontendGetCacheInterface(
+    IN  PXENVIF_FRONTEND    Frontend
+    )
+{
+    return PdoGetCacheInterface(__FrontendGetPdo(Frontend));
+}
+
+PXENBUS_CACHE_INTERFACE
+FrontendGetCacheInterface(
+    IN  PXENVIF_FRONTEND    Frontend
+    )
+{
+    return __FrontendGetCacheInterface(Frontend);
+}
+
 static FORCEINLINE PXENBUS_GNTTAB_INTERFACE
 __FrontendGetGnttabInterface(
     IN  PXENVIF_FRONTEND    Frontend

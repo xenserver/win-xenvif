@@ -78,9 +78,14 @@ struct _XENVIF_PDO {
     PXENVIF_FRONTEND            Frontend;
     XENVIF_VIF_INTERFACE        VifInterface;
 
+    PXENBUS_DEBUG_INTERFACE     DebugInterface;
     PXENBUS_SUSPEND_INTERFACE   SuspendInterface;
-
     PXENBUS_SUSPEND_CALLBACK    SuspendCallbackLate;
+    PXENBUS_EVTCHN_INTERFACE    EvtchnInterface;
+    PXENBUS_STORE_INTERFACE     StoreInterface;
+    PXENBUS_CACHE_INTERFACE     CacheInterface;
+    PXENBUS_GNTTAB_INTERFACE    GnttabInterface;
+    PXENFILT_EMULATED_INTERFACE EmulatedInterface;
 };
 
 static FORCEINLINE PVOID
@@ -405,7 +410,7 @@ __PdoGetEvtchnInterface(
     IN  PXENVIF_PDO Pdo
     )
 {
-    return FdoGetEvtchnInterface(__PdoGetFdo(Pdo));
+    return Pdo->EvtchnInterface;
 }
 
 PXENBUS_EVTCHN_INTERFACE
@@ -421,7 +426,7 @@ __PdoGetDebugInterface(
     IN  PXENVIF_PDO Pdo
     )
 {
-    return FdoGetDebugInterface(__PdoGetFdo(Pdo));
+    return Pdo->DebugInterface;
 }
 
 PXENBUS_DEBUG_INTERFACE
@@ -437,7 +442,7 @@ __PdoGetGnttabInterface(
     IN  PXENVIF_PDO Pdo
     )
 {
-    return FdoGetGnttabInterface(__PdoGetFdo(Pdo));
+    return Pdo->GnttabInterface;
 }
 
 PXENBUS_GNTTAB_INTERFACE
@@ -453,7 +458,7 @@ __PdoGetSuspendInterface(
     IN  PXENVIF_PDO Pdo
     )
 {
-    return FdoGetSuspendInterface(__PdoGetFdo(Pdo));
+    return Pdo->SuspendInterface;
 }
 
 PXENBUS_SUSPEND_INTERFACE
@@ -469,7 +474,7 @@ __PdoGetStoreInterface(
     IN  PXENVIF_PDO Pdo
     )
 {
-    return FdoGetStoreInterface(__PdoGetFdo(Pdo));
+    return Pdo->StoreInterface;
 }
 
 PXENBUS_STORE_INTERFACE
@@ -480,12 +485,28 @@ PdoGetStoreInterface(
     return __PdoGetStoreInterface(Pdo);
 }
 
+static FORCEINLINE PXENBUS_CACHE_INTERFACE
+__PdoGetCacheInterface(
+    IN  PXENVIF_PDO Pdo
+    )
+{
+    return Pdo->CacheInterface;
+}
+
+PXENBUS_CACHE_INTERFACE
+PdoGetCacheInterface(
+    IN  PXENVIF_PDO Pdo
+    )
+{
+    return __PdoGetCacheInterface(Pdo);
+}
+
 static FORCEINLINE PXENFILT_EMULATED_INTERFACE
 __PdoGetEmulatedInterface(
     IN  PXENVIF_PDO Pdo
     )
 {
-    return FdoGetEmulatedInterface(__PdoGetFdo(Pdo));
+    return Pdo->EmulatedInterface;
 }
 
 PXENFILT_EMULATED_INTERFACE
@@ -956,8 +977,6 @@ PdoD3ToD0(
     if (!NT_SUCCESS(status))
         goto fail1;
 
-    Pdo->SuspendInterface = __PdoGetSuspendInterface(Pdo);
-
     SUSPEND(Acquire, Pdo->SuspendInterface);
 
     status = SUSPEND(Register,
@@ -975,7 +994,6 @@ fail2:
     Error("fail2\n");
 
     SUSPEND(Release, Pdo->SuspendInterface);
-    Pdo->SuspendInterface = NULL;
 
     KeRaiseIrql(DISPATCH_LEVEL, &Irql);
     __PdoD0ToD3(Pdo);
@@ -1002,7 +1020,6 @@ PdoD0ToD3(
     Pdo->SuspendCallbackLate = NULL;
 
     SUSPEND(Release, Pdo->SuspendInterface);
-    Pdo->SuspendInterface = NULL;
 
     KeRaiseIrql(DISPATCH_LEVEL, &Irql);
     __PdoD0ToD3(Pdo);
@@ -1507,20 +1524,6 @@ PdoQueryInterface(
             goto done;
         }
     }
-
-    Trace("%s: (%08x-%04x-%04x-%02x%02x%02x%02x%02x%02x%02x%02x)\n",
-          __PdoGetName(Pdo),
-          InterfaceType->Data1,
-          InterfaceType->Data2,
-          InterfaceType->Data3,
-          InterfaceType->Data4[0],
-          InterfaceType->Data4[1],
-          InterfaceType->Data4[2],
-          InterfaceType->Data4[3],
-          InterfaceType->Data4[4],
-          InterfaceType->Data4[5],
-          InterfaceType->Data4[6],
-          InterfaceType->Data4[7]);
 
     status = __PdoDelegateIrp(Pdo, Irp);
 
@@ -2453,6 +2456,14 @@ PdoCreate(
 
     __PdoSetName(Pdo, Name);
 
+    Pdo->DebugInterface = FdoGetDebugInterface(Fdo);
+    Pdo->SuspendInterface = FdoGetSuspendInterface(Fdo);
+    Pdo->EvtchnInterface = FdoGetEvtchnInterface(Fdo);
+    Pdo->StoreInterface = FdoGetStoreInterface(Fdo);
+    Pdo->CacheInterface = FdoGetCacheInterface(Fdo);
+    Pdo->GnttabInterface = FdoGetGnttabInterface(Fdo);
+    Pdo->EmulatedInterface = FdoGetEmulatedInterface(Fdo);
+
     status = BusInitialize(Pdo, &Pdo->BusInterface);
     if (!NT_SUCCESS(status))
         goto fail5;
@@ -2501,6 +2512,14 @@ fail6:
 
 fail5:
     Error("fail5\n");
+
+    Pdo->EmulatedInterface = NULL;
+    Pdo->GnttabInterface = NULL;
+    Pdo->CacheInterface = NULL;
+    Pdo->StoreInterface = NULL;
+    Pdo->EvtchnInterface = NULL;
+    Pdo->SuspendInterface = NULL;
+    Pdo->DebugInterface = NULL;
 
     ThreadAlert(Pdo->DevicePowerThread);
     ThreadJoin(Pdo->DevicePowerThread);
@@ -2564,6 +2583,14 @@ PdoDestroy(
     Pdo->Frontend = NULL;    
 
     BusTeardown(&Pdo->BusInterface);
+
+    Pdo->EmulatedInterface = NULL;
+    Pdo->GnttabInterface = NULL;
+    Pdo->CacheInterface = NULL;
+    Pdo->StoreInterface = NULL;
+    Pdo->EvtchnInterface = NULL;
+    Pdo->SuspendInterface = NULL;
+    Pdo->DebugInterface = NULL;
 
     ThreadAlert(Pdo->DevicePowerThread);
     ThreadJoin(Pdo->DevicePowerThread);
