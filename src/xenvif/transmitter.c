@@ -2967,8 +2967,6 @@ __RingInitialize(
     )
 {
     PXENVIF_FRONTEND        Frontend;
-    CHAR                    Name[MAXNAMELEN];
-    ULONG                   Index;
     NTSTATUS                status;
 
     Frontend = Transmitter->Frontend;
@@ -2980,32 +2978,6 @@ __RingInitialize(
         goto fail1;
 
     (*Ring)->Transmitter = Transmitter;
-
-    status = RtlStringCbPrintfA(Name,
-                                sizeof (Name),
-                                "%s_buffer",
-                                FrontendGetPath(Frontend));
-    if (!NT_SUCCESS(status))
-        goto fail2;
-
-    for (Index = 0; Name[Index] != '\0'; Index++)
-        if (Name[Index] == '/')
-            Name[Index] = '_';
-
-    status = CACHE(Create,
-                   Transmitter->CacheInterface,
-                   Name,
-                   sizeof (TRANSMITTER_BUFFER),
-                   0,
-                   TransmitterBufferCtor,
-                   TransmitterBufferDtor,
-                   RingAcquireLock,
-                   RingReleaseLock,
-                   *Ring,
-                   &(*Ring)->BufferCache);
-    if (!NT_SUCCESS(status))
-        goto fail3;
-
     (*Ring)->Queued.TailPacket = &(*Ring)->Queued.HeadPacket;
     (*Ring)->Completed.TailPacket = &(*Ring)->Completed.HeadPacket;
 
@@ -3013,27 +2985,15 @@ __RingInitialize(
                           *Ring,
                           &(*Ring)->Thread);
     if (!NT_SUCCESS(status))
-        goto fail4;
+        goto fail2;
 
     return STATUS_SUCCESS;
-
-fail4:
-    Error("fail4\n");
-
-    (*Ring)->Queued.TailPacket = NULL;
-    (*Ring)->Completed.TailPacket = NULL;
-
-    CACHE(Destroy,
-          Transmitter->CacheInterface,
-          (*Ring)->BufferCache);
-    (*Ring)->BufferCache = NULL;
-
-fail3:
-    Error("fail3\n");
 
 fail2:
     Error("fail2\n");
 
+    (*Ring)->Queued.TailPacket = NULL;
+    (*Ring)->Completed.TailPacket = NULL;
     (*Ring)->Transmitter = NULL;
 
     ASSERT(IsZeroMemory(*Ring, sizeof (TRANSMITTER_RING)));
@@ -3055,6 +3015,7 @@ __RingConnect(
     PXENVIF_FRONTEND        Frontend;
     ULONG                   Index;
     PFN_NUMBER              Pfn;
+    CHAR                    Name[MAXNAMELEN];
     NTSTATUS                status;
 
     ASSERT(!Ring->Connected);
@@ -3062,11 +3023,36 @@ __RingConnect(
     Transmitter = Ring->Transmitter;
     Frontend = Transmitter->Frontend;
 
+    status = RtlStringCbPrintfA(Name,
+                                sizeof (Name),
+                                "%s_buffer",
+                                FrontendGetPath(Frontend));
+    if (!NT_SUCCESS(status))
+        goto fail1;
+
+    for (Index = 0; Name[Index] != '\0'; Index++)
+        if (Name[Index] == '/')
+            Name[Index] = '_';
+
+    status = CACHE(Create,
+                   Transmitter->CacheInterface,
+                   Name,
+                   sizeof (TRANSMITTER_BUFFER),
+                   0,
+                   TransmitterBufferCtor,
+                   TransmitterBufferDtor,
+                   RingAcquireLock,
+                   RingReleaseLock,
+                   Ring,
+                   &Ring->BufferCache);
+    if (!NT_SUCCESS(status))
+        goto fail2;
+
     Ring->Mdl = __AllocatePage();
 
     status = STATUS_NO_MEMORY;
     if (Ring->Mdl == NULL)
-	goto fail1;
+        goto fail3;
 
     Ring->Shared = MmGetSystemAddressForMdlSafe(Ring->Mdl, NormalPagePriority);
     ASSERT(Ring->Shared != NULL);
@@ -3090,14 +3076,14 @@ __RingConnect(
                                  FALSE,
                                  &Ring->Handle);
     if (!NT_SUCCESS(status))
-        goto fail2;
+        goto fail4;
 
     Ring->Connected = TRUE;
 
     return STATUS_SUCCESS;
 
-fail2:
-    Error("fail2\n");
+fail4:
+    Error("fail4\n");
 
     while (Ring->HeadFreeTag != TAG_INDEX_INVALID) {
         PTRANSMITTER_TAG    Tag = &Ring->Tag[Ring->HeadFreeTag];
@@ -3113,6 +3099,17 @@ fail2:
     Ring->Shared = NULL;
     __FreePage(Ring->Mdl);
     Ring->Mdl = NULL;
+
+fail3:
+    Error("fail3\n");
+
+    CACHE(Destroy,
+          Transmitter->CacheInterface,
+          Ring->BufferCache);
+    Ring->BufferCache = NULL;
+
+fail2:
+    Error("fail2\n");
 
 fail1:
     Error("fail1 (%08x)\n", status);
@@ -3285,6 +3282,11 @@ __RingDisconnect(
     Ring->Shared = NULL;
     __FreePage(Ring->Mdl);
     Ring->Mdl = NULL;
+
+    CACHE(Destroy,
+          Transmitter->CacheInterface,
+          Ring->BufferCache);
+    Ring->BufferCache = NULL;
 }
 
 static FORCEINLINE VOID
@@ -3333,11 +3335,6 @@ __RingTeardown(
 
     ASSERT3P(Ring->Completed.TailPacket, ==, &Ring->Completed.HeadPacket);
     Ring->Completed.TailPacket = NULL;
-
-    CACHE(Destroy,
-          Transmitter->CacheInterface,
-          Ring->BufferCache);
-    Ring->BufferCache = NULL;
 
     Ring->Transmitter = NULL;
 

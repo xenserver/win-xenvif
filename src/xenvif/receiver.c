@@ -2339,8 +2339,6 @@ __RingInitialize(
     )
 {
     PXENVIF_FRONTEND        Frontend;
-    CHAR                    Name[MAXNAMELEN];
-    ULONG                   Index;
     NTSTATUS                status;
 
     Frontend = Receiver->Frontend;
@@ -2355,56 +2353,20 @@ __RingInitialize(
 
     (*Ring)->Receiver = Receiver;
 
-    status = RtlStringCbPrintfA(Name,
-                                sizeof (Name),
-                                "%s_packet",
-                                FrontendGetPath(Frontend));
-    if (!NT_SUCCESS(status))
-        goto fail2;
-
-    for (Index = 0; Name[Index] != '\0'; Index++)
-        if (Name[Index] == '/')
-            Name[Index] = '_';
-
-    status = CACHE(Create,
-                   Receiver->CacheInterface,
-                   Name,
-                   sizeof (XENVIF_RECEIVER_PACKET),
-                   0,
-                   ReceiverPacketCtor,
-                   ReceiverPacketDtor,
-                   RingAcquireLock,
-                   RingReleaseLock,
-                   *Ring,
-                   &(*Ring)->PacketCache);
-    if (!NT_SUCCESS(status))
-        goto fail3;
-
     InitializeListHead(&(*Ring)->PacketList);
 
     status = ThreadCreate(RingWatchdog,
                           *Ring,
                           &(*Ring)->Thread);
     if (!NT_SUCCESS(status))
-        goto fail4;
+        goto fail2;
 
     return STATUS_SUCCESS;
 
-fail4:
-    Error("fail4\n");
-
-    RtlZeroMemory(&(*Ring)->PacketList, sizeof (LIST_ENTRY));
-
-    CACHE(Destroy,
-          Receiver->CacheInterface,
-          (*Ring)->PacketCache);
-    (*Ring)->PacketCache = NULL;
-
-fail3:
-    Error("fail3\n");
-
 fail2:
     Error("fail2\n");
+
+    RtlZeroMemory(&(*Ring)->PacketList, sizeof (LIST_ENTRY));
 
     (*Ring)->Receiver = NULL;
 
@@ -2429,16 +2391,42 @@ __RingConnect(
     PXENVIF_FRONTEND    Frontend;
     ULONG               Index;
     PFN_NUMBER          Pfn;
+    CHAR                Name[MAXNAMELEN];
     NTSTATUS            status;
 
     Receiver = Ring->Receiver;
     Frontend = Receiver->Frontend;
 
+    status = RtlStringCbPrintfA(Name,
+                                sizeof (Name),
+                                "%s_packet",
+                                FrontendGetPath(Frontend));
+    if (!NT_SUCCESS(status))
+        goto fail1;
+
+    for (Index = 0; Name[Index] != '\0'; Index++)
+        if (Name[Index] == '/')
+            Name[Index] = '_';
+
+    status = CACHE(Create,
+                   Receiver->CacheInterface,
+                   Name,
+                   sizeof (XENVIF_RECEIVER_PACKET),
+                   0,
+                   ReceiverPacketCtor,
+                   ReceiverPacketDtor,
+                   RingAcquireLock,
+                   RingReleaseLock,
+                   Ring,
+                   &Ring->PacketCache);
+    if (!NT_SUCCESS(status))
+        goto fail2;
+
     Ring->Mdl = __AllocatePage();
 
     status = STATUS_NO_MEMORY;
     if (Ring->Mdl == NULL)
-        goto fail1;
+        goto fail3;
 
     Ring->Shared = MmGetSystemAddressForMdlSafe(Ring->Mdl, NormalPagePriority);
     ASSERT(Ring->Shared != NULL);
@@ -2462,12 +2450,12 @@ __RingConnect(
                                  FALSE,
                                  &Ring->Handle);
     if (!NT_SUCCESS(status))
-        goto fail2;
+        goto fail4;
 
     return STATUS_SUCCESS;
 
-fail2:
-    Error("fail2\n");
+fail4:
+    Error("fail4\n");
 
     while (Ring->HeadFreeTag != TAG_INDEX_INVALID) {
         PRECEIVER_TAG   Tag = &Ring->Tag[Ring->HeadFreeTag];
@@ -2485,6 +2473,17 @@ fail2:
     __FreePage(Ring->Mdl);
     Ring->Mdl = NULL;
 
+fail3:
+    Error("fail3\n");
+
+    CACHE(Destroy,
+          Receiver->CacheInterface,
+          Ring->PacketCache);
+    Ring->PacketCache = NULL;
+
+fail2:
+    Error("fail2\n");
+    
 fail1:
     Error("fail1 (%08x)\n", status);
 
@@ -2621,6 +2620,11 @@ __RingDisconnect(
 
     __FreePage(Ring->Mdl);
     Ring->Mdl = NULL;
+
+    CACHE(Destroy,
+          Receiver->CacheInterface,
+          Ring->PacketCache);
+    Ring->PacketCache = NULL;
 }
 
 static FORCEINLINE VOID
@@ -2644,11 +2648,6 @@ __RingTeardown(
 
     ASSERT(IsListEmpty(&Ring->PacketList));
     RtlZeroMemory(&Ring->PacketList, sizeof (LIST_ENTRY));
-
-    CACHE(Destroy,
-          Receiver->CacheInterface,
-          Ring->PacketCache);
-    Ring->PacketCache = NULL;
 
     Ring->Receiver = NULL;
 

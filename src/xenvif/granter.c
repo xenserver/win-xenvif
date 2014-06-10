@@ -101,8 +101,6 @@ GranterInitialize(
     OUT PXENVIF_GRANTER     *Granter
     )
 {
-    CHAR                    Name[MAXNAMELEN];
-    ULONG                   Index;
     NTSTATUS                status;
 
     *Granter = __GranterAllocate(sizeof (XENVIF_GRANTER));
@@ -115,44 +113,10 @@ GranterInitialize(
 
     GNTTAB(Acquire, (*Granter)->GnttabInterface);
 
-    status = RtlStringCbPrintfA(Name,
-                                sizeof (Name),
-                                "%s",
-                                FrontendGetPath(Frontend));
-    if (!NT_SUCCESS(status))
-        goto fail2;
-
-    for (Index = 0; Name[Index] != '\0'; Index++)
-        if (Name[Index] == '/')
-            Name[Index] = '_';
-
+    (*Granter)->Frontend = Frontend;
     KeInitializeSpinLock(&(*Granter)->Lock);
 
-    status = GNTTAB(CreateCache,
-                    (*Granter)->GnttabInterface,
-                    Name,
-                    0,
-                    GranterAcquireLock,
-                    GranterReleaseLock,
-                    *Granter,
-                    &(*Granter)->Cache);
-    if (!NT_SUCCESS(status))
-        goto fail3;
-
-    (*Granter)->Frontend = Frontend;
-
     return STATUS_SUCCESS;
-
-fail3:
-    Error("fail2\n");
-
-    RtlZeroMemory(&(*Granter)->Lock, sizeof (KSPIN_LOCK));
-
-fail2:
-    Error("fail2\n");
-
-    GNTTAB(Release, (*Granter)->GnttabInterface);
-    (*Granter)->GnttabInterface = NULL;
 
 fail1:
     Error("fail1 (%08x)\n", status);
@@ -165,9 +129,43 @@ GranterConnect(
     IN  PXENVIF_GRANTER     Granter
     )
 {
-    UNREFERENCED_PARAMETER(Granter);
+    CHAR                    Name[MAXNAMELEN];
+    ULONG                   Index;
+    NTSTATUS                status;
+
+    status = RtlStringCbPrintfA(Name,
+                                sizeof (Name),
+                                "%s",
+                                FrontendGetPath(Granter->Frontend));
+    if (!NT_SUCCESS(status))
+        goto fail1;
+
+    for (Index = 0; Name[Index] != '\0'; Index++)
+        if (Name[Index] == '/')
+            Name[Index] = '_';
+
+    ASSERT3P(Granter->Cache, ==, NULL);
+
+    status = GNTTAB(CreateCache,
+                    Granter->GnttabInterface,
+                    Name,
+                    0,
+                    GranterAcquireLock,
+                    GranterReleaseLock,
+                    Granter,
+                    &Granter->Cache);
+    if (!NT_SUCCESS(status))
+        goto fail2;
 
     return STATUS_SUCCESS;
+
+fail2:
+    Error("fail2\n");
+
+fail1:
+    Error("fail1 (%08x)\n", status);
+
+    return status;
 }
 
 NTSTATUS
@@ -193,6 +191,8 @@ GranterPermitAccess(
     NTSTATUS                    status;
 
     Frontend = Granter->Frontend;
+
+    ASSERT3P(Granter->Cache, !=, NULL);
 
     status = GNTTAB(PermitForeignAccess,
                     Granter->GnttabInterface,
@@ -222,6 +222,8 @@ GranterRevokeAccess(
 {
     PXENBUS_GNTTAB_DESCRIPTOR   Descriptor = Handle;
     NTSTATUS                    status;
+
+    ASSERT3P(Granter->Cache, !=, NULL);
 
     status = GNTTAB(RevokeForeignAccess,
                     Granter->GnttabInterface,
@@ -265,7 +267,12 @@ GranterDisconnect(
     IN  PXENVIF_GRANTER     Granter
     )
 {
-    UNREFERENCED_PARAMETER(Granter);
+    ASSERT3P(Granter->Cache, !=, NULL);
+
+    GNTTAB(DestroyCache,
+           Granter->GnttabInterface,
+           Granter->Cache);
+    Granter->Cache = NULL;
 }
 
 VOID
@@ -274,11 +281,6 @@ GranterTeardown(
     )
 {
     Granter->Frontend = NULL;
-
-    GNTTAB(DestroyCache,
-           Granter->GnttabInterface,
-           Granter->Cache);
-    Granter->Cache = NULL;
 
     RtlZeroMemory(&Granter->Lock, sizeof (KSPIN_LOCK));
 
