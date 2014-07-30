@@ -343,31 +343,6 @@ PdoGetDeviceObject(
     return __PdoGetDeviceObject(Pdo);
 }
 
-static FORCEINLINE VOID
-__PdoLink(
-    IN  PXENVIF_PDO Pdo,
-    IN  PXENVIF_FDO Fdo
-    )
-{
-    Pdo->Fdo = Fdo;
-
-    FdoAddPhysicalDeviceObject(Fdo, Pdo);
-}
-
-static FORCEINLINE VOID
-__PdoUnlink(
-    IN  PXENVIF_PDO Pdo
-    )
-{
-    PXENVIF_FDO     Fdo = Pdo->Fdo;
-
-    ASSERT(Fdo != NULL);
-
-    FdoRemovePhysicalDeviceObject(Fdo, Pdo);
-
-    Pdo->Fdo = NULL;
-}
-
 static FORCEINLINE PXENVIF_FDO
 __PdoGetFdo(
     IN  PXENVIF_PDO Pdo
@@ -2427,6 +2402,7 @@ PdoCreate(
     if (Pdo == NULL)
         goto fail2;
 
+    Pdo->Fdo = Fdo;
     Pdo->Dx = Dx;
 
     status = ThreadCreate(PdoSystemPower, Pdo, &Pdo->SystemPowerThread);
@@ -2464,7 +2440,7 @@ PdoCreate(
 
     KeInitializeSpinLock(&Pdo->EjectLock);
 
-    __PdoLink(Pdo, Fdo);
+    FdoAddPhysicalDeviceObject(Fdo, Pdo);
 
     return STATUS_SUCCESS;
 
@@ -2503,6 +2479,7 @@ fail3:
     Error("fail3\n");
 
     Pdo->Dx = NULL;
+    Pdo->Fdo = NULL;
 
     ASSERT(IsZeroMemory(Pdo, sizeof (XENVIF_PDO)));
     __PdoFree(Pdo);
@@ -2523,6 +2500,7 @@ PdoDestroy(
     IN  PXENVIF_PDO Pdo
     )
 {
+    PXENVIF_FDO     Fdo = Pdo->Fdo;
     PXENVIF_DX      Dx = Pdo->Dx;
     PDEVICE_OBJECT  PhysicalDeviceObject = Dx->DeviceObject;
 
@@ -2538,7 +2516,7 @@ PdoDestroy(
 
     Pdo->Reason = NULL;
 
-    __PdoUnlink(Pdo);
+    FdoRemovePhysicalDeviceObject(Fdo, Pdo);
 
     Dx->Pdo = NULL;
 
@@ -2560,6 +2538,7 @@ PdoDestroy(
     Pdo->SystemPowerThread = NULL;
 
     Pdo->Dx = NULL;
+    Pdo->Fdo = NULL;
 
     ASSERT(IsZeroMemory(Pdo, sizeof (XENVIF_PDO)));
     __PdoFree(Pdo);
