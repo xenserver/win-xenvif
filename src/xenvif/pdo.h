@@ -168,11 +168,6 @@ PdoGetStoreInterface(
     IN  PXENVIF_PDO     Pdo
     );
 
-extern PXENBUS_CACHE_INTERFACE
-PdoGetCacheInterface(
-    IN  PXENVIF_PDO     Pdo
-    );
-
 extern PXENBUS_GNTTAB_INTERFACE
 PdoGetGnttabInterface(
     IN  PXENVIF_PDO     Pdo
