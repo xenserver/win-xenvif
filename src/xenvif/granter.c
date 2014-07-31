@@ -113,8 +113,9 @@ GranterInitialize(
 
     GNTTAB(Acquire, (*Granter)->GnttabInterface);
 
-    (*Granter)->Frontend = Frontend;
     KeInitializeSpinLock(&(*Granter)->Lock);
+
+    (*Granter)->Frontend = Frontend;
 
     return STATUS_SUCCESS;
 
@@ -129,22 +130,23 @@ GranterConnect(
     IN  PXENVIF_GRANTER     Granter
     )
 {
+    PXENVIF_FRONTEND        Frontend;
     CHAR                    Name[MAXNAMELEN];
     ULONG                   Index;
     NTSTATUS                status;
 
+    Frontend = Granter->Frontend;
+
     status = RtlStringCbPrintfA(Name,
                                 sizeof (Name),
                                 "%s",
-                                FrontendGetPath(Granter->Frontend));
+                                FrontendGetPath(Frontend));
     if (!NT_SUCCESS(status))
         goto fail1;
 
     for (Index = 0; Name[Index] != '\0'; Index++)
         if (Name[Index] == '/')
             Name[Index] = '_';
-
-    ASSERT3P(Granter->Cache, ==, NULL);
 
     status = GNTTAB(CreateCache,
                     Granter->GnttabInterface,
@@ -192,8 +194,6 @@ GranterPermitAccess(
 
     Frontend = Granter->Frontend;
 
-    ASSERT3P(Granter->Cache, !=, NULL);
-
     status = GNTTAB(PermitForeignAccess,
                     Granter->GnttabInterface,
                     Granter->Cache,
@@ -222,8 +222,6 @@ GranterRevokeAccess(
 {
     PXENBUS_GNTTAB_DESCRIPTOR   Descriptor = Handle;
     NTSTATUS                    status;
-
-    ASSERT3P(Granter->Cache, !=, NULL);
 
     status = GNTTAB(RevokeForeignAccess,
                     Granter->GnttabInterface,
@@ -267,8 +265,6 @@ GranterDisconnect(
     IN  PXENVIF_GRANTER     Granter
     )
 {
-    ASSERT3P(Granter->Cache, !=, NULL);
-
     GNTTAB(DestroyCache,
            Granter->GnttabInterface,
            Granter->Cache);

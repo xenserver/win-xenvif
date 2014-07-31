@@ -97,7 +97,6 @@ struct _XENVIF_FDO {
     PXENBUS_EVTCHN_INTERFACE    EvtchnInterface;
     PXENBUS_DEBUG_INTERFACE     DebugInterface;
     PXENBUS_STORE_INTERFACE     StoreInterface;
-    PXENBUS_CACHE_INTERFACE     CacheInterface;
     PXENBUS_GNTTAB_INTERFACE    GnttabInterface;
     PXENBUS_SUSPEND_INTERFACE   SuspendInterface;
     PXENFILT_EMULATED_INTERFACE EmulatedInterface;
@@ -943,14 +942,6 @@ FdoGetStoreInterface(
     )
 {
     return Fdo->StoreInterface;
-}
-
-PXENBUS_CACHE_INTERFACE
-FdoGetCacheInterface(
-    IN  PXENVIF_FDO Fdo
-    )
-{
-    return Fdo->CacheInterface;
 }
 
 PXENBUS_GNTTAB_INTERFACE
@@ -2726,7 +2717,6 @@ fail1:                                                                          
 DEFINE_QUERY(GUID_EVTCHN_INTERFACE, EVTCHN_INTERFACE_VERSION, Evtchn)
 DEFINE_QUERY(GUID_DEBUG_INTERFACE, DEBUG_INTERFACE_VERSION, Debug)
 DEFINE_QUERY(GUID_STORE_INTERFACE, STORE_INTERFACE_VERSION, Store)
-DEFINE_QUERY(GUID_CACHE_INTERFACE, CACHE_INTERFACE_VERSION, Cache)
 DEFINE_QUERY(GUID_GNTTAB_INTERFACE, GNTTAB_INTERFACE_VERSION, Gnttab)
 DEFINE_QUERY(GUID_SUSPEND_INTERFACE, SUSPEND_INTERFACE_VERSION, Suspend)
 DEFINE_QUERY(GUID_EMULATED_INTERFACE, EMULATED_INTERFACE_VERSION, Emulated)
@@ -2812,17 +2802,13 @@ FdoCreate(
     if (!NT_SUCCESS(status))
         goto fail9;
 
-    status = FdoQueryCacheInterface(Fdo);
+    status = FdoQueryGnttabInterface(Fdo);
     if (!NT_SUCCESS(status))
         goto fail10;
 
-    status = FdoQueryGnttabInterface(Fdo);
-    if (!NT_SUCCESS(status))
-        goto fail11;
-
     status = FdoQuerySuspendInterface(Fdo);
     if (!NT_SUCCESS(status))
-        goto fail12;
+        goto fail11;
 
     status = FdoQueryEmulatedInterface(Fdo);
     ASSERT(IMPLY(!NT_SUCCESS(status),
@@ -2841,15 +2827,10 @@ FdoCreate(
 
     return STATUS_SUCCESS;
 
-fail12:
-    Error("fail12\n");
-
-    Fdo->GnttabInterface = NULL;
-
 fail11:
     Error("fail11\n");
 
-    Fdo->CacheInterface = NULL;
+    Fdo->GnttabInterface = NULL;
 
 fail10:
     Error("fail10\n");
@@ -2939,7 +2920,6 @@ FdoDestroy(
     Fdo->EmulatedInterface = NULL;
     Fdo->SuspendInterface = NULL;
     Fdo->GnttabInterface = NULL;
-    Fdo->CacheInterface = NULL;
     Fdo->StoreInterface = NULL;
     Fdo->DebugInterface = NULL;
     Fdo->EvtchnInterface = NULL;

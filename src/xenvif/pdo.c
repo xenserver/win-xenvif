@@ -78,14 +78,9 @@ struct _XENVIF_PDO {
     PXENVIF_FRONTEND            Frontend;
     XENVIF_VIF_INTERFACE        VifInterface;
 
-    PXENBUS_DEBUG_INTERFACE     DebugInterface;
     PXENBUS_SUSPEND_INTERFACE   SuspendInterface;
+
     PXENBUS_SUSPEND_CALLBACK    SuspendCallbackLate;
-    PXENBUS_EVTCHN_INTERFACE    EvtchnInterface;
-    PXENBUS_STORE_INTERFACE     StoreInterface;
-    PXENBUS_CACHE_INTERFACE     CacheInterface;
-    PXENBUS_GNTTAB_INTERFACE    GnttabInterface;
-    PXENFILT_EMULATED_INTERFACE EmulatedInterface;
 };
 
 static FORCEINLINE PVOID
@@ -348,31 +343,6 @@ PdoGetDeviceObject(
     return __PdoGetDeviceObject(Pdo);
 }
 
-static FORCEINLINE VOID
-__PdoLink(
-    IN  PXENVIF_PDO Pdo,
-    IN  PXENVIF_FDO Fdo
-    )
-{
-    Pdo->Fdo = Fdo;
-
-    FdoAddPhysicalDeviceObject(Fdo, Pdo);
-}
-
-static FORCEINLINE VOID
-__PdoUnlink(
-    IN  PXENVIF_PDO Pdo
-    )
-{
-    PXENVIF_FDO     Fdo = Pdo->Fdo;
-
-    ASSERT(Fdo != NULL);
-
-    FdoRemovePhysicalDeviceObject(Fdo, Pdo);
-
-    Pdo->Fdo = NULL;
-}
-
 static FORCEINLINE PXENVIF_FDO
 __PdoGetFdo(
     IN  PXENVIF_PDO Pdo
@@ -410,7 +380,7 @@ __PdoGetEvtchnInterface(
     IN  PXENVIF_PDO Pdo
     )
 {
-    return Pdo->EvtchnInterface;
+    return FdoGetEvtchnInterface(__PdoGetFdo(Pdo));
 }
 
 PXENBUS_EVTCHN_INTERFACE
@@ -426,7 +396,7 @@ __PdoGetDebugInterface(
     IN  PXENVIF_PDO Pdo
     )
 {
-    return Pdo->DebugInterface;
+    return FdoGetDebugInterface(__PdoGetFdo(Pdo));
 }
 
 PXENBUS_DEBUG_INTERFACE
@@ -442,7 +412,7 @@ __PdoGetGnttabInterface(
     IN  PXENVIF_PDO Pdo
     )
 {
-    return Pdo->GnttabInterface;
+    return FdoGetGnttabInterface(__PdoGetFdo(Pdo));
 }
 
 PXENBUS_GNTTAB_INTERFACE
@@ -458,7 +428,7 @@ __PdoGetSuspendInterface(
     IN  PXENVIF_PDO Pdo
     )
 {
-    return Pdo->SuspendInterface;
+    return FdoGetSuspendInterface(__PdoGetFdo(Pdo));
 }
 
 PXENBUS_SUSPEND_INTERFACE
@@ -474,7 +444,7 @@ __PdoGetStoreInterface(
     IN  PXENVIF_PDO Pdo
     )
 {
-    return Pdo->StoreInterface;
+    return FdoGetStoreInterface(__PdoGetFdo(Pdo));
 }
 
 PXENBUS_STORE_INTERFACE
@@ -485,28 +455,12 @@ PdoGetStoreInterface(
     return __PdoGetStoreInterface(Pdo);
 }
 
-static FORCEINLINE PXENBUS_CACHE_INTERFACE
-__PdoGetCacheInterface(
-    IN  PXENVIF_PDO Pdo
-    )
-{
-    return Pdo->CacheInterface;
-}
-
-PXENBUS_CACHE_INTERFACE
-PdoGetCacheInterface(
-    IN  PXENVIF_PDO Pdo
-    )
-{
-    return __PdoGetCacheInterface(Pdo);
-}
-
 static FORCEINLINE PXENFILT_EMULATED_INTERFACE
 __PdoGetEmulatedInterface(
     IN  PXENVIF_PDO Pdo
     )
 {
-    return Pdo->EmulatedInterface;
+    return FdoGetEmulatedInterface(__PdoGetFdo(Pdo));
 }
 
 PXENFILT_EMULATED_INTERFACE
@@ -977,6 +931,8 @@ PdoD3ToD0(
     if (!NT_SUCCESS(status))
         goto fail1;
 
+    Pdo->SuspendInterface = __PdoGetSuspendInterface(Pdo);
+
     SUSPEND(Acquire, Pdo->SuspendInterface);
 
     status = SUSPEND(Register,
@@ -994,6 +950,7 @@ fail2:
     Error("fail2\n");
 
     SUSPEND(Release, Pdo->SuspendInterface);
+    Pdo->SuspendInterface = NULL;
 
     KeRaiseIrql(DISPATCH_LEVEL, &Irql);
     __PdoD0ToD3(Pdo);
@@ -1020,6 +977,7 @@ PdoD0ToD3(
     Pdo->SuspendCallbackLate = NULL;
 
     SUSPEND(Release, Pdo->SuspendInterface);
+    Pdo->SuspendInterface = NULL;
 
     KeRaiseIrql(DISPATCH_LEVEL, &Irql);
     __PdoD0ToD3(Pdo);
@@ -2444,6 +2402,7 @@ PdoCreate(
     if (Pdo == NULL)
         goto fail2;
 
+    Pdo->Fdo = Fdo;
     Pdo->Dx = Dx;
 
     status = ThreadCreate(PdoSystemPower, Pdo, &Pdo->SystemPowerThread);
@@ -2455,14 +2414,6 @@ PdoCreate(
         goto fail4;
 
     __PdoSetName(Pdo, Name);
-
-    Pdo->DebugInterface = FdoGetDebugInterface(Fdo);
-    Pdo->SuspendInterface = FdoGetSuspendInterface(Fdo);
-    Pdo->EvtchnInterface = FdoGetEvtchnInterface(Fdo);
-    Pdo->StoreInterface = FdoGetStoreInterface(Fdo);
-    Pdo->CacheInterface = FdoGetCacheInterface(Fdo);
-    Pdo->GnttabInterface = FdoGetGnttabInterface(Fdo);
-    Pdo->EmulatedInterface = FdoGetEmulatedInterface(Fdo);
 
     status = BusInitialize(Pdo, &Pdo->BusInterface);
     if (!NT_SUCCESS(status))
@@ -2489,7 +2440,7 @@ PdoCreate(
 
     KeInitializeSpinLock(&Pdo->EjectLock);
 
-    __PdoLink(Pdo, Fdo);
+    FdoAddPhysicalDeviceObject(Fdo, Pdo);
 
     return STATUS_SUCCESS;
 
@@ -2513,14 +2464,6 @@ fail6:
 fail5:
     Error("fail5\n");
 
-    Pdo->EmulatedInterface = NULL;
-    Pdo->GnttabInterface = NULL;
-    Pdo->CacheInterface = NULL;
-    Pdo->StoreInterface = NULL;
-    Pdo->EvtchnInterface = NULL;
-    Pdo->SuspendInterface = NULL;
-    Pdo->DebugInterface = NULL;
-
     ThreadAlert(Pdo->DevicePowerThread);
     ThreadJoin(Pdo->DevicePowerThread);
     Pdo->DevicePowerThread = NULL;
@@ -2536,6 +2479,7 @@ fail3:
     Error("fail3\n");
 
     Pdo->Dx = NULL;
+    Pdo->Fdo = NULL;
 
     ASSERT(IsZeroMemory(Pdo, sizeof (XENVIF_PDO)));
     __PdoFree(Pdo);
@@ -2556,6 +2500,7 @@ PdoDestroy(
     IN  PXENVIF_PDO Pdo
     )
 {
+    PXENVIF_FDO     Fdo = Pdo->Fdo;
     PXENVIF_DX      Dx = Pdo->Dx;
     PDEVICE_OBJECT  PhysicalDeviceObject = Dx->DeviceObject;
 
@@ -2571,7 +2516,7 @@ PdoDestroy(
 
     Pdo->Reason = NULL;
 
-    __PdoUnlink(Pdo);
+    FdoRemovePhysicalDeviceObject(Fdo, Pdo);
 
     Dx->Pdo = NULL;
 
@@ -2584,14 +2529,6 @@ PdoDestroy(
 
     BusTeardown(&Pdo->BusInterface);
 
-    Pdo->EmulatedInterface = NULL;
-    Pdo->GnttabInterface = NULL;
-    Pdo->CacheInterface = NULL;
-    Pdo->StoreInterface = NULL;
-    Pdo->EvtchnInterface = NULL;
-    Pdo->SuspendInterface = NULL;
-    Pdo->DebugInterface = NULL;
-
     ThreadAlert(Pdo->DevicePowerThread);
     ThreadJoin(Pdo->DevicePowerThread);
     Pdo->DevicePowerThread = NULL;
@@ -2601,6 +2538,7 @@ PdoDestroy(
     Pdo->SystemPowerThread = NULL;
 
     Pdo->Dx = NULL;
+    Pdo->Fdo = NULL;
 
     ASSERT(IsZeroMemory(Pdo, sizeof (XENVIF_PDO)));
     __PdoFree(Pdo);
