@@ -1051,11 +1051,17 @@ __PdoCheckForAlias(
     AliasesKey = DriverGetAliasesKey();
     ASSERT(AliasesKey != NULL);
 
+    Alias = NULL;
+
     status = RegistryQuerySzValue(AliasesKey,
                                   __PdoGetName(Pdo),
                                   &Alias);
-    if (!NT_SUCCESS(status))
+    if (!NT_SUCCESS(status)) {
+        if (status == STATUS_OBJECT_NAME_NOT_FOUND)
+            goto done;
+
         goto fail2;
+    }
 
     if (Alias->Length == 0)   // No alias
         goto done;
@@ -1089,7 +1095,8 @@ __PdoCheckForAlias(
     EMULATED(Release, EmulatedInterface);
     
 done:
-    RegistryFreeSzValue(Alias);
+    if (Alias != NULL)
+        RegistryFreeSzValue(Alias);
 
     return STATUS_SUCCESS;
 
