@@ -29,77 +29,99 @@
  * SUCH DAMAGE.
  */
 
+/*! \file emulated_interface.h
+    \brief XENFILT EMULATED Interface
+
+    This interface provides primitives to determine whether emulated
+    devices or disks are present in the VM
+*/
+
 #ifndef _XENFILT_EMULATED_INTERFACE_H
 #define _XENFILT_EMULATED_INTERFACE_H
 
-#define DEFINE_EMULATED_OPERATIONS                                      \
-        EMULATED_OPERATION(VOID,                                        \
-                           Acquire,                                     \
-                           (                                            \
-                           IN  PXENFILT_EMULATED_CONTEXT Context        \
-                           )                                            \
-                           )                                            \
-        EMULATED_OPERATION(VOID,                                        \
-                           Release,                                     \
-                           (                                            \
-                           IN  PXENFILT_EMULATED_CONTEXT Context        \
-                           )                                            \
-                           )                                            \
-        EMULATED_OPERATION(BOOLEAN,                                     \
-                           IsDevicePresent,                             \
-                           (                                            \
-                           IN  PXENFILT_EMULATED_CONTEXT Context,       \
-                           IN  PCHAR                     DeviceID,      \
-                           IN  PCHAR                     InstanceID     \
-                           )                                            \
-                           )                                            \
-        EMULATED_OPERATION(BOOLEAN,                                     \
-                           IsDiskPresent,                               \
-                           (                                            \
-                           IN  PXENFILT_EMULATED_CONTEXT Context,       \
-                           IN  ULONG                     Controller,    \
-                           IN  ULONG                     Target,        \
-                           IN  ULONG                     Lun            \
-                           )                                            \
-                           )
+#ifndef _WINDLL
 
-typedef struct _XENFILT_EMULATED_CONTEXT    XENFILT_EMULATED_CONTEXT, *PXENFILT_EMULATED_CONTEXT;
+/*! \typedef XENFILT_EMULATED_ACQUIRE
+    \brief Acquire a reference to the EMULATED interface
 
-#define EMULATED_OPERATION(_Type, _Name, _Arguments) \
-        _Type (*EMULATED_ ## _Name) _Arguments;
+    \param Interface The interface header
+*/  
+typedef NTSTATUS
+(*XENFILT_EMULATED_ACQUIRE)(
+    IN  PINTERFACE  Interface
+    );
 
-typedef struct _XENFILT_EMULATED_OPERATIONS {
-    DEFINE_EMULATED_OPERATIONS
-} XENFILT_EMULATED_OPERATIONS, *PXENFILT_EMULATED_OPERATIONS;
+/*! \typedef XENFILT_EMULATED_RELEASE
+    \brief Release a reference to the EMULATED interface
 
-#undef EMULATED_OPERATION
+    \param Interface The interface header
+*/  
+typedef VOID
+(*XENFILT_EMULATED_RELEASE)(
+    IN  PINTERFACE  Interface
+    );
 
-typedef struct _XENFILT_EMULATED_INTERFACE   XENFILT_EMULATED_INTERFACE, *PXENFILT_EMULATED_INTERFACE;
+/*! \typedef XENFILT_EMULATED_IS_DEVICE_PRESENT
+    \brief Determine whether a given device is present in the VM
 
-// {062AAC96-2BF8-4A69-AD6B-154CF051E977}
-DEFINE_GUID(GUID_EMULATED_INTERFACE, 
-            0x62aac96,
-            0x2bf8,
-            0x4a69,
-            0xad,
-            0x6b,
-            0x15,
-            0x4c,
-            0xf0,
-            0x51,
-            0xe9,
-            0x77);
+    \param Interface The interface header
+    \param DeviceID The DeviceID of the device
+    \param InstanceID The (un-prefixed) InstanceID of the device
+    \return TRUE if the specified device is present in the system or
+    FALSE if it is not
+*/  
+typedef BOOLEAN
+(*XENFILT_EMULATED_IS_DEVICE_PRESENT)(
+    IN  PVOID   Context,
+    IN  PCHAR   DeviceID,
+    IN  PCHAR   InstanceID
+    );
 
-#define EMULATED_INTERFACE_VERSION    4
+/*! \typedef XENFILT_EMULATED_IS_DISK_PRESENT
+    \brief Determine whether a given disk is present in the VM
 
-#define EMULATED_OPERATIONS(_Interface) \
-        (PXENFILT_EMULATED_OPERATIONS *)((ULONG_PTR)(_Interface))
+    \param Interface The interface header
+    \param Controller The controller index of the HBA
+    \param Target The target index of the disk
+    \param Lun The Logical Unit Number of the disk within the target
+    \return TRUE if the specified disk is present in the system or
+    FALSE if it is not
+*/  
+typedef BOOLEAN
+(*XENFILT_EMULATED_IS_DISK_PRESENT)(
+    IN  PVOID   Context,
+    IN  ULONG   Controller,
+    IN  ULONG   Target,
+    IN  ULONG   Lun
+    );
 
-#define EMULATED_CONTEXT(_Interface) \
-        (PXENFILT_EMULATED_CONTEXT *)((ULONG_PTR)(_Interface) + sizeof (PVOID))
+// {959027A1-FCCE-4E78-BCF4-637384F499C5}
+DEFINE_GUID(GUID_XENFILT_EMULATED_INTERFACE, 
+0x959027a1, 0xfcce, 0x4e78, 0xbc, 0xf4, 0x63, 0x73, 0x84, 0xf4, 0x99, 0xc5);
 
-#define EMULATED(_Operation, _Interface, ...) \
-        (*EMULATED_OPERATIONS(_Interface))->EMULATED_ ## _Operation((*EMULATED_CONTEXT(_Interface)), __VA_ARGS__)
+/*! \struct _XENFILT_EMULATED_INTERFACE_V1
+    \brief EMULATED interface version 1
+*/
+struct _XENFILT_EMULATED_INTERFACE_V1 {
+    INTERFACE                           Interface;
+    XENFILT_EMULATED_ACQUIRE            EmulatedAcquire;
+    XENFILT_EMULATED_RELEASE            EmulatedRelease;
+    XENFILT_EMULATED_IS_DEVICE_PRESENT  EmulatedIsDevicePresent;
+    XENFILT_EMULATED_IS_DISK_PRESENT    EmulatedIsDiskPresent;
+};
+
+typedef struct _XENFILT_EMULATED_INTERFACE_V1 XENFILT_EMULATED_INTERFACE, *PXENFILT_EMULATED_INTERFACE;
+
+/*! \def XENFILT_EMULATED
+    \brief Macro at assist in method invocation
+*/
+#define XENFILT_EMULATED(_Method, _Interface, ...)    \
+    (_Interface)->Emulated ## _Method((PINTERFACE)(_Interface), __VA_ARGS__)
+
+#endif  // _WINDLL
+
+#define XENFILT_EMULATED_INTERFACE_VERSION_MIN  1
+#define XENFILT_EMULATED_INTERFACE_VERSION_MAX  1
 
 #endif  // _XENFILT_EMULATED_INTERFACE_H
 

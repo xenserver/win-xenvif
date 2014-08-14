@@ -35,37 +35,48 @@
 #include <ntddk.h>
 #include <vif_interface.h>
 
+#include "thread.h"
+
+typedef struct _XENVIF_VIF_CONTEXT  XENVIF_VIF_CONTEXT, *PXENVIF_VIF_CONTEXT;
+
 #include "fdo.h"
-
-struct _XENVIF_VIF_INTERFACE {
-    PXENVIF_VIF_OPERATIONS  Operations;
-    PXENVIF_VIF_CONTEXT     Context;
-};
-
-C_ASSERT(FIELD_OFFSET(XENVIF_VIF_INTERFACE, Operations) == (ULONG_PTR)VIF_OPERATIONS(NULL));
-C_ASSERT(FIELD_OFFSET(XENVIF_VIF_INTERFACE, Context) == (ULONG_PTR)VIF_CONTEXT(NULL));
 
 extern NTSTATUS
 VifInitialize(
-    IN  PXENVIF_PDO                 Pdo,
-    OUT PXENVIF_VIF_INTERFACE       Interface
+    IN  PXENVIF_PDO         Pdo,
+    OUT PXENVIF_VIF_CONTEXT *Context
+    );
+
+extern NTSTATUS
+VifGetInterface(
+    IN      PXENVIF_VIF_CONTEXT Context,
+    IN      ULONG               Version,
+    IN OUT  PINTERFACE          Interface,
+    IN      ULONG               Size
     );
 
 extern VOID
 VifTeardown(
-    IN OUT  PXENVIF_VIF_INTERFACE   Interface
+    IN  PXENVIF_VIF_CONTEXT Context
+    );
+
+// CALLBACKS
+
+extern VOID
+VifReceiverQueuePackets(
+    IN  PXENVIF_VIF_CONTEXT Context,
+    IN  PLIST_ENTRY         List
     );
 
 extern VOID
-VifCompletePackets(
-    IN  PXENVIF_VIF_INTERFACE       Interface,
-    IN  PXENVIF_TRANSMITTER_PACKET  HeadPacket
+VifTransmitterReturnPackets(
+    IN  PXENVIF_VIF_CONTEXT         Context,
+    IN  PXENVIF_TRANSMITTER_PACKET  Head
     );
 
-extern VOID
-VifReceivePackets(
-    IN  PXENVIF_VIF_INTERFACE   Interface,
-    IN  PLIST_ENTRY             List
+extern PXENVIF_THREAD
+VifGetMacThread(
+    IN  PXENVIF_VIF_CONTEXT Context
     );
 
 #endif  // _XENVIF_VIF_H

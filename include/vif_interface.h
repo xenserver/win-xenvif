@@ -32,98 +32,77 @@
 #ifndef _XENVIF_VIF_INTERFACE_H
 #define _XENVIF_VIF_INTERFACE_H
 
+#ifndef _WINDLL
+
 #include <ifdef.h>
 #include <ethernet.h>
 
-typedef UCHAR   XENVIF_PACKET_STATUS, *PXENVIF_PACKET_STATUS;
-
-#define PACKET_STATUS_INVALID   0
-#define PACKET_PENDING          1
-#define PACKET_OK               2
-#define PACKET_DROPPED          3
-#define PACKET_ERROR            4
-
-typedef struct  _XENVIF_PACKET_HEADER {
+struct  _XENVIF_PACKET_HEADER_V1 {
     ULONG   Offset;
     ULONG   Length;
-} XENVIF_PACKET_HEADER, *PXENVIF_PACKET_HEADER;
+};
+
+struct _XENVIF_PACKET_INFO_V1 {
+    ULONG                           Length;
+    USHORT                          TagControlInformation;
+    BOOLEAN                         IsAFragment;
+    struct _XENVIF_PACKET_HEADER_V1 EthernetHeader;
+    struct _XENVIF_PACKET_HEADER_V1 LLCSnapHeader;
+    struct _XENVIF_PACKET_HEADER_V1 IpHeader;
+    struct _XENVIF_PACKET_HEADER_V1 IpOptions;
+    struct _XENVIF_PACKET_HEADER_V1 TcpHeader;
+    struct _XENVIF_PACKET_HEADER_V1 TcpOptions;
+    struct _XENVIF_PACKET_HEADER_V1 UdpHeader;
+};
+
+typedef struct _XENVIF_PACKET_INFO_V1   XENVIF_PACKET_INFO, *PXENVIF_PACKET_INFO;
 
 #pragma warning(push)
 #pragma warning(disable:4214)   // nonstandard extension used : bit field types other than int
 #pragma warning(disable:4201)   // nonstandard extension used : nameless struct/union
 
-typedef struct _XENVIF_PACKET_FLAGS {
-    struct {
-        ULONG   IsAFragment:1;
-        ULONG   Reserved:31;
+struct _XENVIF_PACKET_CHECKSUM_FLAGS_V1 {
+    union {
+        struct {
+            ULONG   IpChecksumSucceeded:1;
+            ULONG   IpChecksumFailed:1;
+            ULONG   IpChecksumPresent:1;
+            ULONG   TcpChecksumSucceeded:1;
+            ULONG   TcpChecksumFailed:1;
+            ULONG   TcpChecksumPresent:1;
+            ULONG   UdpChecksumSucceeded:1;
+            ULONG   UdpChecksumFailed:1;
+            ULONG   UdpChecksumPresent:1;
+            ULONG   Reserved:23;
+        };
+
+        ULONG   Value;
     };
-} XENVIF_PACKET_FLAGS, *PXENVIF_PACKET_FLAGS;
+};
+
+typedef struct _XENVIF_PACKET_CHECKSUM_FLAGS_V1 XENVIF_PACKET_CHECKSUM_FLAGS, *PXENVIF_PACKET_CHECKSUM_FLAGS;
 
 #pragma warning(pop)
 
-typedef struct _XENVIF_PACKET_INFO {
-    XENVIF_PACKET_HEADER    EthernetHeader;
-    XENVIF_PACKET_HEADER    LLCSnapHeader;
-    XENVIF_PACKET_HEADER    IpHeader;
-    XENVIF_PACKET_HEADER    IpOptions;
-    XENVIF_PACKET_HEADER    TcpHeader;
-    XENVIF_PACKET_HEADER    TcpOptions;
-    XENVIF_PACKET_HEADER    UdpHeader;
-    XENVIF_PACKET_FLAGS     Flags;
-    ULONG                   Length;
-} XENVIF_PACKET_INFO, *PXENVIF_PACKET_INFO;
+struct _XENVIF_RECEIVER_PACKET_V1 {
+    LIST_ENTRY                              ListEntry;
+    struct _XENVIF_PACKET_INFO_V1           *Info;
+    ULONG                                   Offset;
+    ULONG                                   Length;
+    struct _XENVIF_PACKET_CHECKSUM_FLAGS_V1 Flags;
+    USHORT                                  MaximumSegmentSize;
+    PVOID                                   Cookie;
+    MDL                                     Mdl;
+    PFN_NUMBER                              __Pfn;
+};
+
+typedef struct _XENVIF_RECEIVER_PACKET_V1 XENVIF_RECEIVER_PACKET, *PXENVIF_RECEIVER_PACKET;
 
 #pragma warning(push)
 #pragma warning(disable:4214)   // nonstandard extension used : bit field types other than int
 #pragma warning(disable:4201)   // nonstandard extension used : nameless struct/union
 
-typedef struct _XENVIF_CHECKSUM_FLAGS {
-    struct {
-        ULONG   IpChecksumSucceeded:1;
-        ULONG   IpChecksumFailed:1;
-        ULONG   IpChecksumPresent:1;
-        ULONG   TcpChecksumSucceeded:1;
-        ULONG   TcpChecksumFailed:1;
-        ULONG   TcpChecksumPresent:1;
-        ULONG   UdpChecksumSucceeded:1;
-        ULONG   UdpChecksumFailed:1;
-        ULONG   UdpChecksumPresent:1;
-        ULONG   Reserved:23;
-    };
-} XENVIF_CHECKSUM_FLAGS, *PXENVIF_CHECKSUM_FLAGS;
-
-#pragma warning(pop)
-
-typedef struct _XENVIF_RECEIVER_PACKET {
-    LIST_ENTRY              ListEntry;
-    ULONG                   Offset;
-    ULONG                   Length;
-    XENVIF_PACKET_INFO      Info;
-    XENVIF_CHECKSUM_FLAGS   Flags;
-    USHORT                  TagControlInformation;
-    USHORT                  MaximumSegmentSize;
-    PVOID                   Cookie;
-    MDL                     Mdl;
-    PFN_NUMBER              __Pfn;
-} XENVIF_RECEIVER_PACKET, *PXENVIF_RECEIVER_PACKET;
-
-typedef struct _XENVIF_RECEIVER_PACKET_STATISTICS {
-    ULONGLONG   Drop;
-    ULONGLONG   BackendError;
-    ULONGLONG   FrontendError;
-    ULONGLONG   Unicast;
-    ULONGLONG   UnicastBytes;
-    ULONGLONG   Multicast;
-    ULONGLONG   MulticastBytes;
-    ULONGLONG   Broadcast;
-    ULONGLONG   BroadcastBytes;
-} XENVIF_RECEIVER_PACKET_STATISTICS, *PXENVIF_RECEIVER_PACKET_STATISTICS;
-
-#pragma warning(push)
-#pragma warning(disable:4214)   // nonstandard extension used : bit field types other than int
-#pragma warning(disable:4201)   // nonstandard extension used : nameless struct/union
-
-typedef struct _XENVIF_OFFLOAD_OPTIONS {
+struct _XENVIF_VIF_OFFLOAD_OPTIONS_V1 {
     union {
         struct {
             USHORT  OffloadTagManipulation:1;
@@ -141,290 +120,276 @@ typedef struct _XENVIF_OFFLOAD_OPTIONS {
 
         USHORT  Value;
     };
-} XENVIF_OFFLOAD_OPTIONS, *PXENVIF_OFFLOAD_OPTIONS;
+};
+
+typedef struct _XENVIF_VIF_OFFLOAD_OPTIONS_V1 XENVIF_VIF_OFFLOAD_OPTIONS, *PXENVIF_VIF_OFFLOAD_OPTIONS;
 
 #pragma warning(pop)
-
-typedef struct _XENVIF_TRANSMITTER_PACKET   XENVIF_TRANSMITTER_PACKET, *PXENVIF_TRANSMITTER_PACKET;
 
 // To fit into the reserved space in NDIS_PACKET and NET_BUFFER structures the XENVIF_TRANSMITTER_PACKET
 // structure must be at most the size of 3 pointer types.
 
 #pragma pack(push, 1) 
-typedef struct _XENVIF_SEND_INFO {
-    XENVIF_OFFLOAD_OPTIONS  OffloadOptions;
-    USHORT                  MaximumSegmentSize;     // Only used if OffloadOptions.OffloadIpVersion[4|6}LargePacket is set
-    USHORT                  TagControlInformation;  // Only used if OffloadOptions.OffloadTagManipulation is set
-} XENVIF_SEND_INFO, *PXENVIF_SEND_INFO;
+struct _XENVIF_TRANSMITTER_PACKET_SEND_INFO_V1 {
+    XENVIF_VIF_OFFLOAD_OPTIONS  OffloadOptions;
+    USHORT                      MaximumSegmentSize;     // Only used if OffloadOptions.OffloadIpVersion[4|6]LargePacket is set
+    USHORT                      TagControlInformation;  // Only used if OffloadOptions.OffloadTagManipulation is set
+};
 
-typedef struct _XENVIF_COMPLETION_INFO {
-    UCHAR                   Type;
-    XENVIF_PACKET_STATUS    Status;
-    USHORT                  PacketLength;
-    USHORT                  PayloadLength;
-} XENVIF_COMPLETION_INFO, *PXENVIF_COMPLETION_INFO;
+typedef struct _XENVIF_TRANSMITTER_PACKET_SEND_INFO_V1 XENVIF_TRANSMITTER_PACKET_SEND_INFO, *PXENVIF_TRANSMITTER_PACKET_SEND_INFO;
+
+struct _XENVIF_TRANSMITTER_PACKET_COMPLETION_INFO_V1 {
+    UCHAR   Type;
+    UCHAR   Status;
+
+#define XENVIF_TRANSMITTER_PACKET_PENDING   1
+#define XENVIF_TRANSMITTER_PACKET_OK        2
+#define XENVIF_TRANSMITTER_PACKET_DROPPED   3
+#define XENVIF_TRANSMITTER_PACKET_ERROR     4
+
+    USHORT  PacketLength;
+    USHORT  PayloadLength;
+};
+
+typedef struct _XENVIF_TRANSMITTER_PACKET_COMPLETION_INFO_V1 XENVIF_TRANSMITTER_PACKET_COMPLETION_INFO, *PXENVIF_TRANSMITTER_PACKET_COMPLETION_INFO;
 
 #pragma warning(push)
 #pragma warning(disable:4201)   // nonstandard extension used : nameless struct/union
 
-struct _XENVIF_TRANSMITTER_PACKET {
-    PXENVIF_TRANSMITTER_PACKET  Next;
+struct _XENVIF_TRANSMITTER_PACKET_V1 {
+    struct _XENVIF_TRANSMITTER_PACKET_V1                        *Next;
     union {
-        XENVIF_SEND_INFO        Send;
-        XENVIF_COMPLETION_INFO  Completion;
+        struct _XENVIF_TRANSMITTER_PACKET_SEND_INFO_V1          Send;
+        struct _XENVIF_TRANSMITTER_PACKET_COMPLETION_INFO_V1    Completion;
     };
 };
+
+typedef struct _XENVIF_TRANSMITTER_PACKET_V1 XENVIF_TRANSMITTER_PACKET, *PXENVIF_TRANSMITTER_PACKET;
 
 #pragma warning(pop)
 
 #pragma pack(pop) 
 
-C_ASSERT(sizeof (XENVIF_TRANSMITTER_PACKET) <= (3 * sizeof (PVOID)));
+C_ASSERT(sizeof (struct _XENVIF_TRANSMITTER_PACKET_V1) <= (3 * sizeof (PVOID)));
 
-// Because we're so tight on space in the XENVIF_TRANSMITTER_PACKET structure, certain packet metadata
-// needs to be accessed via magic offsets
-typedef struct _XENVIF_TRANSMITTER_PACKET_METADATA {
-    LONG_PTR    OffsetOffset;
-    LONG_PTR    LengthOffset;
-    LONG_PTR    MdlOffset;
-} XENVIF_TRANSMITTER_PACKET_METADATA, *PXENVIF_TRANSMITTER_PACKET_METADATA;
+typedef enum _XENVIF_TRANSMITTER_PACKET_OFFSET {
+    XENVIF_TRANSMITTER_PACKET_OFFSET_OFFSET = 0,
+    XENVIF_TRANSMITTER_PACKET_LENGTH_OFFSET,
+    XENVIF_TRANSMITTER_PACKET_MDL_OFFSET,
+    XENVIF_TRANSMITTER_PACKET_OFFSET_COUNT
+} XENVIF_TRANSMITTER_PACKET_OFFSET, *PXENVIF_TRANSMITTER_PACKET_OFFSET;
 
-typedef struct _XENVIF_TRANSMITTER_PACKET_STATISTICS {
-    ULONGLONG   Drop;
-    ULONGLONG   BackendError;
-    ULONGLONG   FrontendError;
-    ULONGLONG   Unicast;
-    ULONGLONG   UnicastBytes;
-    ULONGLONG   Multicast;
-    ULONGLONG   MulticastBytes;
-    ULONGLONG   Broadcast;
-    ULONGLONG   BroadcastBytes;
-} XENVIF_TRANSMITTER_PACKET_STATISTICS, *PXENVIF_TRANSMITTER_PACKET_STATISTICS;
-
-typedef struct _XENVIF_PACKET_STATISTICS {
-    XENVIF_RECEIVER_PACKET_STATISTICS       Receiver;
-    XENVIF_TRANSMITTER_PACKET_STATISTICS    Transmitter;
-} XENVIF_PACKET_STATISTICS, *PXENVIF_PACKET_STATISTICS;
-
-#define MAXIMUM_MULTICAST_ADDRESS_COUNT 32  // Minimum number to pass WHQL
+typedef enum _XENVIF_VIF_STATISTIC {
+    XENVIF_TRANSMITTER_PACKETS_DROPPED = 0,
+    XENVIF_TRANSMITTER_BACKEND_ERRORS,
+    XENVIF_TRANSMITTER_FRONTEND_ERRORS,
+    XENVIF_TRANSMITTER_UNICAST_PACKETS,
+    XENVIF_TRANSMITTER_UNICAST_OCTETS,
+    XENVIF_TRANSMITTER_MULTICAST_PACKETS,
+    XENVIF_TRANSMITTER_MULTICAST_OCTETS,
+    XENVIF_TRANSMITTER_BROADCAST_PACKETS,
+    XENVIF_TRANSMITTER_BROADCAST_OCTETS,
+    XENVIF_RECEIVER_PACKETS_DROPPED,
+    XENVIF_RECEIVER_BACKEND_ERRORS,
+    XENVIF_RECEIVER_FRONTEND_ERRORS,
+    XENVIF_RECEIVER_UNICAST_PACKETS,
+    XENVIF_RECEIVER_UNICAST_OCTETS,
+    XENVIF_RECEIVER_MULTICAST_PACKETS,
+    XENVIF_RECEIVER_MULTICAST_OCTETS,
+    XENVIF_RECEIVER_BROADCAST_PACKETS,
+    XENVIF_RECEIVER_BROADCAST_OCTETS,
+    XENVIF_VIF_STATISTIC_COUNT
+} XENVIF_VIF_STATISTIC, *PXENVIF_VIF_STATISTIC;
 
 typedef enum _XENVIF_MAC_FILTER_LEVEL {
-    MAC_FILTER_NONE = 0,
-    MAC_FILTER_MATCHING = 1,
-    MAC_FILTER_ALL = 2
+    XENVIF_MAC_FILTER_NONE = 0,
+    XENVIF_MAC_FILTER_MATCHING = 1,
+    XENVIF_MAC_FILTER_ALL = 2
 } XENVIF_MAC_FILTER_LEVEL, *PXENVIF_MAC_FILTER_LEVEL;
 
-typedef struct _XENVIF_MEDIA_STATE {
-    NET_IF_MEDIA_CONNECT_STATE  MediaConnectState;
-    ULONG64                     LinkSpeed;
-    NET_IF_MEDIA_DUPLEX_STATE   MediaDuplexState;
-} XENVIF_MEDIA_STATE, *PXENVIF_MEDIA_STATE;
+typedef enum _XENVIF_VIF_CALLBACK_TYPE {
+    XENVIF_TRANSMITTER_RETURN_PACKETS = 0,
+    XENVIF_RECEIVER_QUEUE_PACKETS,
+    XENVIF_MAC_STATE_CHANGE
+} XENVIF_VIF_CALLBACK_TYPE, *PXENVIF_VIF_CALLBACK_TYPE;
 
-typedef enum XENVIF_CALLBACK_TYPE {
-    XENVIF_CALLBACK_TYPE_INVALID = 0,
-    XENVIF_CALLBACK_COMPLETE_PACKETS,
-    XENVIF_CALLBACK_RECEIVE_PACKETS,
-    XENVIF_CALLBACK_MEDIA_STATE_CHANGE
-} XENVIF_CALLBACK_TYPE, *PXENVIF_CALLBACK_TYPE;
+typedef NTSTATUS
+(*XENVIF_VIF_ACQUIRE)(
+    IN  PINTERFACE  Interface
+    );
 
-#define DEFINE_VIF_OPERATIONS                                                                   \
-        VIF_OPERATION(VOID,                                                                     \
-                      Acquire,                                                                  \
-                      (                                                                         \
-                      IN  PXENVIF_VIF_CONTEXT  Context                                          \
-                      )                                                                         \
-                      )                                                                         \
-        VIF_OPERATION(VOID,                                                                     \
-                      Release,                                                                  \
-                      (                                                                         \
-                      IN  PXENVIF_VIF_CONTEXT  Context                                          \
-                      )                                                                         \
-                      )                                                                         \
-        VIF_OPERATION(NTSTATUS,                                                                 \
-                      Enable,                                                                   \
-                      (                                                                         \
-                      IN  PXENVIF_VIF_CONTEXT  Context,                                         \
-                      IN  VOID                 (*Function)(PVOID, XENVIF_CALLBACK_TYPE, ...),   \
-                      IN  PVOID                Argument OPTIONAL                                \
-                      )                                                                         \
-                      )                                                                         \
-        VIF_OPERATION(VOID,                                                                     \
-                      Disable,                                                                  \
-                      (                                                                         \
-                      IN  PXENVIF_VIF_CONTEXT  Context                                          \
-                      )                                                                         \
-                      )                                                                         \
-        VIF_OPERATION(VOID,                                                                     \
-                      QueryPacketStatistics,                                                    \
-                      (                                                                         \
-                      IN  PXENVIF_VIF_CONTEXT       Context,                                    \
-                      OUT PXENVIF_PACKET_STATISTICS Statistics                                  \
-                      )                                                                         \
-                      )                                                                         \
-        VIF_OPERATION(VOID,                                                                     \
-                      UpdatePacketMetadata,                                                     \
-                      (                                                                         \
-                      IN  PXENVIF_VIF_CONTEXT                   Context,                        \
-                      IN  PXENVIF_TRANSMITTER_PACKET_METADATA   Metadata                        \
-                      )                                                                         \
-                      )                                                                         \
-        VIF_OPERATION(VOID,                                                                     \
-                      ReturnPacket,                                                             \
-                      (                                                                         \
-                      IN  PXENVIF_VIF_CONTEXT       Context,                                    \
-                      IN  PXENVIF_RECEIVER_PACKET   Packet                                      \
-                      )                                                                         \
-                      )                                                                         \
-        VIF_OPERATION(NTSTATUS,                                                                 \
-                      QueuePackets,                                                             \
-                      (                                                                         \
-                      IN  PXENVIF_VIF_CONTEXT           Context,                                \
-                      IN  PXENVIF_TRANSMITTER_PACKET    HeadPacket                              \
-                      )                                                                         \
-                      )                                                                         \
-        VIF_OPERATION(VOID,                                                                     \
-                      QueryOffloadOptions,                                                      \
-                      (                                                                         \
-                      IN  PXENVIF_VIF_CONTEXT       Context,                                    \
-                      OUT PXENVIF_OFFLOAD_OPTIONS   Options                                     \
-                      )                                                                         \
-                      )                                                                         \
-        VIF_OPERATION(VOID,                                                                     \
-                      UpdateOffloadOptions,                                                     \
-                      (                                                                         \
-                      IN  PXENVIF_VIF_CONTEXT       Context,                                    \
-                      IN  XENVIF_OFFLOAD_OPTIONS    Options                                     \
-                      )                                                                         \
-                      )                                                                         \
-        VIF_OPERATION(VOID,                                                                     \
-                      QueryLargePacketSize,                                                     \
-                      (                                                                         \
-                      IN  PXENVIF_VIF_CONTEXT   Context,                                        \
-                      IN  UCHAR                 Version,                                        \
-                      OUT PULONG                Size                                            \
-                      )                                                                         \
-                      )                                                                         \
-        VIF_OPERATION(VOID,                                                                     \
-                      QueryMediaState,                                                          \
-                      (                                                                         \
-                      IN  PXENVIF_VIF_CONTEXT           Context,                                \
-                      OUT PNET_IF_MEDIA_CONNECT_STATE   MediaConnectState OPTIONAL,             \
-                      OUT PULONG64                      LinkSpeed OPTIONAL,                     \
-                      OUT PNET_IF_MEDIA_DUPLEX_STATE    MediaDuplexState OPTIONAL               \
-                      )                                                                         \
-                      )                                                                         \
-        VIF_OPERATION(VOID,                                                                     \
-                      QueryMaximumFrameSize,                                                    \
-                      (                                                                         \
-                      IN  PXENVIF_VIF_CONTEXT   Context,                                        \
-                      OUT PULONG                Size                                            \
-                      )                                                                         \
-                      )                                                                         \
-        VIF_OPERATION(VOID,                                                                     \
-                      QueryPermanentAddress,                                                    \
-                      (                                                                         \
-                      IN  PXENVIF_VIF_CONTEXT   Context,                                        \
-                      OUT PETHERNET_ADDRESS     Address                                         \
-                      )                                                                         \
-                      )                                                                         \
-        VIF_OPERATION(VOID,                                                                     \
-                      QueryCurrentAddress,                                                      \
-                      (                                                                         \
-                      IN  PXENVIF_VIF_CONTEXT   Context,                                        \
-                      OUT PETHERNET_ADDRESS     Address                                         \
-                      )                                                                         \
-                      )                                                                         \
-        VIF_OPERATION(NTSTATUS,                                                                 \
-                      UpdateCurrentAddress,                                                     \
-                      (                                                                         \
-                      IN  PXENVIF_VIF_CONTEXT   Context,                                        \
-                      IN  PETHERNET_ADDRESS     Address                                         \
-                      )                                                                         \
-                      )                                                                         \
-        VIF_OPERATION(NTSTATUS,                                                                 \
-                      QueryMulticastAddresses,                                                  \
-                      (                                                                         \
-                      IN  PXENVIF_VIF_CONTEXT   Context,                                        \
-                      OUT PETHERNET_ADDRESS     Address OPTIONAL,                               \
-                      OUT PULONG                Count                                           \
-                      )                                                                         \
-                      )                                                                         \
-        VIF_OPERATION(NTSTATUS,                                                                 \
-                      UpdateMulticastAddresses,                                                 \
-                      (                                                                         \
-                      IN  PXENVIF_VIF_CONTEXT   Context,                                        \
-                      IN  PETHERNET_ADDRESS     Address,                                        \
-                      IN  ULONG                 Count                                           \
-                      )                                                                         \
-                      )                                                                         \
-        VIF_OPERATION(VOID,                                                                     \
-                      QueryFilterLevel,                                                         \
-                      (                                                                         \
-                      IN  PXENVIF_VIF_CONTEXT       Context,                                    \
-                      IN  ETHERNET_ADDRESS_TYPE     Type,                                       \
-                      OUT PXENVIF_MAC_FILTER_LEVEL  Level                                       \
-                      )                                                                         \
-                      )                                                                         \
-        VIF_OPERATION(NTSTATUS,                                                                 \
-                      UpdateFilterLevel,                                                        \
-                      (                                                                         \
-                      IN  PXENVIF_VIF_CONTEXT       Context,                                    \
-                      IN  ETHERNET_ADDRESS_TYPE     Type,                                       \
-                      IN  XENVIF_MAC_FILTER_LEVEL   Level                                       \
-                      )                                                                         \
-                      )                                                                         \
-        VIF_OPERATION(VOID,                                                                     \
-                      QueryReceiverRingSize,                                                    \
-                      (                                                                         \
-                      IN  PXENVIF_VIF_CONTEXT       Context,                                    \
-                      OUT PULONG                    Size                                        \
-                      )                                                                         \
-                      )                                                                         \
-        VIF_OPERATION(VOID,                                                                     \
-                      QueryTransmitterRingSize,                                                 \
-                      (                                                                         \
-                      IN  PXENVIF_VIF_CONTEXT       Context,                                    \
-                      OUT PULONG                    Size                                        \
-                      )                                                                         \
-                      )
+typedef VOID
+(*XENVIF_VIF_RELEASE)(
+    IN  PINTERFACE  Interface
+    );
 
-typedef struct _XENVIF_VIF_CONTEXT  XENVIF_VIF_CONTEXT, *PXENVIF_VIF_CONTEXT;
+typedef VOID
+(*XENVIF_VIF_CALLBACK)(
+    IN  PVOID                       Argument,
+    IN  XENVIF_VIF_CALLBACK_TYPE    Type,
+    ...
+    );
 
-#define VIF_OPERATION(_Type, _Name, _Arguments) \
-        _Type (*VIF_ ## _Name) _Arguments;
+typedef NTSTATUS
+(*XENVIF_VIF_ENABLE)(
+    IN  PINTERFACE          Interface,
+    IN  XENVIF_VIF_CALLBACK Callback,
+    IN  PVOID               Argument OPTIONAL
+    );
 
-typedef struct _XENVIF_VIF_OPERATIONS {
-    DEFINE_VIF_OPERATIONS
-} XENVIF_VIF_OPERATIONS, *PXENVIF_VIF_OPERATIONS;
+typedef VOID
+(*XENVIF_VIF_DISABLE)(
+    IN  PINTERFACE  Interface
+    );
 
-#undef VIF_OPERATION
+typedef NTSTATUS
+(*XENVIF_VIF_QUERY_STATISTIC)(
+    IN  PINTERFACE              Interface,
+    IN  XENVIF_VIF_STATISTIC    Index,
+    OUT PULONGLONG              Value
+    );
 
-typedef struct _XENVIF_VIF_INTERFACE XENVIF_VIF_INTERFACE, *PXENVIF_VIF_INTERFACE;
+typedef VOID
+(*XENVIF_VIF_RECEIVER_RETURN_PACKETS)(
+    IN  PINTERFACE  Interface,
+    IN  PLIST_ENTRY List
+    );
 
-// {BAA55367-D5CD-4fab-8A2D-BB40476795C3}
-DEFINE_GUID(GUID_VIF_INTERFACE, 
-            0xbaa55367,
-            0xd5cd,
-            0x4fab,
-            0x8a,
-            0x2d,
-            0xbb,
-            0x40,
-            0x47,
-            0x67,
-            0x95,
-            0xc3);
+typedef NTSTATUS
+(*XENVIF_VIF_TRANSMITTER_SET_PACKET_OFFSET)(
+    IN  PINTERFACE                          Interface,
+    IN  XENVIF_TRANSMITTER_PACKET_OFFSET    Type,
+    IN  LONG_PTR                            Value
+    );
 
-#define VIF_INTERFACE_VERSION    14
+typedef NTSTATUS
+(*XENVIF_VIF_TRANSMITTER_QUEUE_PACKETS)(
+    IN  PINTERFACE                  Interface,
+    IN  PXENVIF_TRANSMITTER_PACKET  Head
+    );
 
-#define VIF_OPERATIONS(_Interface) \
-        (PXENVIF_VIF_OPERATIONS *)((ULONG_PTR)(_Interface))
+typedef VOID
+(*XENVIF_VIF_TRANSMITTER_QUERY_OFFLOAD_OPTIONS)(
+    IN  PINTERFACE                  Interface,
+    OUT PXENVIF_VIF_OFFLOAD_OPTIONS Options
+    );
 
-#define VIF_CONTEXT(_Interface) \
-        (PXENVIF_VIF_CONTEXT *)((ULONG_PTR)(_Interface) + sizeof (PVOID))
+typedef VOID
+(*XENVIF_VIF_RECEIVER_SET_OFFLOAD_OPTIONS)(
+    IN  PINTERFACE                  Interface,
+    IN  XENVIF_VIF_OFFLOAD_OPTIONS  Options
+    );
 
-#define VIF(_Operation, _Interface, ...) \
-        (*VIF_OPERATIONS(_Interface))->VIF_ ## _Operation((*VIF_CONTEXT(_Interface)), __VA_ARGS__)
+typedef VOID
+(*XENVIF_VIF_TRANSMITTER_QUERY_LARGE_PACKET_SIZE)(
+    IN  PINTERFACE  Interface,
+    IN  UCHAR       Version,
+    OUT PULONG      Size
+    );
+
+typedef VOID
+(*XENVIF_VIF_TRANSMITTER_QUERY_RING_SIZE)(
+    IN  PINTERFACE  Interface,
+    OUT PULONG      Size
+    );
+
+typedef VOID
+(*XENVIF_VIF_RECEIVER_QUERY_RING_SIZE)(
+    IN  PINTERFACE  Interface,
+    OUT PULONG      Size
+    );
+
+typedef VOID
+(*XENVIF_VIF_MAC_QUERY_STATE)(
+    IN  PINTERFACE                  Interface,
+    OUT PNET_IF_MEDIA_CONNECT_STATE MediaConnectState OPTIONAL,
+    OUT PULONG64                    LinkSpeed OPTIONAL,
+    OUT PNET_IF_MEDIA_DUPLEX_STATE  MediaDuplexState OPTIONAL
+    );
+
+typedef VOID
+(*XENVIF_VIF_MAC_QUERY_MAXIMUM_FRAME_SIZE)(
+    IN  PINTERFACE  Interface,
+    OUT PULONG      Size
+    );
+
+typedef VOID
+(*XENVIF_VIF_MAC_QUERY_PERMANENT_ADDRESS)(
+    IN  PINTERFACE          Interface,
+    OUT PETHERNET_ADDRESS   Address
+    );
+
+typedef VOID
+(*XENVIF_VIF_MAC_QUERY_CURRENT_ADDRESS)(
+    IN  PINTERFACE          Interface,
+    OUT PETHERNET_ADDRESS   Address
+    );
+
+typedef NTSTATUS
+(*XENVIF_VIF_MAC_QUERY_MULTICAST_ADDRESSES)(
+    IN      PINTERFACE          Interface,
+    OUT     PETHERNET_ADDRESS   Address OPTIONAL,
+    IN OUT  PULONG              Count
+    );
+
+typedef NTSTATUS
+(*XENVIF_VIF_MAC_SET_MULTICAST_ADDRESSES)(
+    IN  PINTERFACE          Interface,
+    IN  PETHERNET_ADDRESS   Address OPTIONAL,
+    IN  ULONG               Count
+    );
+
+typedef NTSTATUS
+(*XENVIF_VIF_MAC_SET_FILTER_LEVEL)(
+    IN  PINTERFACE              Interface,
+    IN  ETHERNET_ADDRESS_TYPE   Type,
+    IN  XENVIF_MAC_FILTER_LEVEL Level
+    );
+
+typedef NTSTATUS
+(*XENVIF_VIF_MAC_QUERY_FILTER_LEVEL)(
+    IN  PINTERFACE                  Interface,
+    IN  ETHERNET_ADDRESS_TYPE       Type,
+    OUT PXENVIF_MAC_FILTER_LEVEL    Level
+    );
+
+// {76F279CD-CA11-418B-92E8-C57F77DE0E2E}
+DEFINE_GUID(GUID_XENVIF_VIF_INTERFACE, 
+0x76f279cd, 0xca11, 0x418b, 0x92, 0xe8, 0xc5, 0x7f, 0x77, 0xde, 0xe, 0x2e);
+
+struct _XENVIF_VIF_INTERFACE_V1 {
+    INTERFACE                                       Interface;
+    XENVIF_VIF_ACQUIRE                              Acquire;
+    XENVIF_VIF_RELEASE                              Release;
+    XENVIF_VIF_ENABLE                               Enable;
+    XENVIF_VIF_DISABLE                              Disable;
+    XENVIF_VIF_QUERY_STATISTIC                      QueryStatistic;
+    XENVIF_VIF_RECEIVER_RETURN_PACKETS              ReceiverReturnPackets;
+    XENVIF_VIF_RECEIVER_SET_OFFLOAD_OPTIONS         ReceiverSetOffloadOptions;
+    XENVIF_VIF_RECEIVER_QUERY_RING_SIZE             ReceiverQueryRingSize;
+    XENVIF_VIF_TRANSMITTER_SET_PACKET_OFFSET        TransmitterSetPacketOffset;
+    XENVIF_VIF_TRANSMITTER_QUEUE_PACKETS            TransmitterQueuePackets;
+    XENVIF_VIF_TRANSMITTER_QUERY_OFFLOAD_OPTIONS    TransmitterQueryOffloadOptions;
+    XENVIF_VIF_TRANSMITTER_QUERY_LARGE_PACKET_SIZE  TransmitterQueryLargePacketSize;
+    XENVIF_VIF_TRANSMITTER_QUERY_RING_SIZE          TransmitterQueryRingSize;
+    XENVIF_VIF_MAC_QUERY_STATE                      MacQueryState;
+    XENVIF_VIF_MAC_QUERY_MAXIMUM_FRAME_SIZE         MacQueryMaximumFrameSize;
+    XENVIF_VIF_MAC_QUERY_PERMANENT_ADDRESS          MacQueryPermanentAddress;
+    XENVIF_VIF_MAC_QUERY_CURRENT_ADDRESS            MacQueryCurrentAddress;
+    XENVIF_VIF_MAC_QUERY_MULTICAST_ADDRESSES        MacQueryMulticastAddresses;
+    XENVIF_VIF_MAC_SET_MULTICAST_ADDRESSES          MacSetMulticastAddresses;
+    XENVIF_VIF_MAC_SET_FILTER_LEVEL                 MacSetFilterLevel;
+    XENVIF_VIF_MAC_QUERY_FILTER_LEVEL               MacQueryFilterLevel;
+};
+
+typedef struct _XENVIF_VIF_INTERFACE_V1 XENVIF_VIF_INTERFACE, *PXENVIF_VIF_INTERFACE;
+
+#define XENVIF_VIF(_Method, _Interface, ...)    \
+    (_Interface)-> ## _Method((PINTERFACE)(_Interface), __VA_ARGS__)
+
+#endif  // _WINDLL
+
+#define XENVIF_VIF_INTERFACE_VERSION_MIN    1
+#define XENVIF_VIF_INTERFACE_VERSION_MAX    1
 
 #endif  // _XENVIF_INTERFACE_H
-

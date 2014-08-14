@@ -29,118 +29,184 @@
  * SUCH DAMAGE.
  */
 
+/*! \file evtchn_interface.h
+    \brief XENBUS EVTCHN Interface
+
+    This interface provides access to hypervisor event channels
+*/
+
 #ifndef _XENBUS_EVTCHN_INTERFACE_H
 #define _XENBUS_EVTCHN_INTERFACE_H
 
+#ifndef _WINDLL
+
+/*! \enum _XENBUS_EVTCHN_TYPE
+    \brief Event channel type to be opened
+*/
 typedef enum _XENBUS_EVTCHN_TYPE {
-    EVTCHN_TYPE_INVALID = 0,
-    EVTCHN_FIXED,
-    EVTCHN_UNBOUND,
-    EVTCHN_INTER_DOMAIN,
-    EVTCHN_VIRQ
+    XENBUS_EVTCHN_TYPE_INVALID = 0,
+    XENBUS_EVTCHN_TYPE_FIXED,           /*!< Fixed */
+    XENBUS_EVTCHN_TYPE_UNBOUND,         /*!< Unbound */
+    XENBUS_EVTCHN_TYPE_INTER_DOMAIN,    /*!< Interdomain */
+    XENBUS_EVTCHN_TYPE_VIRQ             /*!< VIRQ */
 } XENBUS_EVTCHN_TYPE, *PXENBUS_EVTCHN_TYPE;
 
-typedef struct _XENBUS_EVTCHN_DESCRIPTOR    XENBUS_EVTCHN_DESCRIPTOR, *PXENBUS_EVTCHN_DESCRIPTOR;
+/*! \typedef XENBUS_EVTCHN_CHANNEL
+    \brief Event channel handle
+*/  
+typedef struct _XENBUS_EVTCHN_CHANNEL XENBUS_EVTCHN_CHANNEL, *PXENBUS_EVTCHN_CHANNEL;
 
-#define PORT_INVALID  0xFFFFFFFF
+/*! \typedef XENBUS_EVTCHN_ACQUIRE
+    \brief Acquire a reference to the EVTCHN interface
 
-#define DEFINE_EVTCHN_OPERATIONS                                                    \
-        EVTCHN_OPERATION(VOID,                                                      \
-                         Acquire,                                                   \
-                         (                                                          \
-                         IN PXENBUS_EVTCHN_CONTEXT    Context                       \
-                         )                                                          \
-                         )                                                          \
-        EVTCHN_OPERATION(VOID,                                                      \
-                         Release,                                                   \
-                         (                                                          \
-                         IN PXENBUS_EVTCHN_CONTEXT    Context                       \
-                         )                                                          \
-                         )                                                          \
-        EVTCHN_OPERATION(PXENBUS_EVTCHN_DESCRIPTOR,                                 \
-                         Open,                                                      \
-                         (                                                          \
-                         IN PXENBUS_EVTCHN_CONTEXT  Context,                        \
-                         IN XENBUS_EVTCHN_TYPE      Type,                           \
-                         IN PKSERVICE_ROUTINE       Function,                       \
-                         IN PVOID                   Argument OPTIONAL,              \
-                         ...                                                        \
-                         )                                                          \
-                         )                                                          \
-        EVTCHN_OPERATION(BOOLEAN,                                                   \
-                         Unmask,                                                    \
-                         (                                                          \
-                         IN PXENBUS_EVTCHN_CONTEXT    Context,                      \
-                         IN PXENBUS_EVTCHN_DESCRIPTOR Descriptor,                   \
-                         IN BOOLEAN                   Locked                        \
-                         )                                                          \
-                         )                                                          \
-        EVTCHN_OPERATION(NTSTATUS,                                                  \
-                         Send,                                                      \
-                         (                                                          \
-                         IN PXENBUS_EVTCHN_CONTEXT    Context,                      \
-                         IN PXENBUS_EVTCHN_DESCRIPTOR Descriptor                    \
-                         )                                                          \
-                         )                                                          \
-        EVTCHN_OPERATION(BOOLEAN,                                                   \
-                         Trigger,                                                   \
-                         (                                                          \
-                         IN PXENBUS_EVTCHN_CONTEXT    Context,                      \
-                         IN PXENBUS_EVTCHN_DESCRIPTOR Descriptor                    \
-                         )                                                          \
-                         )                                                          \
-        EVTCHN_OPERATION(VOID,                                                      \
-                         Close,                                                     \
-                         (                                                          \
-                         IN PXENBUS_EVTCHN_CONTEXT    Context,                      \
-                         IN PXENBUS_EVTCHN_DESCRIPTOR Descriptor                    \
-                         )                                                          \
-                         )                                                          \
-        EVTCHN_OPERATION(ULONG,                                                     \
-                         Port,                                                      \
-                         (                                                          \
-                         IN PXENBUS_EVTCHN_CONTEXT    Context,                      \
-                         IN PXENBUS_EVTCHN_DESCRIPTOR Descriptor                    \
-                         )                                                          \
-                         )
+    \param Interface The interface header
+*/  
+typedef NTSTATUS
+(*XENBUS_EVTCHN_ACQUIRE)(
+    IN  PINTERFACE  Interface
+    );
 
-typedef struct _XENBUS_EVTCHN_CONTEXT   XENBUS_EVTCHN_CONTEXT, *PXENBUS_EVTCHN_CONTEXT;
+/*! \typedef XENBUS_EVTCHN_RELEASE
+    \brief Release a reference to the EVTCHN interface
 
-#define EVTCHN_OPERATION(_Type, _Name, _Arguments) \
-        _Type (*EVTCHN_ ## _Name) _Arguments;
+    \param Interface The interface header
+*/  
+typedef VOID
+(*XENBUS_EVTCHN_RELEASE)(
+    IN  PINTERFACE  Interface
+    );
 
-typedef struct _XENBUS_EVTCHN_OPERATIONS {
-    DEFINE_EVTCHN_OPERATIONS
-} XENBUS_EVTCHN_OPERATIONS, *PXENBUS_EVTCHN_OPERATIONS;
+/*! \typedef XENBUS_EVTCHN_OPEN
+    \brief Open an event channel
 
-#undef EVTCHN_OPERATION
+    \param Interface The interface header
+    \param Type The type of event channel to open
+    \param Function The callback function
+    \param Argument An optional context argument passed to the callback
+    \param ... Additional parameters required by \a Type
 
-typedef struct _XENBUS_EVTCHN_INTERFACE  XENBUS_EVTCHN_INTERFACE, *PXENBUS_EVTCHN_INTERFACE;
+    \b Fixed:
+    \param LocalPort The local port number of the (already bound) channel
+    \param Mask Set to TRUE if the channel should be automatically masked before invoking the callback
 
-// {F87E8751-D6FB-44e8-85E3-DAC19FFA17A6}
-DEFINE_GUID(GUID_EVTCHN_INTERFACE, 
-            0xf87e8751,
-            0xd6fb,
-            0x44e8,
-            0x85,
-            0xe3,
-            0xda,
-            0xc1,
-            0x9f,
-            0xfa,
-            0x17,
-            0xa6);
+    \b Unbound:
+    \param RemoteDomain The domid of the remote domain which will bind the channel
+    \param Mask Set to TRUE if the channel should be automatically masked before invoking the callback
 
-#define EVTCHN_INTERFACE_VERSION    4
+    \b Interdomain:
+    \param RemoteDomain The domid of the remote domain which has already bound the channel
+    \param RemotePort The port number bound to the channel in the remote domain
+    \param Mask Set to TRUE if the channel should be automatically masked before invoking the callback
 
-#define EVTCHN_OPERATIONS(_Interface) \
-        (PXENBUS_EVTCHN_OPERATIONS *)((ULONG_PTR)(_Interface))
+    \b VIRQ:
+    \param Index The index number of the VIRQ
 
-#define EVTCHN_CONTEXT(_Interface) \
-        (PXENBUS_EVTCHN_CONTEXT *)((ULONG_PTR)(_Interface) + sizeof (PVOID))
+    \return Event channel handle
+*/  
+typedef PXENBUS_EVTCHN_CHANNEL
+(*XENBUS_EVTCHN_OPEN)(
+    IN  PINTERFACE          Interface,
+    IN  XENBUS_EVTCHN_TYPE  Type,
+    IN  PKSERVICE_ROUTINE   Function,
+    IN  PVOID               Argument OPTIONAL,
+    ...
+    );
 
-#define EVTCHN(_Operation, _Interface, ...) \
-        (*EVTCHN_OPERATIONS(_Interface))->EVTCHN_ ## _Operation((*EVTCHN_CONTEXT(_Interface)), __VA_ARGS__)
+/*! \typedef XENBUS_EVTCHN_UNMASK
+    \brief Unmask an event channel
+
+    \param Interface The interface header
+    \param Channel The channel handle
+    \param Locked Set to TRUE if this method is invoked in context of the channel callback
+    \return TRUE if there was an event pending at the point of unmask, FALSE otherwise
+*/
+typedef BOOLEAN
+(*XENBUS_EVTCHN_UNMASK)(
+    IN  PINTERFACE              Interface,
+    IN  PXENBUS_EVTCHN_CHANNEL  Channel,
+    IN  BOOLEAN                 Locked
+    );
+
+/*! \typedef XENBUS_EVTCHN_SEND
+    \brief Send an event to the remote end of the channel
+
+    \param Interface The interface header
+    \param Channel The channel handle
+*/  
+typedef VOID
+(*XENBUS_EVTCHN_SEND)(
+    IN  PINTERFACE              Interface,
+    IN  PXENBUS_EVTCHN_CHANNEL  Channel
+    );
+
+/*! \typedef XENBUS_EVTCHN_TRIGGER
+    \brief Send an event to the local end of the channel
+
+    \param Interface The interface header
+    \param Channel The channel handle
+*/  
+typedef VOID
+(*XENBUS_EVTCHN_TRIGGER)(
+    IN  PINTERFACE              Interface,
+    IN  PXENBUS_EVTCHN_CHANNEL  Channel
+    );
+
+/*! \typedef XENBUS_EVTCHN_GET_PORT
+    \brief Get the local port number bound to the channel
+
+    \param Interface The interface header
+    \param Channel The channel handle
+    \return The port number
+*/  
+typedef ULONG
+(*XENBUS_EVTCHN_GET_PORT)(
+    IN  PINTERFACE              Interface,
+    IN  PXENBUS_EVTCHN_CHANNEL  Channel
+    );
+
+/*! \typedef XENBUS_EVTCHN_CLOSE
+    \brief Close an event channel
+
+    \param Interface The interface header
+    \param Channel The channel handle
+*/  
+typedef VOID
+(*XENBUS_EVTCHN_CLOSE)(
+    IN  PINTERFACE              Interface,
+    IN  PXENBUS_EVTCHN_CHANNEL  Channel
+    );
+
+// {BE2440AC-1098-4150-AF4D-452FADCEF923}
+DEFINE_GUID(GUID_XENBUS_EVTCHN_INTERFACE, 
+0xbe2440ac, 0x1098, 0x4150, 0xaf, 0x4d, 0x45, 0x2f, 0xad, 0xce, 0xf9, 0x23);
+
+/*! \struct _XENBUS_EVTCHN_INTERFACE_V1
+    \brief EVTCHN interface version 1
+*/
+struct _XENBUS_EVTCHN_INTERFACE_V1 {
+    INTERFACE               Interface;
+    XENBUS_EVTCHN_ACQUIRE   EvtchnAcquire;
+    XENBUS_EVTCHN_RELEASE   EvtchnRelease;
+    XENBUS_EVTCHN_OPEN      EvtchnOpen;
+    XENBUS_EVTCHN_UNMASK    EvtchnUnmask;
+    XENBUS_EVTCHN_SEND      EvtchnSend;
+    XENBUS_EVTCHN_SEND      EvtchnTrigger;
+    XENBUS_EVTCHN_GET_PORT  EvtchnGetPort;
+    XENBUS_EVTCHN_CLOSE     EvtchnClose;
+};
+
+typedef struct _XENBUS_EVTCHN_INTERFACE_V1 XENBUS_EVTCHN_INTERFACE, *PXENBUS_EVTCHN_INTERFACE;
+
+/*! \def XENBUS_EVTCHN
+    \brief Macro at assist in method invocation
+*/
+#define XENBUS_EVTCHN(_Method, _Interface, ...)    \
+    (_Interface)->Evtchn ## _Method((PINTERFACE)(_Interface), __VA_ARGS__)
+
+#endif  // _WINDLL
+
+#define XENBUS_EVTCHN_INTERFACE_VERSION_MIN 1
+#define XENBUS_EVTCHN_INTERFACE_VERSION_MAX 1
 
 #endif  // _XENBUS_EVTCHN_INTERFACE_H
 

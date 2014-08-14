@@ -38,11 +38,6 @@ DriverGetDriverObject(
     );
 
 extern HANDLE
-DriverGetServiceKey(
-    VOID
-    );
-
-extern HANDLE
 DriverGetParametersKey(
     VOID
     );
@@ -64,6 +59,7 @@ typedef struct _XENVIF_FDO  XENVIF_FDO, *PXENVIF_FDO;
 #include "pdo.h"
 
 #define MAX_DEVICE_ID_LEN   200
+#define MAX_GUID_STRING_LEN 39
 
 #pragma warning(push)
 #pragma warning(disable:4201) // nonstandard extension used : nameless struct/union

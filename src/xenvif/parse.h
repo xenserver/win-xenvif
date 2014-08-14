@@ -34,31 +34,27 @@
 
 #include <vif_interface.h>
 
-typedef struct _XENVIF_HEADER_STATISTICS {
-    ULONGLONG   Tagged;
-    ULONGLONG   LLC;
-    ULONGLONG   IpVersion4;
-    ULONGLONG   IpVersion6;
-    ULONGLONG   IpOptions;
-    ULONGLONG   Tcp;
-    ULONGLONG   TcpOptions;
-    ULONGLONG   Udp;
-} XENVIF_HEADER_STATISTICS, *PXENVIF_HEADER_STATISTICS;
-
 typedef struct _XENVIF_PACKET_PAYLOAD {
     PMDL    Mdl;
     ULONG   Offset;
     ULONG   Length;
 } XENVIF_PACKET_PAYLOAD, *PXENVIF_PACKET_PAYLOAD;
 
+typedef BOOLEAN
+(*XENVIF_PARSE_PULLUP)(
+    IN  PVOID                   Argument,
+    IN  PUCHAR                  Buffer,
+    IN  PXENVIF_PACKET_PAYLOAD  Payload,
+    IN  ULONG                   Length
+    );
+
 extern NTSTATUS
 ParsePacket(
-    IN      PUCHAR                      StartVa,
-    IN      BOOLEAN                     (*Pullup)(PVOID, PUCHAR, PXENVIF_PACKET_PAYLOAD, ULONG),
-    IN      PVOID                       Argument,
-    IN OUT  PXENVIF_HEADER_STATISTICS   Statistics,
-    IN OUT  PXENVIF_PACKET_PAYLOAD      Payload,
-    OUT     PXENVIF_PACKET_INFO         Info
+    IN      PUCHAR                  StartVa,
+    IN      XENVIF_PARSE_PULLUP     Pullup,
+    IN      PVOID                   Argument,
+    IN OUT  PXENVIF_PACKET_PAYLOAD  Payload,
+    OUT     PXENVIF_PACKET_INFO     Info
     );
 
 #endif  // _XENVIF_PARSE_H

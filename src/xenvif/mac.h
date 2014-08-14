@@ -48,81 +48,65 @@ MacInitialize(
 
 extern NTSTATUS
 MacConnect(
-    IN  PXENVIF_MAC    Mac
+    IN  PXENVIF_MAC Mac
     );
 
 extern NTSTATUS
 MacEnable(
-    IN  PXENVIF_MAC    Mac
+    IN  PXENVIF_MAC Mac
     );
 
 extern VOID
 MacDisable(
-    IN  PXENVIF_MAC    Mac
+    IN  PXENVIF_MAC Mac
     );
 
 extern VOID
 MacDisconnect(
-    IN  PXENVIF_MAC    Mac
+    IN  PXENVIF_MAC Mac
     );
 
 extern VOID
 MacTeardown(
-    IN  PXENVIF_MAC    Mac
-    );
-
-extern PKEVENT
-MacGetEvent(
-    IN  PXENVIF_MAC     Mac
-    );
-
-extern ULONG
-MacGetLinkSpeed(
-    IN  PXENVIF_MAC     Mac
-    );
-
-extern BOOLEAN
-MacGetLinkState(
-    IN  PXENVIF_MAC     Mac
-    );
-
-extern ULONG
-MacGetMaximumFrameSize(
     IN  PXENVIF_MAC Mac
     );
 
-extern PETHERNET_ADDRESS
-MacGetPermanentAddress(
-    IN  PXENVIF_MAC         Mac
+extern VOID
+MacQueryMaximumFrameSize(
+    IN  PXENVIF_MAC Mac,
+    OUT PULONG      Size
     );
 
-extern PETHERNET_ADDRESS
-MacGetCurrentAddress(
-    IN  PXENVIF_MAC         Mac
+extern VOID
+MacQueryPermanentAddress(
+    IN  PXENVIF_MAC         Mac,
+    OUT PETHERNET_ADDRESS   Address                   
+    );
+
+extern VOID
+MacQueryCurrentAddress(
+    IN  PXENVIF_MAC         Mac,
+    OUT PETHERNET_ADDRESS   Address                   
+    );
+
+extern VOID
+MacQueryBroadcastAddress(
+    IN  PXENVIF_MAC         Mac,
+    OUT PETHERNET_ADDRESS   Address                   
     );
 
 extern NTSTATUS
-MacSetCurrentAddress(
-    IN  PXENVIF_MAC         Mac,
-    IN  PETHERNET_ADDRESS   Address
-    );
-
-extern PETHERNET_ADDRESS
-MacGetMulticastAddresses(
-    IN  PXENVIF_MAC         Mac,
-    OUT PULONG              Count
+MacQueryMulticastAddresses(
+    IN      PXENVIF_MAC         Mac,
+    OUT     PETHERNET_ADDRESS   Address OPTIONAL,
+    IN OUT  PULONG              Count
     );
 
 extern NTSTATUS
 MacSetMulticastAddresses(
     IN  PXENVIF_MAC         Mac,
-    IN  ETHERNET_ADDRESS    Address[],
+    IN  PETHERNET_ADDRESS   Address OPTIONAL,
     IN  ULONG               Count
-    );
-
-extern PETHERNET_ADDRESS
-MacGetBroadcastAddress(
-    IN  PXENVIF_MAC         Mac
     );
 
 extern NTSTATUS
@@ -132,10 +116,19 @@ MacSetFilterLevel(
     IN  XENVIF_MAC_FILTER_LEVEL Level
     );
 
-extern XENVIF_MAC_FILTER_LEVEL
-MacGetFilterLevel(
-    IN  PXENVIF_MAC             Mac,
-    IN  ETHERNET_ADDRESS_TYPE   Type
+extern NTSTATUS
+MacQueryFilterLevel(
+    IN  PXENVIF_MAC                 Mac,
+    IN  ETHERNET_ADDRESS_TYPE       Type,
+    OUT PXENVIF_MAC_FILTER_LEVEL    Level
+    );
+
+extern VOID
+MacQueryState(
+    IN  PXENVIF_MAC                 Mac,
+    OUT PNET_IF_MEDIA_CONNECT_STATE MediaConnectState OPTIONAL,
+    OUT PULONG64                    LinkSpeed OPTIONAL,
+    OUT PNET_IF_MEDIA_DUPLEX_STATE  MediaDuplexState OPTIONAL
     );
 
 extern BOOLEAN

@@ -34,7 +34,6 @@
 #include <stdlib.h>
 #include <util.h>
 #include <ethernet.h>
-#include <store_interface.h>
 
 #include "pdo.h"
 #include "frontend.h"
@@ -44,34 +43,31 @@
 #include "assert.h"
 
 struct _XENVIF_MAC {
-    PXENVIF_FRONTEND            Frontend;
-    KSPIN_LOCK                  Lock;
-    BOOLEAN                     Connected;
-    BOOLEAN                     Enabled;
-    KEVENT                      Event;
-    ULONG                       MaximumFrameSize;
-    ETHERNET_ADDRESS            PermanentAddress;
-    ETHERNET_ADDRESS            CurrentAddress;
-    ETHERNET_ADDRESS            BroadcastAddress;
-    ETHERNET_ADDRESS            MulticastAddress[MAXIMUM_MULTICAST_ADDRESS_COUNT];
-    ULONG                       MulticastAddressCount;
-    XENVIF_MAC_FILTER_LEVEL     FilterLevel[ETHERNET_ADDRESS_TYPE_COUNT];
-
-    PXENBUS_STORE_INTERFACE     StoreInterface;
-    PXENBUS_DEBUG_INTERFACE     DebugInterface;
-
-    PXENBUS_DEBUG_CALLBACK      DebugCallback;
-    PXENBUS_STORE_WATCH         Watch;
+    PXENVIF_FRONTEND        Frontend;
+    KSPIN_LOCK              Lock;
+    BOOLEAN                 Connected;
+    BOOLEAN                 Enabled;
+    ULONG                   MaximumFrameSize;
+    ETHERNET_ADDRESS        PermanentAddress;
+    ETHERNET_ADDRESS        CurrentAddress;
+    ETHERNET_ADDRESS        BroadcastAddress;
+    PETHERNET_ADDRESS       MulticastAddress;
+    ULONG                   MulticastAddressCount;
+    XENVIF_MAC_FILTER_LEVEL FilterLevel[ETHERNET_ADDRESS_TYPE_COUNT];
+    XENBUS_DEBUG_INTERFACE  DebugInterface;
+    PXENBUS_DEBUG_CALLBACK  DebugCallback;
+    XENBUS_STORE_INTERFACE  StoreInterface;
+    PXENBUS_STORE_WATCH     Watch;
 };
 
-#define MAC_POOL    'CAM'
+#define XENVIF_MAC_TAG  'CAM'
 
 static FORCEINLINE PVOID
 __MacAllocate(
     IN  ULONG   Length
     )
 {
-    return __AllocateNonPagedPoolWithTag(Length, MAC_POOL);
+    return __AllocateNonPagedPoolWithTag(Length, XENVIF_MAC_TAG);
 }
 
 static FORCEINLINE VOID
@@ -79,7 +75,7 @@ __MacFree(
     IN  PVOID   Buffer
     )
 {
-    __FreePoolWithTag(Buffer, MAC_POOL);
+    __FreePoolWithTag(Buffer, XENVIF_MAC_TAG);
 }
 
 static FORCEINLINE NTSTATUS
@@ -99,49 +95,32 @@ __MacSetPermanentAddress(
 
     Mac->PermanentAddress = *Address;
 
-    (VOID) STORE(Printf,
-                 Mac->StoreInterface,
-                 NULL,
-                 FrontendGetPrefix(Frontend),
-                 "mac/unicast/permanent",
-                 "%02x:%02x:%02x:%02x:%02x:%02x",
-                 Mac->PermanentAddress.Byte[0],
-                 Mac->PermanentAddress.Byte[1],
-                 Mac->PermanentAddress.Byte[2],
-                 Mac->PermanentAddress.Byte[3],
-                 Mac->PermanentAddress.Byte[4],
-                 Mac->PermanentAddress.Byte[5]);
-
-    Info("%02x:%02x:%02x:%02x:%02x:%02x\n",
-         Mac->PermanentAddress.Byte[0],
-         Mac->PermanentAddress.Byte[1],
-         Mac->PermanentAddress.Byte[2],
-         Mac->PermanentAddress.Byte[3],
-         Mac->PermanentAddress.Byte[4],
-         Mac->PermanentAddress.Byte[5]);
+    (VOID) XENBUS_STORE(Printf,
+                        &Mac->StoreInterface,
+                        NULL,
+                        FrontendGetPrefix(Frontend),
+                        "mac/unicast/permanent",
+                        "%02x:%02x:%02x:%02x:%02x:%02x",
+                        Mac->PermanentAddress.Byte[0],
+                        Mac->PermanentAddress.Byte[1],
+                        Mac->PermanentAddress.Byte[2],
+                        Mac->PermanentAddress.Byte[3],
+                        Mac->PermanentAddress.Byte[4],
+                        Mac->PermanentAddress.Byte[5]);
 
     return STATUS_SUCCESS;
 
 fail1:
-    Error("fail1 (%08x)\n");
-
     return status;
 }
 
-static FORCEINLINE PETHERNET_ADDRESS
-__MacGetPermanentAddress(
-    IN  PXENVIF_MAC         Mac
+VOID
+MacQueryPermanentAddress(
+    IN  PXENVIF_MAC         Mac,
+    OUT PETHERNET_ADDRESS   Address
     )
 {
-    return &Mac->PermanentAddress;
-}
-
-PETHERNET_ADDRESS
-MacGetPermanentAddress(
-    IN  PXENVIF_MAC         Mac
-    )
-{
-    return __MacGetPermanentAddress(Mac);
+    *Address = Mac->PermanentAddress;
 }
 
 static FORCEINLINE NTSTATUS
@@ -161,126 +140,67 @@ __MacSetCurrentAddress(
 
     Mac->CurrentAddress = *Address;
 
-    (VOID) STORE(Printf,
-                 Mac->StoreInterface,
-                 NULL,
-                 FrontendGetPrefix(Frontend),
-                 "mac/unicast/current",
-                 "%02x:%02x:%02x:%02x:%02x:%02x",
-                 Mac->CurrentAddress.Byte[0],
-                 Mac->CurrentAddress.Byte[1],
-                 Mac->CurrentAddress.Byte[2],
-                 Mac->CurrentAddress.Byte[3],
-                 Mac->CurrentAddress.Byte[4],
-                 Mac->CurrentAddress.Byte[5]);
-
-    Info("%02x:%02x:%02x:%02x:%02x:%02x\n",
-         Mac->CurrentAddress.Byte[0],
-         Mac->CurrentAddress.Byte[1],
-         Mac->CurrentAddress.Byte[2],
-         Mac->CurrentAddress.Byte[3],
-         Mac->CurrentAddress.Byte[4],
-         Mac->CurrentAddress.Byte[5]);
+    (VOID) XENBUS_STORE(Printf,
+                        &Mac->StoreInterface,
+                        NULL,
+                        FrontendGetPrefix(Frontend),
+                        "mac/unicast/current",
+                        "%02x:%02x:%02x:%02x:%02x:%02x",
+                        Mac->CurrentAddress.Byte[0],
+                        Mac->CurrentAddress.Byte[1],
+                        Mac->CurrentAddress.Byte[2],
+                        Mac->CurrentAddress.Byte[3],
+                        Mac->CurrentAddress.Byte[4],
+                        Mac->CurrentAddress.Byte[5]);
 
     return STATUS_SUCCESS;
 
 fail1:
-    Error("fail1 (%08x)\n");
-
     return status;
 }
 
-static FORCEINLINE PETHERNET_ADDRESS
-__MacGetCurrentAddress(
-    IN  PXENVIF_MAC         Mac
+VOID
+MacQueryCurrentAddress(
+    IN  PXENVIF_MAC         Mac,
+    OUT PETHERNET_ADDRESS   Address
     )
 {
-    return &Mac->CurrentAddress;
-}
-
-PETHERNET_ADDRESS
-MacGetCurrentAddress(
-    IN  PXENVIF_MAC         Mac
-    )
-{
-    return __MacGetCurrentAddress(Mac);
+    *Address = Mac->CurrentAddress;
 }
 
 static VOID
 MacDebugCallback(
-    IN  PVOID   Argument,
-    IN  BOOLEAN Crashing
+    IN  PVOID           Argument,
+    IN  BOOLEAN         Crashing
     )
 {
-    PXENVIF_MAC Mac = Argument;
-    ULONG       Index;
+    PXENVIF_MAC         Mac = Argument;
+    PXENVIF_FRONTEND    Frontend;
 
     UNREFERENCED_PARAMETER(Crashing);
 
-    DEBUG(Printf,
-          Mac->DebugInterface,
-          Mac->DebugCallback,
-          "MaximumFrameSize = %u\n",
-          Mac->MaximumFrameSize);
+    Frontend = Mac->Frontend;
 
-    DEBUG(Printf,
-          Mac->DebugInterface,
-          Mac->DebugCallback,
-          "PermanentAddress = %02x:%02x:%02x:%02x:%02x:%02x\n",
-          Mac->PermanentAddress.Byte[0],
-          Mac->PermanentAddress.Byte[1],
-          Mac->PermanentAddress.Byte[2],
-          Mac->PermanentAddress.Byte[3],
-          Mac->PermanentAddress.Byte[4],
-          Mac->PermanentAddress.Byte[5]);
+    XENBUS_DEBUG(Printf,
+                 &Mac->DebugInterface,
+                 "FilterLevel[ETHERNET_ADDRESS_UNICAST] = %s\n",
+                 (Mac->FilterLevel[ETHERNET_ADDRESS_UNICAST] == XENVIF_MAC_FILTER_ALL) ? "All" :
+                 (Mac->FilterLevel[ETHERNET_ADDRESS_UNICAST] == XENVIF_MAC_FILTER_MATCHING) ? "Matching" :
+                 "None");
 
-    DEBUG(Printf,
-          Mac->DebugInterface,
-          Mac->DebugCallback,
-          "CurrentAddress = %02x:%02x:%02x:%02x:%02x:%02x\n",
-          Mac->CurrentAddress.Byte[0],
-          Mac->CurrentAddress.Byte[1],
-          Mac->CurrentAddress.Byte[2],
-          Mac->CurrentAddress.Byte[3],
-          Mac->CurrentAddress.Byte[4],
-          Mac->CurrentAddress.Byte[5]);
+    XENBUS_DEBUG(Printf,
+                 &Mac->DebugInterface,
+                 "FilterLevel[ETHERNET_ADDRESS_MULTICAST] = %s\n",
+                 (Mac->FilterLevel[ETHERNET_ADDRESS_MULTICAST] == XENVIF_MAC_FILTER_ALL) ? "All" :
+                 (Mac->FilterLevel[ETHERNET_ADDRESS_MULTICAST] == XENVIF_MAC_FILTER_MATCHING) ? "Matching" :
+                 "None");
 
-    for (Index = 0; Index < Mac->MulticastAddressCount; Index++)
-        DEBUG(Printf,
-              Mac->DebugInterface,
-              Mac->DebugCallback,
-              "MulticastAddress[%u] = %02x:%02x:%02x:%02x:%02x:%02x\n",
-              Index,
-              Mac->MulticastAddress[Index].Byte[0],
-              Mac->MulticastAddress[Index].Byte[1],
-              Mac->MulticastAddress[Index].Byte[2],
-              Mac->MulticastAddress[Index].Byte[3],
-              Mac->MulticastAddress[Index].Byte[4],
-              Mac->MulticastAddress[Index].Byte[5]);
-
-    DEBUG(Printf,
-          Mac->DebugInterface,
-          Mac->DebugCallback,
-          "FilterLevel[ETHERNET_ADDRESS_UNICAST] = %s\n",
-          (Mac->FilterLevel[ETHERNET_ADDRESS_UNICAST] == MAC_FILTER_ALL) ? "All" :
-          (Mac->FilterLevel[ETHERNET_ADDRESS_UNICAST] == MAC_FILTER_MATCHING) ? "Matching" :
-          "None");
-
-    DEBUG(Printf,
-          Mac->DebugInterface,
-          Mac->DebugCallback,
-          "FilterLevel[ETHERNET_ADDRESS_MULTICAST] = %s\n",
-          (Mac->FilterLevel[ETHERNET_ADDRESS_MULTICAST] == MAC_FILTER_ALL) ? "All" :
-          (Mac->FilterLevel[ETHERNET_ADDRESS_MULTICAST] == MAC_FILTER_MATCHING) ? "Matching" :
-          "None");
-
-    DEBUG(Printf,
-          Mac->DebugInterface,
-          Mac->DebugCallback,
-          "FilterLevel[ETHERNET_ADDRESS_BROADCAST] = %s\n",
-          (Mac->FilterLevel[ETHERNET_ADDRESS_BROADCAST] == MAC_FILTER_ALL) ? "All" :
-          (Mac->FilterLevel[ETHERNET_ADDRESS_BROADCAST] == MAC_FILTER_MATCHING) ? "Matching" :
-          "None");
+    XENBUS_DEBUG(Printf,
+                 &Mac->DebugInterface,
+                 "FilterLevel[ETHERNET_ADDRESS_BROADCAST] = %s\n",
+                 (Mac->FilterLevel[ETHERNET_ADDRESS_BROADCAST] == XENVIF_MAC_FILTER_ALL) ? "All" :
+                 (Mac->FilterLevel[ETHERNET_ADDRESS_BROADCAST] == XENVIF_MAC_FILTER_MATCHING) ? "Matching" :
+                 "None");
 }
 
 NTSTATUS
@@ -297,10 +217,15 @@ MacInitialize(
     if (*Mac == NULL)
         goto fail1;
 
-    (*Mac)->Frontend = Frontend;
-
     KeInitializeSpinLock(&(*Mac)->Lock);
-    KeInitializeEvent(&(*Mac)->Event, NotificationEvent, FALSE);
+
+    FdoGetDebugInterface(PdoGetFdo(FrontendGetPdo(Frontend)),
+                         &(*Mac)->DebugInterface);
+
+    FdoGetStoreInterface(PdoGetFdo(FrontendGetPdo(Frontend)),
+                         &(*Mac)->StoreInterface);
+
+    (*Mac)->Frontend = Frontend;
 
     return STATUS_SUCCESS;
 
@@ -316,90 +241,101 @@ MacConnect(
     )
 {
     PXENVIF_FRONTEND    Frontend;
+    PETHERNET_ADDRESS   Address;
     PCHAR               Buffer;
     ULONG64             Mtu;
     NTSTATUS            status;
 
     Frontend = Mac->Frontend;
 
-    Mac->StoreInterface = FrontendGetStoreInterface(Frontend);
+    status = XENBUS_DEBUG(Acquire, &Mac->DebugInterface);
+    if (!NT_SUCCESS(status))
+        goto fail1;
 
-    STORE(Acquire, Mac->StoreInterface);
+    status = XENBUS_STORE(Acquire, &Mac->StoreInterface);
+    if (!NT_SUCCESS(status))
+        goto fail2;
 
-    status = STORE(Read,
-                   Mac->StoreInterface,
-                   NULL,
-                   FrontendGetPath(Frontend),
-                   "mtu",
-                   &Buffer);
+    Address = PdoGetPermanentAddress(FrontendGetPdo(Frontend));
+
+    status = __MacSetPermanentAddress(Mac, Address);
+    if (!NT_SUCCESS(status))
+        goto fail3;
+
+    Address = PdoGetCurrentAddress(FrontendGetPdo(Frontend));
+
+    status = __MacSetCurrentAddress(Mac, Address);
+    if (!NT_SUCCESS(status))
+        __MacSetCurrentAddress(Mac, &Mac->PermanentAddress);
+
+    RtlFillMemory(Mac->BroadcastAddress.Byte, ETHERNET_ADDRESS_LENGTH, 0xFF);
+
+    status = XENBUS_STORE(Read,
+                          &Mac->StoreInterface,
+                          NULL,
+                          FrontendGetPath(Frontend),
+                          "mtu",
+                          &Buffer);
     if (!NT_SUCCESS(status)) {
         Mtu = ETHERNET_MTU;
     } else {
         Mtu = strtol(Buffer, NULL, 10);
 
-        STORE(Free,
-              Mac->StoreInterface,
-              Buffer);
+        XENBUS_STORE(Free,
+                     &Mac->StoreInterface,
+                     Buffer);
     }
 
     status = STATUS_INVALID_PARAMETER;
     if (Mtu < ETHERNET_MIN)
-        goto fail1;
+        goto fail4;
 
     Mac->MaximumFrameSize = (ULONG)Mtu + sizeof (ETHERNET_TAGGED_HEADER);
 
-    status = __MacSetPermanentAddress(Mac,
-                                      FrontendGetPermanentMacAddress(Frontend));
+    status = XENBUS_DEBUG(Register,
+                          &Mac->DebugInterface,
+                          __MODULE__ "|MAC",
+                          MacDebugCallback,
+                          Mac,
+                          &Mac->DebugCallback);
     if (!NT_SUCCESS(status))
-        goto fail2;
-
-    status = __MacSetCurrentAddress(Mac,
-                                    FrontendGetCurrentMacAddress(Frontend));
-    if (!NT_SUCCESS(status))
-        RtlCopyMemory(&Mac->CurrentAddress,
-                      &Mac->PermanentAddress,
-                      sizeof (ETHERNET_ADDRESS));
-
-    RtlFillMemory(Mac->BroadcastAddress.Byte, ETHERNET_ADDRESS_LENGTH, 0xFF);
-
-    Mac->DebugInterface = FrontendGetDebugInterface(Frontend);
-
-    DEBUG(Acquire, Mac->DebugInterface);
-
-    status = DEBUG(Register,
-                   Mac->DebugInterface,
-                   __MODULE__ "|MAC",
-                   MacDebugCallback,
-                   Mac,
-                   &Mac->DebugCallback);
-    if (!NT_SUCCESS(status))
-        goto fail3;
+        goto fail5;
 
     ASSERT(!Mac->Connected);
     Mac->Connected = TRUE;
 
     return STATUS_SUCCESS;
 
+fail5:
+    Error("fail5\n");
+
+    Mac->MaximumFrameSize = 0;
+
+fail4:
+    Error("fail4\n");
+
+    RtlZeroMemory(&Mac->BroadcastAddress, sizeof (ETHERNET_ADDRESS));
+    RtlZeroMemory(&Mac->CurrentAddress, sizeof (ETHERNET_ADDRESS));
+    RtlZeroMemory(&Mac->PermanentAddress, sizeof (ETHERNET_ADDRESS));
+
+    (VOID) XENBUS_STORE(Remove,
+                        &Mac->StoreInterface,
+                        NULL,
+                        FrontendGetPrefix(Frontend),
+                        "mac");
+
 fail3:
     Error("fail3\n");
 
-    DEBUG(Release, Mac->DebugInterface);
-    Mac->DebugInterface = NULL;
-
-    RtlZeroMemory(Mac->BroadcastAddress.Byte, ETHERNET_ADDRESS_LENGTH);
-    RtlZeroMemory(Mac->CurrentAddress.Byte, ETHERNET_ADDRESS_LENGTH);
-    RtlZeroMemory(Mac->PermanentAddress.Byte, ETHERNET_ADDRESS_LENGTH);
+    XENBUS_STORE(Release, &Mac->StoreInterface);
 
 fail2:
     Error("fail2\n");
 
-    Mac->MaximumFrameSize = 0;
+    XENBUS_DEBUG(Release, &Mac->DebugInterface);
 
 fail1:
     Error("fail1 (%08x)\n");
-
-    STORE(Release, Mac->StoreInterface);
-    Mac->StoreInterface = NULL;
 
     return status;
 }
@@ -410,6 +346,7 @@ MacEnable(
     )
 {
     PXENVIF_FRONTEND    Frontend;
+    PXENVIF_THREAD      Thread;
     NTSTATUS            status;
 
     Frontend = Mac->Frontend;
@@ -417,12 +354,14 @@ MacEnable(
     ASSERT3U(KeGetCurrentIrql(), ==, DISPATCH_LEVEL);
     KeAcquireSpinLockAtDpcLevel(&Mac->Lock);
 
-    status = STORE(Watch,
-                   Mac->StoreInterface,
-                   FrontendGetPath(Frontend),
-                   "disconnect",
-                   &Mac->Event,
-                   &Mac->Watch);
+    Thread = VifGetMacThread(PdoGetVifContext(FrontendGetPdo(Frontend)));
+
+    status = XENBUS_STORE(WatchAdd,
+                          &Mac->StoreInterface,
+                          FrontendGetPath(Frontend),
+                          "disconnect",
+                          ThreadGetEvent(Thread),
+                          &Mac->Watch);
     if (!NT_SUCCESS(status))
         goto fail1;
 
@@ -446,15 +385,19 @@ MacDisable(
     IN  PXENVIF_MAC     Mac
     )
 {
+    PXENVIF_FRONTEND    Frontend;
+
+    Frontend = Mac->Frontend;
+
     ASSERT3U(KeGetCurrentIrql(), ==, DISPATCH_LEVEL);
     KeAcquireSpinLockAtDpcLevel(&Mac->Lock);
 
     ASSERT(Mac->Enabled);
     Mac->Enabled = FALSE;
 
-    (VOID) STORE(Unwatch,
-                 Mac->StoreInterface,
-                 Mac->Watch);
+    (VOID) XENBUS_STORE(WatchRemove,
+                        &Mac->StoreInterface,
+                        Mac->Watch);
     Mac->Watch = NULL;
 
     KeReleaseSpinLockFromDpcLevel(&Mac->Lock);
@@ -465,145 +408,158 @@ MacDisconnect(
     IN  PXENVIF_MAC     Mac
     )
 {
+    PXENVIF_FRONTEND    Frontend;
+
+    Frontend = Mac->Frontend;
+
     ASSERT(Mac->Connected);
     Mac->Connected = FALSE;
 
-    DEBUG(Deregister,
-          Mac->DebugInterface,
-          Mac->DebugCallback);
+    XENBUS_DEBUG(Deregister,
+                 &Mac->DebugInterface,
+                 Mac->DebugCallback);
     Mac->DebugCallback = NULL;
-
-    DEBUG(Release, Mac->DebugInterface);
-    Mac->DebugInterface = NULL;
-
-    RtlZeroMemory(Mac->BroadcastAddress.Byte, ETHERNET_ADDRESS_LENGTH);
-    RtlZeroMemory(Mac->CurrentAddress.Byte, ETHERNET_ADDRESS_LENGTH);
-    RtlZeroMemory(Mac->PermanentAddress.Byte, ETHERNET_ADDRESS_LENGTH);
 
     Mac->MaximumFrameSize = 0;
 
-    STORE(Release, Mac->StoreInterface);
-    Mac->StoreInterface = NULL;
+    RtlZeroMemory(&Mac->BroadcastAddress, sizeof (ETHERNET_ADDRESS));
+    RtlZeroMemory(&Mac->CurrentAddress, sizeof (ETHERNET_ADDRESS));
+    RtlZeroMemory(&Mac->PermanentAddress, sizeof (ETHERNET_ADDRESS));
+
+    (VOID) XENBUS_STORE(Remove,
+                        &Mac->StoreInterface,
+                        NULL,
+                        FrontendGetPrefix(Frontend),
+                        "mac");
+
+    XENBUS_STORE(Release, &Mac->StoreInterface);
+
+    XENBUS_DEBUG(Release, &Mac->DebugInterface);
 }
 
 VOID
 MacTeardown(
-    IN  PXENVIF_MAC     Mac
+    IN  PXENVIF_MAC Mac
     )
 {
-    RtlZeroMemory(Mac->MulticastAddress,
-                  MAXIMUM_MULTICAST_ADDRESS_COUNT * sizeof (ETHERNET_ADDRESS));
-    Mac->MulticastAddressCount = 0;
+    if (Mac->MulticastAddressCount != 0) {
+        __MacFree(Mac->MulticastAddress);
+        Mac->MulticastAddress = NULL;
+        Mac->MulticastAddressCount = 0;
+    }
 
     RtlZeroMemory(&Mac->FilterLevel,
                   ETHERNET_ADDRESS_TYPE_COUNT * sizeof (XENVIF_MAC_FILTER_LEVEL));
 
-    RtlZeroMemory(&Mac->Event, sizeof (KEVENT));
-    RtlZeroMemory(&Mac->Lock, sizeof (KSPIN_LOCK));
-
     Mac->Frontend = NULL;
+
+    RtlZeroMemory(&Mac->StoreInterface,
+                  sizeof (XENBUS_STORE_INTERFACE));
+
+    RtlZeroMemory(&Mac->DebugInterface,
+                  sizeof (XENBUS_DEBUG_INTERFACE));
+
+    RtlZeroMemory(&Mac->Lock, sizeof (KSPIN_LOCK));
 
     ASSERT(IsZeroMemory(Mac, sizeof (XENVIF_MAC)));
     __MacFree(Mac);
 }
 
-ULONG
-MacGetLinkSpeed(
-    IN  PXENVIF_MAC     Mac
+static FORCEINLINE ULONG
+__MacGetSpeed(
+    IN  PXENVIF_MAC Mac
     )
 {
+    PXENVIF_FRONTEND    Frontend;
     PCHAR               Buffer;
     ULONG               Speed;
     NTSTATUS            status;
 
-    status = STORE(Read,
-                   Mac->StoreInterface,
-                   NULL,
-                   FrontendGetPath(Mac->Frontend),
-                   "speed",
-                   &Buffer);
+    Frontend = Mac->Frontend;
+
+    status = XENBUS_STORE(Read,
+                          &Mac->StoreInterface,
+                          NULL,
+                          FrontendGetPath(Mac->Frontend),
+                          "speed",
+                          &Buffer);
     if (!NT_SUCCESS(status)) {
         Speed = 1;
     } else {
         Speed = (ULONG)strtol(Buffer, NULL, 10);
 
-        STORE(Free,
-              Mac->StoreInterface,
-              Buffer);
+        XENBUS_STORE(Free,
+                     &Mac->StoreInterface,
+                     Buffer);
     }
 
     return Speed;
 }
 
-PKEVENT
-MacGetEvent(
+static FORCEINLINE BOOLEAN
+__MacGetDisconnect(
     IN  PXENVIF_MAC     Mac
     )
 {
-    return &Mac->Event;
-}
-
-BOOLEAN
-MacGetLinkState(
-    IN  PXENVIF_MAC     Mac
-    )
-{
+    PXENVIF_FRONTEND    Frontend;
     PCHAR               Buffer;
     BOOLEAN             Disconnect;
     NTSTATUS            status;
 
-    status = STORE(Read,
-                   Mac->StoreInterface,
-                   NULL,
-                   FrontendGetPath(Mac->Frontend),
-                   "disconnect",
-                   &Buffer);
+    Frontend = Mac->Frontend;
+
+    status = XENBUS_STORE(Read,
+                          &Mac->StoreInterface,
+                          NULL,
+                          FrontendGetPath(Mac->Frontend),
+                          "disconnect",
+                          &Buffer);
     if (!NT_SUCCESS(status)) {
         Disconnect = FALSE;
     } else {
         Disconnect = (BOOLEAN)strtol(Buffer, NULL, 2);
 
-        STORE(Free,
-              Mac->StoreInterface,
-              Buffer);
+        XENBUS_STORE(Free,
+                     &Mac->StoreInterface,
+                     Buffer);
     }
 
-    return !Disconnect;
+    return Disconnect;
 }
 
-ULONG
-MacGetMaximumFrameSize(
-    IN  PXENVIF_MAC Mac
+VOID
+MacQueryState(
+    IN  PXENVIF_MAC                 Mac,
+    OUT PNET_IF_MEDIA_CONNECT_STATE MediaConnectState OPTIONAL,
+    OUT PULONG64                    LinkSpeed OPTIONAL,
+    OUT PNET_IF_MEDIA_DUPLEX_STATE  MediaDuplexState OPTIONAL
     )
 {
-    return Mac->MaximumFrameSize;
+    if (MediaConnectState != NULL || MediaDuplexState != NULL) {
+        BOOLEAN Disconnect = __MacGetDisconnect(Mac);
+
+        if (MediaConnectState != NULL)
+            *MediaConnectState = (Disconnect) ?
+                                 MediaConnectStateDisconnected :
+                                 MediaConnectStateConnected;
+
+        if (MediaDuplexState != NULL)
+            *MediaDuplexState = (Disconnect) ?
+                                MediaDuplexStateUnknown :
+                                MediaDuplexStateFull;
+    }
+
+    if (LinkSpeed != NULL)
+        *LinkSpeed = (ULONG64)__MacGetSpeed(Mac) * 1000000000ull;
 }
 
-NTSTATUS
-MacSetCurrentAddress(
-    IN  PXENVIF_MAC         Mac,
-    IN  PETHERNET_ADDRESS   Address
+VOID
+MacQueryMaximumFrameSize(
+    IN  PXENVIF_MAC Mac,
+    OUT PULONG      Size                     
     )
 {
-    KIRQL                   Irql;
-    NTSTATUS                status;
-
-    KeAcquireSpinLock(&Mac->Lock, &Irql);
-
-    status = __MacSetCurrentAddress(Mac, Address);
-    if (!NT_SUCCESS(status))
-        goto fail1;
-
-    KeReleaseSpinLock(&Mac->Lock, Irql);
-
-    return STATUS_SUCCESS;
-
-fail1:
-    Error("fail1 (%08x)\n", status);
-
-    KeReleaseSpinLock(&Mac->Lock, Irql);
-
-    return status;
+    *Size = Mac->MaximumFrameSize;
 }
 
 NTSTATUS
@@ -614,23 +570,35 @@ MacSetMulticastAddresses(
     )
 {
     KIRQL                   Irql;
+    PETHERNET_ADDRESS       MulticastAddress;
     ULONG                   Index;
     NTSTATUS                status;
 
     KeAcquireSpinLock(&Mac->Lock, &Irql);
 
-    status = STATUS_BUFFER_OVERFLOW;
-    if (Count > MAXIMUM_MULTICAST_ADDRESS_COUNT)
-        goto fail1;
-
+    status = STATUS_INVALID_PARAMETER;
     for (Index = 0; Index < Count; Index++) {
         if (!(Address[Index].Byte[0] & 0x01))
-            goto fail2;
+            goto fail1;
     }
 
-    for (Index = 0; Index < Count; Index++)
-        Mac->MulticastAddress[Index] = Address[Index];
+    if (Count != 0) {
+        MulticastAddress = __MacAllocate(sizeof (ETHERNET_ADDRESS) * Count);
 
+        status = STATUS_NO_MEMORY;
+        if (MulticastAddress == NULL)
+            goto fail2;
+
+        for (Index = 0; Index < Count; Index++)
+            MulticastAddress[Index] = Address[Index];
+    } else {
+        MulticastAddress = NULL;
+    }
+
+    if (Mac->MulticastAddressCount != 0)
+        __MacFree(Mac->MulticastAddress);
+
+    Mac->MulticastAddress = MulticastAddress;
     Mac->MulticastAddressCount = Count;
 
     KeReleaseSpinLock(&Mac->Lock, Irql);
@@ -648,23 +616,47 @@ fail1:
     return status;
 }
 
-PETHERNET_ADDRESS
-MacGetMulticastAddresses(
+NTSTATUS
+MacQueryMulticastAddresses(
     IN      PXENVIF_MAC         Mac,
+    IN      PETHERNET_ADDRESS   Address,
     IN OUT  PULONG              Count
     )
 {
+    KIRQL                       Irql;
+    ULONG                       Index;
+    NTSTATUS                    status;
+
+    KeAcquireSpinLock(&Mac->Lock, &Irql);
+
+    status = STATUS_BUFFER_OVERFLOW;
+    if (*Count < Mac->MulticastAddressCount)
+        goto fail1;
+
+    for (Index = 0; Index < Mac->MulticastAddressCount; Index++)
+        Address[Index] = Mac->MulticastAddress[Index];
+
     *Count = Mac->MulticastAddressCount;
 
-    return Mac->MulticastAddress;
+    KeReleaseSpinLock(&Mac->Lock, Irql);
+
+    return STATUS_SUCCESS;
+
+fail1:
+    *Count = Mac->MulticastAddressCount;
+
+    KeReleaseSpinLock(&Mac->Lock, Irql);
+
+    return status;
 }
 
-PETHERNET_ADDRESS
-MacGetBroadcastAddress(
-    IN  PXENVIF_MAC         Mac
+VOID
+MacQueryBroadcastAddress(
+    IN  PXENVIF_MAC         Mac,
+    OUT PETHERNET_ADDRESS   Address
     )
 {
-    return &Mac->BroadcastAddress;
+    *Address = Mac->BroadcastAddress;
 }
 
 NTSTATUS
@@ -677,46 +669,63 @@ MacSetFilterLevel(
     KIRQL                       Irql;
     NTSTATUS                    status;
 
-    ASSERT3U(Type, <, ETHERNET_ADDRESS_TYPE_COUNT);
+    status = STATUS_INVALID_PARAMETER;
+    if (Type >= ETHERNET_ADDRESS_TYPE_COUNT)
+        goto fail1;
 
     KeAcquireSpinLock(&Mac->Lock, &Irql);
 
     status = STATUS_INVALID_PARAMETER;
-    if (Level > MAC_FILTER_ALL || Level < MAC_FILTER_NONE)
-        goto fail1;
+    if (Level > XENVIF_MAC_FILTER_ALL || Level < XENVIF_MAC_FILTER_NONE)
+        goto fail2;
 
     Mac->FilterLevel[Type] = Level;
     KeReleaseSpinLock(&Mac->Lock, Irql);
 
     return STATUS_SUCCESS;
 
-fail1:
-    Error("fail1 (%08x)\n", status);
+fail2:
+    Error("fail2\n");
 
     KeReleaseSpinLock(&Mac->Lock, Irql);
+
+fail1:
+    Error("fail1 (%08x)\n", status);
 
     return status;
 }
 
-XENVIF_MAC_FILTER_LEVEL
-MacGetFilterLevel(
-    IN  PXENVIF_MAC             Mac,
-    IN  ETHERNET_ADDRESS_TYPE   Type
+NTSTATUS
+MacQueryFilterLevel(
+    IN  PXENVIF_MAC                 Mac,
+    IN  ETHERNET_ADDRESS_TYPE       Type,
+    OUT PXENVIF_MAC_FILTER_LEVEL    Level
     )
 {
-    ASSERT3U(Type, <, ETHERNET_ADDRESS_TYPE_COUNT);
+    NTSTATUS                        status;
 
-    return Mac->FilterLevel[Type];
+    status = STATUS_INVALID_PARAMETER;
+    if (Type >= ETHERNET_ADDRESS_TYPE_COUNT)
+        goto fail1;
+
+    *Level = Mac->FilterLevel[Type];
+
+    return STATUS_SUCCESS;
+
+fail1:
+    Error("fail1 (%08x)\n", status);
+
+    return status;
 }
 
 BOOLEAN
 MacApplyFilters(
-    IN  PXENVIF_MAC             Mac,
-    IN  PETHERNET_ADDRESS       DestinationAddress
+    IN  PXENVIF_MAC         Mac,
+    IN  PETHERNET_ADDRESS   DestinationAddress
     )
 {
-    ETHERNET_ADDRESS_TYPE       Type;
-    BOOLEAN                     Allow;
+    ETHERNET_ADDRESS_TYPE   Type;
+    BOOLEAN                 Allow;
 
     Type = GET_ETHERNET_ADDRESS_TYPE(DestinationAddress);
     Allow = FALSE;
@@ -727,10 +736,10 @@ MacApplyFilters(
     switch (Type) {
     case ETHERNET_ADDRESS_UNICAST:
         switch (Mac->FilterLevel[ETHERNET_ADDRESS_UNICAST]) {
-        case MAC_FILTER_NONE:
+        case XENVIF_MAC_FILTER_NONE:
             break;
 
-        case MAC_FILTER_MATCHING:
+        case XENVIF_MAC_FILTER_MATCHING:
             if (RtlEqualMemory(&Mac->CurrentAddress,
                                DestinationAddress,
                                ETHERNET_ADDRESS_LENGTH))
@@ -738,7 +747,7 @@ MacApplyFilters(
 
             break;
 
-        case MAC_FILTER_ALL:
+        case XENVIF_MAC_FILTER_ALL:
             Allow = TRUE;
             break;
 
@@ -750,10 +759,10 @@ MacApplyFilters(
 
     case ETHERNET_ADDRESS_MULTICAST:
         switch (Mac->FilterLevel[ETHERNET_ADDRESS_MULTICAST]) {
-        case MAC_FILTER_NONE:
+        case XENVIF_MAC_FILTER_NONE:
             break;
 
-        case MAC_FILTER_MATCHING: {
+        case XENVIF_MAC_FILTER_MATCHING: {
             ULONG Index;
 
             for (Index = 0; Index < Mac->MulticastAddressCount; Index++) {
@@ -765,7 +774,7 @@ MacApplyFilters(
             break;
         }
 
-        case MAC_FILTER_ALL:
+        case XENVIF_MAC_FILTER_ALL:
             Allow = TRUE;
             break;
 
@@ -777,11 +786,11 @@ MacApplyFilters(
 
     case ETHERNET_ADDRESS_BROADCAST:
         switch (Mac->FilterLevel[ETHERNET_ADDRESS_BROADCAST]) {
-        case MAC_FILTER_NONE:
+        case XENVIF_MAC_FILTER_NONE:
             break;
 
-        case MAC_FILTER_MATCHING:
-        case MAC_FILTER_ALL:
+        case XENVIF_MAC_FILTER_MATCHING:
+        case XENVIF_MAC_FILTER_ALL:
             Allow = TRUE;
             break;
 

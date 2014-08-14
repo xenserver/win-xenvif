@@ -41,8 +41,8 @@ PowerTypeName(
     )
 {
 #define _POWER_TYPE_NAME(_Type) \
-        case _Type:             \
-            return #_Type;
+    case _Type:                 \
+        return #_Type;
 
     switch (Type) {
     _POWER_TYPE_NAME(SystemPowerState);
@@ -61,8 +61,8 @@ PowerSystemStateName(
     )
 {
 #define _POWER_SYSTEM_STATE_NAME(_State)    \
-        case PowerSystem ## _State:         \
-            return #_State;
+    case PowerSystem ## _State:             \
+        return #_State;
 
     switch (State) {
     _POWER_SYSTEM_STATE_NAME(Unspecified);
@@ -111,8 +111,8 @@ PowerActionName(
     )
 {
 #define _POWER_ACTION_NAME(_Type)   \
-        case PowerAction ## _Type:  \
-            return #_Type;
+    case PowerAction ## _Type:      \
+        return #_Type;
 
     switch (Type) {
     _POWER_ACTION_NAME(None);
@@ -145,10 +145,11 @@ PowerMinorFunctionName(
     _POWER_MINOR_FUNCTION_NAME(POWER_SEQUENCE);
     _POWER_MINOR_FUNCTION_NAME(SET_POWER);
     _POWER_MINOR_FUNCTION_NAME(QUERY_POWER);
-
     default:
-        return "UNKNOWN";
+        break;
     }
+
+    return "UNKNOWN";
 
 #undef  _POWER_MINOR_FUNCTION_NAME
 }

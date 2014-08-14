@@ -89,27 +89,21 @@ ReceiverWaitForPackets(
     );
 
 extern VOID
-ReceiverGetPacketStatistics(
-    IN  PXENVIF_RECEIVER                    Receiver,
-    OUT PXENVIF_RECEIVER_PACKET_STATISTICS  Statistics
-    );
-
-extern ULONG
-ReceiverGetRingSize(
-    IN  PXENVIF_RECEIVER    Receiver
+ReceiverQueryRingSize(
+    IN  PXENVIF_RECEIVER    Receiver,
+    OUT PULONG              Size
     );
 
 extern VOID
-ReceiverReturnPacket(
-    IN  PXENVIF_RECEIVER        Receiver,
-    IN  PXENVIF_RECEIVER_PACKET Packet
-    );
-
-extern NTSTATUS
 ReceiverSetOffloadOptions(
-    IN  PXENVIF_RECEIVER        Receiver,
-    IN  XENVIF_OFFLOAD_OPTIONS  Options
+    IN  PXENVIF_RECEIVER            Receiver,
+    IN  XENVIF_VIF_OFFLOAD_OPTIONS  Options
     );
 
+extern VOID
+ReceiverReturnPackets(
+    IN  PXENVIF_RECEIVER    Receiver,
+    IN  PLIST_ENTRY         List
+    );
 
 #endif  // _XENVIF_RECEIVER_H

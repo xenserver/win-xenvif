@@ -33,11 +33,13 @@
 #define _XENVIF_FDO_H
 
 #include <ntddk.h>
-#include <evtchn_interface.h>
 #include <debug_interface.h>
-#include <store_interface.h>
-#include <gnttab_interface.h>
 #include <suspend_interface.h>
+#include <evtchn_interface.h>
+#include <store_interface.h>
+#include <range_set_interface.h>
+#include <cache_interface.h>
+#include <gnttab_interface.h>
 #include <emulated_interface.h>
 
 #include "driver.h"
@@ -51,16 +53,6 @@ FdoGetVendorName(
 extern PCHAR
 FdoGetName(
     IN  PXENVIF_FDO Fdo
-    );
-
-extern NTSTATUS
-FdoCreate(
-    IN  PDEVICE_OBJECT  PhysicalDeviceObject
-    );
-
-extern VOID
-FdoDestroy(
-    IN  PXENVIF_FDO    Fdo
     );
 
 extern VOID
@@ -130,40 +122,36 @@ FdoDelegateIrp(
     IN  PIRP            Irp
     );
 
-extern PXENBUS_EVTCHN_INTERFACE
-FdoGetEvtchnInterface(
-    IN  PXENVIF_FDO     Fdo
-    );
-
-extern PXENBUS_DEBUG_INTERFACE
-FdoGetDebugInterface(
-    IN  PXENVIF_FDO     Fdo
-    );
-
-extern PXENBUS_STORE_INTERFACE
-FdoGetStoreInterface(
-    IN  PXENVIF_FDO     Fdo
-    );
-
-extern PXENBUS_GNTTAB_INTERFACE
-FdoGetGnttabInterface(
-    IN  PXENVIF_FDO     Fdo
-    );
-
-extern PXENBUS_SUSPEND_INTERFACE
-FdoGetSuspendInterface(
-    IN  PXENVIF_FDO     Fdo
-    );
-
-extern PXENFILT_EMULATED_INTERFACE
-FdoGetEmulatedInterface(
-    IN  PXENVIF_FDO Fdo
-    );
-
 extern NTSTATUS
 FdoDispatch(
     IN  PXENVIF_FDO    Fdo,
     IN  PIRP            Irp
+    );
+
+#define DECLARE_FDO_GET_INTERFACE(_Interface, _Type)    \
+extern VOID                                             \
+FdoGet ## _Interface ## Interface(                      \
+    IN  PXENVIF_FDO Fdo,                                \
+    OUT _Type       _Interface ## Interface             \
+    );
+
+DECLARE_FDO_GET_INTERFACE(Debug, PXENBUS_DEBUG_INTERFACE)
+DECLARE_FDO_GET_INTERFACE(Suspend, PXENBUS_SUSPEND_INTERFACE)
+DECLARE_FDO_GET_INTERFACE(Evtchn, PXENBUS_EVTCHN_INTERFACE)
+DECLARE_FDO_GET_INTERFACE(Store, PXENBUS_STORE_INTERFACE)
+DECLARE_FDO_GET_INTERFACE(RangeSet, PXENBUS_RANGE_SET_INTERFACE)
+DECLARE_FDO_GET_INTERFACE(Cache, PXENBUS_CACHE_INTERFACE)
+DECLARE_FDO_GET_INTERFACE(Gnttab, PXENBUS_GNTTAB_INTERFACE)
+DECLARE_FDO_GET_INTERFACE(Emulated, PXENFILT_EMULATED_INTERFACE)
+
+extern NTSTATUS
+FdoCreate(
+    IN  PDEVICE_OBJECT  PhysicalDeviceObject
+    );
+
+extern VOID
+FdoDestroy(
+    IN  PXENVIF_FDO    Fdo
     );
 
 #endif  // _XENVIF_FDO_H

@@ -36,7 +36,6 @@
 #include "registry.h"
 #include "fdo.h"
 #include "pdo.h"
-#include "netio.h"
 #include "receiver.h"
 #include "driver.h"
 #include "dbg_print.h"
@@ -46,10 +45,8 @@ extern PULONG       InitSafeBootMode;
 
 typedef struct _XENVIF_DRIVER {
     PDRIVER_OBJECT      DriverObject;
-    HANDLE              ServiceKey;
     HANDLE              ParametersKey;
     HANDLE              AddressesKey;
-    HANDLE              AliasesKey;
 } XENVIF_DRIVER, *PXENVIF_DRIVER;
 
 static XENVIF_DRIVER    Driver;
@@ -76,30 +73,6 @@ DriverGetDriverObject(
     )
 {
     return __DriverGetDriverObject();
-}
-
-static FORCEINLINE VOID
-__DriverSetServiceKey(
-    IN  HANDLE  Key
-    )
-{
-    Driver.ServiceKey = Key;
-}
-
-static FORCEINLINE HANDLE
-__DriverGetServiceKey(
-    VOID
-    )
-{
-    return Driver.ServiceKey;
-}
-
-HANDLE
-DriverGetServiceKey(
-    VOID
-    )
-{
-    return __DriverGetServiceKey();
 }
 
 static FORCEINLINE VOID
@@ -150,30 +123,6 @@ DriverGetAddressesKey(
     return __DriverGetAddressesKey();
 }
 
-static FORCEINLINE VOID
-__DriverSetAliasesKey(
-    IN  HANDLE  Key
-    )
-{
-    Driver.AliasesKey = Key;
-}
-
-static FORCEINLINE HANDLE
-__DriverGetAliasesKey(
-    VOID
-    )
-{
-    return Driver.AliasesKey;
-}
-
-HANDLE
-DriverGetAliasesKey(
-    VOID
-    )
-{
-    return __DriverGetAliasesKey();
-}
-
 DRIVER_UNLOAD       DriverUnload;
 
 VOID
@@ -181,8 +130,6 @@ DriverUnload(
     IN  PDRIVER_OBJECT  DriverObject
     )
 {
-    HANDLE              ServiceKey;
-    HANDLE              AliasesKey;
     HANDLE              AddressesKey;
     HANDLE              ParametersKey;
 
@@ -193,29 +140,26 @@ DriverUnload(
     if (*InitSafeBootMode > 0)
         goto done;
 
-    AliasesKey = __DriverGetAliasesKey();
-    __DriverSetAliasesKey(NULL);
-
-    RegistryCloseKey(AliasesKey);
-
     AddressesKey = __DriverGetParametersKey();
     __DriverSetAddressesKey(NULL);
 
     RegistryCloseKey(AddressesKey);
 
     ParametersKey = __DriverGetParametersKey();
-    if (ParametersKey != NULL) {
-        __DriverSetParametersKey(NULL);
+    __DriverSetParametersKey(NULL);
 
-        RegistryCloseKey(ParametersKey);
-    }
-
-    ServiceKey = __DriverGetServiceKey();
-    __DriverSetServiceKey(NULL);
-
-    RegistryCloseKey(ServiceKey);
+    RegistryCloseKey(ParametersKey);
 
     RegistryTeardown();
+
+    Info("XENVIF %d.%d.%d (%d) (%02d.%02d.%04d)\n",
+         MAJOR_VERSION,
+         MINOR_VERSION,
+         MICRO_VERSION,
+         BUILD_NUMBER,
+         DAY,
+         MONTH,
+         YEAR);
 
 done:
     __DriverSetDriverObject(NULL);
@@ -309,7 +253,6 @@ DriverEntry(
     HANDLE              ServiceKey;
     HANDLE              ParametersKey;
     HANDLE              AddressesKey;
-    HANDLE              AliasesKey;
     ULONG               Index;
     NTSTATUS            status;
 
@@ -337,8 +280,6 @@ DriverEntry(
          MONTH,
          YEAR);
 
-    NetioInitializeMutex();    
-
     status = RegistryInitialize(RegistryPath);
     if (!NT_SUCCESS(status))
         goto fail1;
@@ -347,34 +288,23 @@ DriverEntry(
     if (!NT_SUCCESS(status))
         goto fail2;
 
-    __DriverSetServiceKey(ServiceKey);
-
-    (VOID) RegistryDeleteValue(ServiceKey, "NeedReboot");
-
     status = RegistryOpenSubKey(ServiceKey, 
                                 "Parameters", 
                                 KEY_READ, 
                                 &ParametersKey);
-    if (NT_SUCCESS(status))
-        __DriverSetParametersKey(ParametersKey);
+    if (!NT_SUCCESS(status))
+        goto fail3;
 
     status = RegistryCreateSubKey(ServiceKey, 
                                   "Addresses", 
                                   REG_OPTION_VOLATILE, 
                                   &AddressesKey);
     if (!NT_SUCCESS(status))
-        goto fail3;
+        goto fail4;
 
     __DriverSetAddressesKey(AddressesKey);
 
-    status = RegistryOpenSubKey(ServiceKey, 
-                                "Aliases", 
-                                KEY_READ, 
-                                &AliasesKey);
-    if (!NT_SUCCESS(status))
-        goto fail4;
-
-    __DriverSetAliasesKey(AliasesKey);
+    RegistryCloseKey(ServiceKey);
 
     DriverObject->DriverExtension->AddDevice = AddDevice;
 
@@ -392,16 +322,12 @@ done:
 fail4:
     Error("fail4\n");
 
-    __DriverSetAddressesKey(NULL);
+    __DriverSetParametersKey(NULL);
 
-    RegistryCloseKey(AddressesKey);
+    RegistryCloseKey(ParametersKey);
 
 fail3:
     Error("fail3\n");
-
-    __DriverSetParametersKey(NULL);
-
-    __DriverSetServiceKey(NULL);
 
     RegistryCloseKey(ServiceKey);
 

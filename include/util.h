@@ -302,15 +302,15 @@ __FreePage(
     MmFreePagesFromMdl(Mdl);
 }
 
-static FORCEINLINE PWCHAR
-__wcstok_r(
-    IN      PWCHAR  Buffer,
-    IN      PWCHAR  Delimiter,
-    IN OUT  PWCHAR  *Context
+static FORCEINLINE PCHAR
+__strtok_r(
+    IN      PCHAR   Buffer,
+    IN      PCHAR   Delimiter,
+    IN OUT  PCHAR   *Context
     )
 {
-    PWCHAR          Token;
-    PWCHAR          End;
+    PCHAR           Token;
+    PCHAR           End;
 
     if (Buffer != NULL)
         *Context = Buffer;
@@ -321,7 +321,7 @@ __wcstok_r(
         return NULL;
 
     while (*Token != L'\0' &&
-           wcschr(Delimiter, *Token) != NULL)
+           strchr(Delimiter, *Token) != NULL)
         Token++;
 
     if (*Token == L'\0')
@@ -329,7 +329,7 @@ __wcstok_r(
 
     End = Token + 1;
     while (*End != L'\0' &&
-           wcschr(Delimiter, *End) == NULL)
+           strchr(Delimiter, *End) == NULL)
         End++;
 
     if (*End != L'\0')

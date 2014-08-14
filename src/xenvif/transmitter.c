@@ -32,17 +32,19 @@
 #include <ntddk.h>
 #include <ntstrsafe.h>
 #include <stdlib.h>
+#include <netioapi.h>
 #include <util.h>
 #include <xen.h>
 #include <debug_interface.h>
 #include <store_interface.h>
+#include <cache_interface.h>
 #include <gnttab_interface.h>
+#include <range_set_interface.h>
 
 #include "ethernet.h"
 #include "tcpip.h"
 #include "pdo.h"
 #include "frontend.h"
-#include "pool.h"
 #include "checksum.h"
 #include "parse.h"
 #include "transmitter.h"
@@ -51,7 +53,6 @@
 #include "vif.h"
 #include "thread.h"
 #include "registry.h"
-#include "netio.h"
 #include "dbg_print.h"
 #include "assert.h"
 
@@ -59,126 +60,110 @@
 #define XEN_NETIF_GSO_TYPE_TCPV6    2
 #endif
 
-#define TRANSMITTER_POOL    'NART'
+#define MAXNAMELEN  128
 
-typedef struct _TRANSMITTER_BUFFER {
+typedef struct _XENVIF_TRANSMITTER_BUFFER {
     PMDL        Mdl;
     PVOID       Context;
     ULONG       Reference;
-} TRANSMITTER_BUFFER, *PTRANSMITTER_BUFFER;
+} XENVIF_TRANSMITTER_BUFFER, *PXENVIF_TRANSMITTER_BUFFER;
 
-typedef enum _TRANSMITTER_TAG_TYPE {
-    TAG_TYPE_INVALID = 0,
-    TAG_PACKET,
-    TAG_BUFFER
-} TRANSMITTER_TAG_TYPE, *PTRANSMITTER_TAG_TYPE;
+typedef enum _XENVIF_TRANSMITTER_FRAGMENT_TYPE {
+    XENVIF_TRANSMITTER_FRAGMENT_TYPE_INVALID = 0,
+    XENVIF_TRANSMITTER_FRAGMENT_TYPE_PACKET,
+    XENVIF_TRANSMITTER_FRAGMENT_TYPE_BUFFER
+} XENVIF_TRANSMITTER_FRAGMENT_TYPE, *PXENVIF_TRANSMITTER_FRAGMENT_TYPE;
 
-typedef struct _TRANSMITTER_TAG {
-    LIST_ENTRY              ListEntry;
-    ULONG                   Next;
-    TRANSMITTER_TAG_TYPE    Type;
-    PVOID                   Context;
-    XENVIF_GRANTER_HANDLE   Handle;
-    ULONG                   Offset;
-    ULONG                   Length;
-} TRANSMITTER_TAG, *PTRANSMITTER_TAG;
+typedef struct _XENVIF_TRANSMITTER_FRAGMENT {
+    LIST_ENTRY                          ListEntry;
+    USHORT                              Id;
+    XENVIF_TRANSMITTER_FRAGMENT_TYPE    Type;
+    PVOID                               Context;
+    XENVIF_GRANTER_HANDLE               Handle;
+    ULONG                               Offset;
+    ULONG                               Length;
+    BOOLEAN                             Extra;
+} XENVIF_TRANSMITTER_FRAGMENT, *PXENVIF_TRANSMITTER_FRAGMENT;
 
-typedef struct _TRANSMITTER_OFFLOAD_STATISTICS {
-    ULONGLONG   TagManipulation;
-    ULONGLONG   IpVersion4LargePacket;
-    ULONGLONG   IpVersion6LargePacket;
-    ULONGLONG   IpVersion4HeaderChecksum;
-    ULONGLONG   IpVersion4TcpChecksum;
-    ULONGLONG   IpVersion6TcpChecksum;
-    ULONGLONG   IpVersion4UdpChecksum;
-    ULONGLONG   IpVersion6UdpChecksum;
-} TRANSMITTER_OFFLOAD_STATISTICS, *PTRANSMITTER_OFFLOAD_STATISTICS;
+#define XENVIF_TRANSMITTER_MAXIMUM_FRAGMENT_ID  0x03FF
 
-typedef struct _TRANSMITTER_STATE {
-    PXENVIF_TRANSMITTER_PACKET  Packet;
-    XENVIF_SEND_INFO            Send;
-    PUCHAR                      StartVa;
-    XENVIF_PACKET_INFO          Info;
-    XENVIF_PACKET_PAYLOAD       Payload;
-    LIST_ENTRY                  List;
-    ULONG                       Count;
-} TRANSMITTER_STATE, *PTRANSMITTER_STATE;
+typedef struct _XENVIF_TRANSMITTER_STATE {
+    PXENVIF_TRANSMITTER_PACKET          Packet;
+    XENVIF_TRANSMITTER_PACKET_SEND_INFO Send;
+    PUCHAR                              StartVa;
+    XENVIF_PACKET_INFO                  Info;
+    XENVIF_PACKET_PAYLOAD               Payload;
+    LIST_ENTRY                          List;
+    ULONG                               Count;
+} XENVIF_TRANSMITTER_STATE, *PXENVIF_TRANSMITTER_STATE;
 
-#define TRANSMITTER_RING_SIZE   (__CONST_RING_SIZE(netif_tx, PAGE_SIZE))
-#define MAXIMUM_TAG_COUNT       (TRANSMITTER_RING_SIZE * 2)
+#define XENVIF_TRANSMITTER_RING_SIZE   (__CONST_RING_SIZE(netif_tx, PAGE_SIZE))
 
-#define TAG_INDEX_INVALID       0xFFFFFFFF
-
-#define REQ_ID_INTEGRITY_CHECK  0xF000
-
-typedef struct _TRANSMITTER_PACKET_LIST {
+typedef struct _XENVIF_TRANSMITTER_PACKET_LIST {
     PXENVIF_TRANSMITTER_PACKET  HeadPacket;
     PXENVIF_TRANSMITTER_PACKET  *TailPacket;
-} TRANSMITTER_PACKET_LIST, *PTRANSMITTER_PACKET_LIST;
+} XENVIF_TRANSMITTER_PACKET_LIST, *PXENVIF_TRANSMITTER_PACKET_LIST;
 
-typedef struct _TRANSMITTER_RING {
-    PXENVIF_TRANSMITTER                     Transmitter;
-    LIST_ENTRY                              ListEntry;
-    PXENVIF_POOL                            BufferPool;
-    PMDL                                    Mdl;
-    netif_tx_front_ring_t                   Front;
-    netif_tx_sring_t                        *Shared;
-    XENVIF_GRANTER_HANDLE                   Handle;
-    BOOLEAN                                 Connected;
-    BOOLEAN                                 Enabled;
-    BOOLEAN                                 Stopped;
-    PXENVIF_TRANSMITTER_PACKET              Lock;
-    PKTHREAD                                LockThread;
-    TRANSMITTER_PACKET_LIST                 Queued;
-    TRANSMITTER_STATE                       State;
-    ULONG                                   PacketsQueued;
-    ULONG                                   PacketsGranted;
-    ULONG                                   PacketsCopied;
-    ULONG                                   PacketsFaked;
-    ULONG                                   PacketsUnprepared;
-    ULONG                                   PacketsPrepared;
-    ULONG                                   HeadFreeTag;
-    TRANSMITTER_TAG                         Tag[MAXIMUM_TAG_COUNT];
-    netif_tx_request_t                      Pending[MAXIMUM_TAG_COUNT];
-    ULONG                                   RequestsPosted;
-    ULONG                                   RequestsPushed;
-    ULONG                                   ResponsesProcessed;
-    ULONG                                   PacketsSent;
-    TRANSMITTER_PACKET_LIST                 Completed;
-    ULONG                                   PacketsCompleted;
-    PSOCKADDR_INET                          AddressTable;
-    ULONG                                   AddressCount;
-    ULONG                                   AddressIndex;
-    PXENVIF_THREAD                          Thread;
-    XENVIF_TRANSMITTER_PACKET_STATISTICS    PacketStatistics;
-    XENVIF_HEADER_STATISTICS                HeaderStatistics;
-    TRANSMITTER_OFFLOAD_STATISTICS          OffloadStatistics;
-} TRANSMITTER_RING, *PTRANSMITTER_RING;
+typedef struct _XENVIF_TRANSMITTER_RING {
+    PXENVIF_TRANSMITTER             Transmitter;
+    LIST_ENTRY                      ListEntry;
+    ULONG                           Index;
+    PXENBUS_CACHE                   BufferCache;
+    PXENBUS_CACHE                   FragmentCache;
+    PXENBUS_RANGE_SET               RangeSet;
+    PMDL                            Mdl;
+    netif_tx_front_ring_t           Front;
+    netif_tx_sring_t                *Shared;
+    XENVIF_GRANTER_HANDLE           Handle;
+    BOOLEAN                         Connected;
+    BOOLEAN                         Enabled;
+    BOOLEAN                         Stopped;
+    PXENVIF_TRANSMITTER_PACKET      Lock;
+    PKTHREAD                        LockThread;
+    XENVIF_TRANSMITTER_PACKET_LIST  Queued;
+    XENVIF_TRANSMITTER_STATE        State;
+    ULONG                           PacketsQueued;
+    ULONG                           PacketsGranted;
+    ULONG                           PacketsCopied;
+    ULONG                           PacketsFaked;
+    ULONG                           PacketsUnprepared;
+    ULONG                           PacketsPrepared;
+    PXENVIF_TRANSMITTER_FRAGMENT    Pending[XENVIF_TRANSMITTER_MAXIMUM_FRAGMENT_ID + 1];
+    ULONG                           RequestsPosted;
+    ULONG                           RequestsPushed;
+    ULONG                           ResponsesProcessed;
+    ULONG                           PacketsSent;
+    XENVIF_TRANSMITTER_PACKET_LIST  Completed;
+    ULONG                           PacketsCompleted;
+    PSOCKADDR_INET                  AddressTable;
+    ULONG                           AddressCount;
+    ULONG                           AddressIndex;
+    PXENBUS_DEBUG_CALLBACK          DebugCallback;
+    PXENVIF_THREAD                  WatchdogThread;
+} XENVIF_TRANSMITTER_RING, *PXENVIF_TRANSMITTER_RING;
 
 struct _XENVIF_TRANSMITTER {
-    PXENVIF_FRONTEND                    Frontend;
-    LIST_ENTRY                          List;
-    XENVIF_TRANSMITTER_PACKET_METADATA  Metadata;
-
-    ULONG                               DisableIpVersion4Gso;
-    ULONG                               DisableIpVersion6Gso;
-    ULONG                               AlwaysCopy;
-
-    PXENBUS_DEBUG_INTERFACE             DebugInterface;
-    PXENBUS_STORE_INTERFACE             StoreInterface;
-    PXENVIF_VIF_INTERFACE               VifInterface;
-
-    PXENBUS_DEBUG_CALLBACK              DebugCallback;
+    PXENVIF_FRONTEND            Frontend;
+    XENBUS_CACHE_INTERFACE      CacheInterface;
+    XENBUS_RANGE_SET_INTERFACE  RangeSetInterface;
+    LIST_ENTRY                  List;
+    LONG_PTR                    Offset[XENVIF_TRANSMITTER_PACKET_OFFSET_COUNT];
+    ULONG                       DisableIpVersion4Gso;
+    ULONG                       DisableIpVersion6Gso;
+    ULONG                       AlwaysCopy;
+    XENBUS_STORE_INTERFACE      StoreInterface;
+    XENBUS_DEBUG_INTERFACE      DebugInterface;
+    PXENBUS_DEBUG_CALLBACK      DebugCallback;
 };
 
-#define MAX_SKB_FRAGS   18
+#define XENVIF_TRANSMITTER_TAG  'NART'
 
 static FORCEINLINE PVOID
 __TransmitterAllocate(
     IN  ULONG   Length
     )
 {
-    return __AllocateNonPagedPoolWithTag(Length, TRANSMITTER_POOL);
+    return __AllocateNonPagedPoolWithTag(Length, XENVIF_TRANSMITTER_TAG);
 }
 
 static FORCEINLINE VOID
@@ -186,23 +171,23 @@ __TransmitterFree(
     IN  PVOID   Buffer
     )
 {
-    __FreePoolWithTag(Buffer, TRANSMITTER_POOL);
+    __FreePoolWithTag(Buffer, XENVIF_TRANSMITTER_TAG);
 }
 
 static NTSTATUS
 TransmitterBufferCtor(
-    IN  PVOID           Argument,
-    IN  PVOID           Object
+    IN  PVOID                   Argument,
+    IN  PVOID                   Object
     )
 {
-    PTRANSMITTER_BUFFER Buffer = Object;
-    PMDL		        Mdl;
-    PUCHAR		        MdlMappedSystemVa;
-    NTSTATUS	        status;
+    PXENVIF_TRANSMITTER_BUFFER  Buffer = Object;
+    PMDL		                Mdl;
+    PUCHAR		                MdlMappedSystemVa;
+    NTSTATUS	                status;
 
     UNREFERENCED_PARAMETER(Argument);
 
-    ASSERT(IsZeroMemory(Buffer, sizeof (TRANSMITTER_BUFFER)));
+    ASSERT(IsZeroMemory(Buffer, sizeof (XENVIF_TRANSMITTER_BUFFER)));
 
     Mdl = __AllocatePage();
 
@@ -222,19 +207,19 @@ TransmitterBufferCtor(
 fail1:
     Error("fail1 (%08x)\n", status);
 
-    ASSERT(IsZeroMemory(Buffer, sizeof (TRANSMITTER_BUFFER)));
+    ASSERT(IsZeroMemory(Buffer, sizeof (XENVIF_TRANSMITTER_BUFFER)));
 
     return status;
 }
 
 static VOID
 TransmitterBufferDtor(
-    IN  PVOID           Argument,
-    IN  PVOID           Object
+    IN  PVOID                   Argument,
+    IN  PVOID                   Object
     )
 {
-    PTRANSMITTER_BUFFER Buffer = Object;
-    PMDL                Mdl;
+    PXENVIF_TRANSMITTER_BUFFER  Buffer = Object;
+    PMDL                        Mdl;
 
     UNREFERENCED_PARAMETER(Argument);
 
@@ -246,17 +231,25 @@ TransmitterBufferDtor(
     __FreePage(Mdl);
     ExFreePool(Mdl);
 
-    ASSERT(IsZeroMemory(Buffer, sizeof (TRANSMITTER_BUFFER)));
+    ASSERT(IsZeroMemory(Buffer, sizeof (XENVIF_TRANSMITTER_BUFFER)));
 }
 
-static FORCEINLINE PTRANSMITTER_BUFFER
+static FORCEINLINE PXENVIF_TRANSMITTER_BUFFER
 __TransmitterGetBuffer(
-    IN  PTRANSMITTER_RING   Ring
+    IN  PXENVIF_TRANSMITTER_RING    Ring
     )
 {
-    PTRANSMITTER_BUFFER     Buffer;
+    PXENVIF_TRANSMITTER             Transmitter;
+    PXENVIF_FRONTEND                Frontend;
+    PXENVIF_TRANSMITTER_BUFFER      Buffer;
 
-    Buffer = PoolGet(Ring->BufferPool, TRUE);
+    Transmitter = Ring->Transmitter;
+    Frontend = Transmitter->Frontend;
+
+    Buffer = XENBUS_CACHE(Get,
+                          &Transmitter->CacheInterface,
+                          Ring->BufferCache,
+                          TRUE);
 
     ASSERT(IMPLY(Buffer != NULL, Buffer->Mdl->ByteCount == 0));
 
@@ -265,377 +258,212 @@ __TransmitterGetBuffer(
 
 static FORCEINLINE VOID
 __TransmitterPutBuffer(
-    IN  PTRANSMITTER_RING   Ring,
-    IN  PTRANSMITTER_BUFFER Buffer
+    IN  PXENVIF_TRANSMITTER_RING    Ring,
+    IN  PXENVIF_TRANSMITTER_BUFFER  Buffer
     )
 {
+    PXENVIF_TRANSMITTER             Transmitter;
+    PXENVIF_FRONTEND                Frontend;
+
+    Transmitter = Ring->Transmitter;
+    Frontend = Transmitter->Frontend;
+
     ASSERT3U(Buffer->Reference, ==, 0);
     ASSERT3P(Buffer->Context, ==, NULL);
 
     Buffer->Mdl->ByteCount = 0;
 
-    PoolPut(Ring->BufferPool, Buffer, TRUE);
+    XENBUS_CACHE(Put,
+                 &Transmitter->CacheInterface,
+                 Ring->BufferCache,
+                 Buffer,
+                 TRUE);
 }
 
-static FORCEINLINE PTRANSMITTER_TAG
-__TransmitterGetTag(
-    IN  PTRANSMITTER_RING   Ring
+static NTSTATUS
+TransmitterFragmentCtor(
+    IN  PVOID                       Argument,
+    IN  PVOID                       Object
     )
 {
-    ULONG                   Index;
-    PTRANSMITTER_TAG        Tag;
+    PXENVIF_TRANSMITTER_RING        Ring = Argument;
+    PXENVIF_TRANSMITTER_FRAGMENT    Fragment = Object;
+    PXENVIF_TRANSMITTER             Transmitter;
+    PXENVIF_FRONTEND                Frontend;
+    LONGLONG                        Id;
+    NTSTATUS	                    status;
 
-    Index = Ring->HeadFreeTag;
-    ASSERT3U(Index, <, MAXIMUM_TAG_COUNT);
+    Transmitter = Ring->Transmitter;
+    Frontend = Transmitter->Frontend;
 
-    Tag = &Ring->Tag[Index];
-    Ring->HeadFreeTag = Tag->Next;
-    Tag->Next = TAG_INDEX_INVALID;
+    ASSERT(IsZeroMemory(Fragment, sizeof (XENVIF_TRANSMITTER_FRAGMENT)));
 
-    return Tag;
+    status = XENBUS_RANGE_SET(Pop,
+                              &Transmitter->RangeSetInterface,
+                              Ring->RangeSet,
+                              1,
+                              &Id);
+    if (!NT_SUCCESS(status))
+        goto fail1;
+
+    Fragment->Id = (USHORT)Id;
+
+    return STATUS_SUCCESS;
+
+fail1:
+    Error("fail1 (%08x)\n", status);
+
+    ASSERT(IsZeroMemory(Fragment, sizeof (XENVIF_TRANSMITTER_FRAGMENT)));
+
+    return status;
+}
+
+static VOID
+TransmitterFragmentDtor(
+    IN  PVOID                       Argument,
+    IN  PVOID                       Object
+    )
+{
+    PXENVIF_TRANSMITTER_RING        Ring = Argument;
+    PXENVIF_TRANSMITTER_FRAGMENT    Fragment = Object;
+    PXENVIF_TRANSMITTER             Transmitter;
+    PXENVIF_FRONTEND                Frontend;
+    LONGLONG                        Id;
+
+    Transmitter = Ring->Transmitter;
+    Frontend = Transmitter->Frontend;
+
+    Id = Fragment->Id;
+    Fragment->Id = 0;
+
+    XENBUS_RANGE_SET(Put,
+                     &Transmitter->RangeSetInterface,
+                     Ring->RangeSet,
+                     Id,
+                     1);
+
+    ASSERT(IsZeroMemory(Fragment, sizeof (XENVIF_TRANSMITTER_FRAGMENT)));
+}
+
+static FORCEINLINE PXENVIF_TRANSMITTER_FRAGMENT
+__TransmitterGetFragment(
+    IN  PXENVIF_TRANSMITTER_RING    Ring
+    )
+{
+    PXENVIF_TRANSMITTER             Transmitter;
+    PXENVIF_FRONTEND                Frontend;
+
+    Transmitter = Ring->Transmitter;
+    Frontend = Transmitter->Frontend;
+
+    return XENBUS_CACHE(Get,
+                        &Transmitter->CacheInterface,
+                        Ring->FragmentCache,
+                        TRUE);
 }
 
 static FORCEINLINE
-__TransmitterPutTag(
-    IN  PTRANSMITTER_RING   Ring,
-    IN  PTRANSMITTER_TAG    Tag
+__TransmitterPutFragment(
+    IN  PXENVIF_TRANSMITTER_RING        Ring,
+    IN  PXENVIF_TRANSMITTER_FRAGMENT    Fragment
     )
 {
-    ULONG                   Index;
+    PXENVIF_TRANSMITTER                 Transmitter;
+    PXENVIF_FRONTEND                    Frontend;
 
-    ASSERT3U(Tag->Length, ==, 0);
-    ASSERT3U(Tag->Offset, ==, 0);
-    ASSERT3U(Tag->Type, ==, TAG_TYPE_INVALID);
-    ASSERT3P(Tag->Context, ==, NULL);
+    Transmitter = Ring->Transmitter;
+    Frontend = Transmitter->Frontend;
 
-    Index = (ULONG)(Tag - &Ring->Tag[0]);
-    ASSERT3U(Index, <, MAXIMUM_TAG_COUNT);
+    ASSERT3U(Fragment->Length, ==, 0);
+    ASSERT3U(Fragment->Offset, ==, 0);
+    ASSERT3U(Fragment->Type, ==, XENVIF_TRANSMITTER_FRAGMENT_TYPE_INVALID);
+    ASSERT3P(Fragment->Context, ==, NULL);
+    ASSERT(!Fragment->Extra);
 
-    ASSERT3U(Tag->Next, ==, TAG_INDEX_INVALID);
-    Tag->Next = Ring->HeadFreeTag;
-    Ring->HeadFreeTag = Index;
+    XENBUS_CACHE(Put,
+                 &Transmitter->CacheInterface,
+                 Ring->FragmentCache,
+                 Fragment,
+                 TRUE);
 }
 
-static FORCEINLINE VOID
-__RingDebugCallback(
-    IN  PTRANSMITTER_RING   Ring
+static VOID
+TransmitterRingDebugCallback(
+    IN  PVOID                   Argument,
+    IN  BOOLEAN                 Crashing
     )
 {
-    PXENVIF_TRANSMITTER     Transmitter;
-    ULONG                   Allocated;
-    ULONG                   MaximumAllocated;
-    ULONG                   Count;
-    ULONG                   MinimumCount;
+    PXENVIF_TRANSMITTER_RING    Ring = Argument;
+    PXENVIF_TRANSMITTER         Transmitter;
+
+    UNREFERENCED_PARAMETER(Crashing);
 
     Transmitter = Ring->Transmitter;
 
-    DEBUG(Printf,
-          Transmitter->DebugInterface,
-          Transmitter->DebugCallback,
-          "0x%p [%s]\n",
-          Ring,
-          (Ring->Enabled) ? "ENABLED" : "DISABLED");
-
-    PoolGetStatistics(Ring->BufferPool,
-                      &Allocated,
-                      &MaximumAllocated,
-                      &Count,
-                      &MinimumCount);
-
-    DEBUG(Printf,
-          Transmitter->DebugInterface,
-          Transmitter->DebugCallback,
-          "BUFFER POOL: Allocated = %u (Maximum = %u)\n",
-          Allocated,
-          MaximumAllocated);
-
-    DEBUG(Printf,
-          Transmitter->DebugInterface,
-          Transmitter->DebugCallback,
-          "BUFFER POOL: Count = %u (Minimum = %u)\n",
-          Count,
-          MinimumCount);
+    XENBUS_DEBUG(Printf,
+                 &Transmitter->DebugInterface,
+                 "0x%p [%s]\n",
+                 Ring,
+                 (Ring->Enabled) ? "ENABLED" : "DISABLED");
 
     // Dump front ring
-    DEBUG(Printf,
-          Transmitter->DebugInterface,
-          Transmitter->DebugCallback,
-          "FRONT: req_prod_pvt = %u rsp_cons = %u nr_ents = %u sring = %p\n",
-          Ring->Front.req_prod_pvt,
-          Ring->Front.rsp_cons,
-          Ring->Front.nr_ents,
-          Ring->Front.sring);
+    XENBUS_DEBUG(Printf,
+                 &Transmitter->DebugInterface,
+                 "FRONT: req_prod_pvt = %u rsp_cons = %u nr_ents = %u sring = %p\n",
+                 Ring->Front.req_prod_pvt,
+                 Ring->Front.rsp_cons,
+                 Ring->Front.nr_ents,
+                 Ring->Front.sring);
 
     // Dump shared ring
-    DEBUG(Printf,
-          Transmitter->DebugInterface,
-          Transmitter->DebugCallback,
-          "SHARED: req_prod = %u req_event = %u rsp_prod = %u rsp_event = %u\n",
-          Ring->Shared->req_prod,
-          Ring->Shared->req_event,
-          Ring->Shared->rsp_prod,
-          Ring->Shared->rsp_event);
+    XENBUS_DEBUG(Printf,
+                 &Transmitter->DebugInterface,
+                 "SHARED: req_prod = %u req_event = %u rsp_prod = %u rsp_event = %u\n",
+                 Ring->Shared->req_prod,
+                 Ring->Shared->req_event,
+                 Ring->Shared->rsp_prod,
+                 Ring->Shared->rsp_event);
 
-    DEBUG(Printf,
-          Transmitter->DebugInterface,
-          Transmitter->DebugCallback,
-          "RequestsPosted = %u RequestsPushed = %u ResponsesProcessed = %u\n",
-          Ring->RequestsPosted,
-          Ring->RequestsPushed,
-          Ring->ResponsesProcessed);
+    XENBUS_DEBUG(Printf,
+                 &Transmitter->DebugInterface,
+                 "RequestsPosted = %u RequestsPushed = %u ResponsesProcessed = %u\n",
+                 Ring->RequestsPosted,
+                 Ring->RequestsPushed,
+                 Ring->ResponsesProcessed);
 
-    DEBUG(Printf,
-          Transmitter->DebugInterface,
-          Transmitter->DebugCallback,
-          "State:\n");
+    XENBUS_DEBUG(Printf,
+                 &Transmitter->DebugInterface,
+                 "State:\n");
 
-    DEBUG(Printf,
-          Transmitter->DebugInterface,
-          Transmitter->DebugCallback,
-          "- Packet = %p\n",
-          Ring->State.Packet);
+    XENBUS_DEBUG(Printf,
+                 &Transmitter->DebugInterface,
+                 "- Packet = %p\n",
+                 Ring->State.Packet);
 
-    DEBUG(Printf,
-          Transmitter->DebugInterface,
-          Transmitter->DebugCallback,
-          "- Count = %u\n",
-          Ring->State.Count);
+    XENBUS_DEBUG(Printf,
+                 &Transmitter->DebugInterface,
+                 "- Count = %u\n",
+                 Ring->State.Count);
 
-    DEBUG(Printf,
-          Transmitter->DebugInterface,
-          Transmitter->DebugCallback,
-          "PacketsGranted = %u PacketsCopied = %u PacketsFaked = %u\n",
-          Ring->PacketsGranted,
-          Ring->PacketsCopied,
-          Ring->PacketsFaked);
+    XENBUS_DEBUG(Printf,
+                 &Transmitter->DebugInterface,
+                 "PacketsGranted = %u PacketsCopied = %u PacketsFaked = %u\n",
+                 Ring->PacketsGranted,
+                 Ring->PacketsCopied,
+                 Ring->PacketsFaked);
 
-    DEBUG(Printf,
-          Transmitter->DebugInterface,
-          Transmitter->DebugCallback,
-          "PacketsQueued = %u PacketsPrepared = %u PacketsUnprepared = %u PacketsSent = %u PacketsCompleted = %u\n",
-          Ring->PacketsQueued,
-          Ring->PacketsPrepared,
-          Ring->PacketsUnprepared,
-          Ring->PacketsSent,
-          Ring->PacketsCompleted);
-
-    DEBUG(Printf,
-          Transmitter->DebugInterface,
-          Transmitter->DebugCallback,
-          "PacketStatistics:\n");
-
-    DEBUG(Printf,
-          Transmitter->DebugInterface,
-          Transmitter->DebugCallback,
-          "- Drop = %u\n",
-          Ring->PacketStatistics.Drop);
-
-    DEBUG(Printf,
-          Transmitter->DebugInterface,
-          Transmitter->DebugCallback,
-          "- BackendError = %u\n",
-          Ring->PacketStatistics.BackendError);
-
-    DEBUG(Printf,
-          Transmitter->DebugInterface,
-          Transmitter->DebugCallback,
-          "- FrontendError = %u\n",
-          Ring->PacketStatistics.FrontendError);
-
-    DEBUG(Printf,
-          Transmitter->DebugInterface,
-          Transmitter->DebugCallback,
-          "- Unicast = %u\n",
-          Ring->PacketStatistics.Unicast);
-
-    DEBUG(Printf,
-          Transmitter->DebugInterface,
-          Transmitter->DebugCallback,
-          "- UnicastBytes = %u\n",
-          Ring->PacketStatistics.UnicastBytes);
-
-    DEBUG(Printf,
-          Transmitter->DebugInterface,
-          Transmitter->DebugCallback,
-          "- Multicast = %u\n",
-          Ring->PacketStatistics.Multicast);
-
-    DEBUG(Printf,
-          Transmitter->DebugInterface,
-          Transmitter->DebugCallback,
-          "- MulticastBytes = %u\n",
-          Ring->PacketStatistics.MulticastBytes);
-
-    DEBUG(Printf,
-          Transmitter->DebugInterface,
-          Transmitter->DebugCallback,
-          "- Broadcast = %u\n",
-          Ring->PacketStatistics.Broadcast);
-
-    DEBUG(Printf,
-          Transmitter->DebugInterface,
-          Transmitter->DebugCallback,
-          "- BroadcastBytes = %u\n",
-          Ring->PacketStatistics.BroadcastBytes);
-
-    DEBUG(Printf,
-          Transmitter->DebugInterface,
-          Transmitter->DebugCallback,
-          "HeaderStatistics:\n");
-
-    DEBUG(Printf,
-          Transmitter->DebugInterface,
-          Transmitter->DebugCallback,
-          "- Tagged = %u\n",
-          Ring->HeaderStatistics.Tagged);
-
-    DEBUG(Printf,
-          Transmitter->DebugInterface,
-          Transmitter->DebugCallback,
-          "- LLC = %u\n",
-          Ring->HeaderStatistics.LLC);
-
-    DEBUG(Printf,
-          Transmitter->DebugInterface,
-          Transmitter->DebugCallback,
-          "- Ip Version4 = %u\n",
-          Ring->HeaderStatistics.IpVersion4);
-
-    DEBUG(Printf,
-          Transmitter->DebugInterface,
-          Transmitter->DebugCallback,
-          "- Ip Version6 = %u\n",
-          Ring->HeaderStatistics.IpVersion6);
-
-    DEBUG(Printf,
-          Transmitter->DebugInterface,
-          Transmitter->DebugCallback,
-          "- Ip Options = %u\n",
-          Ring->HeaderStatistics.IpOptions);
-
-    DEBUG(Printf,
-          Transmitter->DebugInterface,
-          Transmitter->DebugCallback,
-          "- Tcp = %u\n",
-          Ring->HeaderStatistics.Tcp);
-
-    DEBUG(Printf,
-          Transmitter->DebugInterface,
-          Transmitter->DebugCallback,
-          "- Tcp Options = %u\n",
-          Ring->HeaderStatistics.TcpOptions);
-
-    DEBUG(Printf,
-          Transmitter->DebugInterface,
-          Transmitter->DebugCallback,
-          "- Udp = %u\n",
-          Ring->HeaderStatistics.Udp);
-
-    DEBUG(Printf,
-          Transmitter->DebugInterface,
-          Transmitter->DebugCallback,
-          "OffloadStatistics:\n");
-
-    DEBUG(Printf,
-          Transmitter->DebugInterface,
-          Transmitter->DebugCallback,
-          "- TagManipulation = %u\n",
-          Ring->OffloadStatistics.TagManipulation);
-
-    DEBUG(Printf,
-          Transmitter->DebugInterface,
-          Transmitter->DebugCallback,
-          "- IpVersion4LargePacket = %u\n",
-          Ring->OffloadStatistics.IpVersion4LargePacket);
-
-    DEBUG(Printf,
-          Transmitter->DebugInterface,
-          Transmitter->DebugCallback,
-          "- IpVersion6LargePacket = %u\n",
-          Ring->OffloadStatistics.IpVersion6LargePacket);
-
-    DEBUG(Printf,
-          Transmitter->DebugInterface,
-          Transmitter->DebugCallback,
-          "- IpVersion4HeaderChecksum = %u\n",
-          Ring->OffloadStatistics.IpVersion4HeaderChecksum);
-
-    DEBUG(Printf,
-          Transmitter->DebugInterface,
-          Transmitter->DebugCallback,
-          "- IpVersion4TcpChecksum = %u\n",
-          Ring->OffloadStatistics.IpVersion4TcpChecksum);
-
-    DEBUG(Printf,
-          Transmitter->DebugInterface,
-          Transmitter->DebugCallback,
-          "- IpVersion6TcpChecksum = %u\n",
-          Ring->OffloadStatistics.IpVersion6TcpChecksum);
-
-    DEBUG(Printf,
-          Transmitter->DebugInterface,
-          Transmitter->DebugCallback,
-          "- IpVersion4UdpChecksum = %u\n",
-          Ring->OffloadStatistics.IpVersion4UdpChecksum);
-
-    DEBUG(Printf,
-          Transmitter->DebugInterface,
-          Transmitter->DebugCallback,
-          "- IpVersion6UdpChecksum = %u\n",
-          Ring->OffloadStatistics.IpVersion6UdpChecksum);
-
-    if (Ring->AddressCount != 0) {
-        ULONG   Index;
-
-        for (Index = 0; Index < Ring->AddressCount; Index++) {
-            switch (Ring->AddressTable[Index].si_family) {
-            case AF_INET: {
-                IPV4_ADDRESS    Address;
-
-                RtlCopyMemory(Address.Byte,
-                              &Ring->AddressTable[Index].Ipv4.sin_addr.s_addr,
-                              IPV4_ADDRESS_LENGTH);
-
-                DEBUG(Printf,
-                      Transmitter->DebugInterface,
-                      Transmitter->DebugCallback,
-                      "AddressTable[%u]: %u.%u.%u.%u\n",
-                      Index,
-                      Address.Byte[0],
-                      Address.Byte[1],
-                      Address.Byte[2],
-                      Address.Byte[3]);
-                break;
-            }
-            case AF_INET6: {
-                IPV6_ADDRESS    Address;
-
-                RtlCopyMemory(Address.Byte,
-                              &Ring->AddressTable[Index].Ipv6.sin6_addr.s6_addr,
-                              IPV6_ADDRESS_LENGTH);
-
-                DEBUG(Printf,
-                      Transmitter->DebugInterface,
-                      Transmitter->DebugCallback,
-                      "AddressTable[%u]: %04x:%04x:%04x:%04x:%04x:%04x:%04x:%04x\n",
-                      Index,
-                      NTOHS(Address.Word[0]),
-                      NTOHS(Address.Word[1]),
-                      NTOHS(Address.Word[2]),
-                      NTOHS(Address.Word[3]),
-                      NTOHS(Address.Word[4]),
-                      NTOHS(Address.Word[5]),
-                      NTOHS(Address.Word[6]),
-                      NTOHS(Address.Word[7]));
-                break;
-            }
-            }
-        }
-    }
+    XENBUS_DEBUG(Printf,
+                 &Transmitter->DebugInterface,
+                 "PacketsQueued = %u PacketsPrepared = %u PacketsUnprepared = %u PacketsSent = %u PacketsCompleted = %u\n",
+                 Ring->PacketsQueued,
+                 Ring->PacketsPrepared,
+                 Ring->PacketsUnprepared,
+                 Ring->PacketsSent,
+                 Ring->PacketsCompleted);
 }
 
 static BOOLEAN
-TransmitterPullup(
+TransmitterRingPullup(
     IN      PVOID                   Argument,
     IN      PUCHAR                  DestinationVa,
     IN OUT  PXENVIF_PACKET_PAYLOAD  Payload,
@@ -699,6 +527,7 @@ fail1:
         do {                                                        \
             PULONG_PTR Reference = (PULONG_PTR)&(_Packet)->Next;    \
                                                                     \
+            ASSERT(Packet != NULL);                                 \
             (*Reference)++;                                         \
         } while (FALSE)
 
@@ -706,6 +535,7 @@ fail1:
         do {                                                        \
             PULONG_PTR Reference = (PULONG_PTR)&(_Packet)->Next;    \
                                                                     \
+            ASSERT(Packet != NULL);                                 \
             ASSERT(*Reference != 0);                                \
             --(*Reference);                                         \
         } while (FALSE)
@@ -714,18 +544,18 @@ fail1:
         (*(PULONG_PTR)&(_Packet)->Next)
 
 static FORCEINLINE NTSTATUS
-__RingCopyPayload(
-    IN  PTRANSMITTER_RING       Ring
+__TransmitterRingCopyPayload(
+    IN  PXENVIF_TRANSMITTER_RING    Ring
     )
 {
-    PXENVIF_TRANSMITTER         Transmitter;
-    PXENVIF_FRONTEND            Frontend;
-    PTRANSMITTER_STATE          State;
-    PXENVIF_TRANSMITTER_PACKET  Packet;
-    XENVIF_PACKET_PAYLOAD       Payload;
-    PTRANSMITTER_TAG            Tag;
-    PTRANSMITTER_BUFFER         Buffer;
-    NTSTATUS                    status;
+    PXENVIF_TRANSMITTER             Transmitter;
+    PXENVIF_FRONTEND                Frontend;
+    PXENVIF_TRANSMITTER_STATE       State;
+    PXENVIF_TRANSMITTER_PACKET      Packet;
+    XENVIF_PACKET_PAYLOAD           Payload;
+    PXENVIF_TRANSMITTER_FRAGMENT    Fragment;
+    PXENVIF_TRANSMITTER_BUFFER      Buffer;
+    NTSTATUS                        status;
 
     Transmitter = Ring->Transmitter;
     Frontend = Transmitter->Frontend;
@@ -757,14 +587,18 @@ __RingCopyPayload(
         Length = __min(Payload.Length, PAGE_SIZE);
 
         MdlMappedSystemVa = MmGetSystemAddressForMdlSafe(Mdl, NormalPagePriority);
-        TransmitterPullup(NULL, MdlMappedSystemVa, &Payload, Length);
+        TransmitterRingPullup(Ring, MdlMappedSystemVa, &Payload, Length);
 
         Mdl->ByteCount = Length;
 
-        Tag = __TransmitterGetTag(Ring);
+        Fragment = __TransmitterGetFragment(Ring);
 
-        Tag->Type = TAG_BUFFER;
-        Tag->Context = Buffer;
+        status = STATUS_NO_MEMORY;
+        if (Fragment == NULL)
+            goto fail2;
+
+        Fragment->Type = XENVIF_TRANSMITTER_FRAGMENT_TYPE_BUFFER;
+        Fragment->Context = Buffer;
         Buffer->Reference++;
 
         Pfn = MmGetMdlPfnArray(Mdl)[0];
@@ -772,36 +606,38 @@ __RingCopyPayload(
         status = GranterPermitAccess(FrontendGetGranter(Frontend),
                                      Pfn,
                                      TRUE,
-                                     &Tag->Handle);
+                                     &Fragment->Handle);
         if (!NT_SUCCESS(status))
-            goto fail2;
+            goto fail3;
 
-        Tag->Offset = 0;
-        Tag->Length = Mdl->ByteCount;
+        Fragment->Offset = 0;
+        Fragment->Length = Mdl->ByteCount;
 
-        ASSERT(IsZeroMemory(&Tag->ListEntry, sizeof (LIST_ENTRY)));
-        InsertTailList(&State->List, &Tag->ListEntry);
+        ASSERT(IsZeroMemory(&Fragment->ListEntry, sizeof (LIST_ENTRY)));
+        InsertTailList(&State->List, &Fragment->ListEntry);
         State->Count++;
 
-        ASSERT3U(State->Count, <=, MAX_SKB_FRAGS + 1);
+        ASSERT3U(State->Count, <=, XEN_NETIF_NR_SLOTS_MIN);
     }
 
     Ring->PacketsCopied++;
     return STATUS_SUCCESS;
 
-fail2:
-    if (status != STATUS_INSUFFICIENT_RESOURCES)
-        Error("fail2\n");
+fail3:
+    Error("fail3\n");
 
-    ASSERT3U(Tag->Type, ==, TAG_BUFFER);
-    ASSERT3P(Buffer, ==, Tag->Context);
-    Tag->Context = NULL;
-    Tag->Type = TAG_TYPE_INVALID;
+    ASSERT3U(Fragment->Type, ==, XENVIF_TRANSMITTER_FRAGMENT_TYPE_BUFFER);
+    ASSERT3P(Buffer, ==, Fragment->Context);
+    Fragment->Context = NULL;
+    Fragment->Type = XENVIF_TRANSMITTER_FRAGMENT_TYPE_INVALID;
 
     ASSERT(Buffer->Reference != 0);
     --Buffer->Reference;
 
-    __TransmitterPutTag(Ring, Tag);
+    __TransmitterPutFragment(Ring, Fragment);
+
+fail2:
+    Error("fail2\n");
 
     ASSERT3P(Buffer->Context, ==, Packet);
     Buffer->Context = NULL;        
@@ -811,8 +647,7 @@ fail2:
     __TransmitterPutBuffer(Ring, Buffer);
 
 fail1:
-    if (status != STATUS_INSUFFICIENT_RESOURCES)
-        Error("fail1 (%08x)\n", status);
+    Error("fail1 (%08x)\n", status);
 
     while (PACKET_REFERENCE(Packet) != 1) {
         PLIST_ENTRY         ListEntry;
@@ -825,24 +660,24 @@ fail1:
 
         RtlZeroMemory(ListEntry, sizeof (LIST_ENTRY));
 
-        Tag = CONTAINING_RECORD(ListEntry, TRANSMITTER_TAG, ListEntry);
+        Fragment = CONTAINING_RECORD(ListEntry, XENVIF_TRANSMITTER_FRAGMENT, ListEntry);
 
-        Tag->Length = 0;
-        Tag->Offset = 0;
+        Fragment->Length = 0;
+        Fragment->Offset = 0;
 
         GranterRevokeAccess(FrontendGetGranter(Frontend),
-                            Tag->Handle);
-        Tag->Handle = NULL;
+                            Fragment->Handle);
+        Fragment->Handle = NULL;
 
-        ASSERT3U(Tag->Type, ==, TAG_BUFFER);
-        Buffer = Tag->Context;
-        Tag->Context = NULL;
-        Tag->Type = TAG_TYPE_INVALID;
+        ASSERT3U(Fragment->Type, ==, XENVIF_TRANSMITTER_FRAGMENT_TYPE_BUFFER);
+        Buffer = Fragment->Context;
+        Fragment->Context = NULL;
+        Fragment->Type = XENVIF_TRANSMITTER_FRAGMENT_TYPE_INVALID;
 
         ASSERT(Buffer->Reference != 0);
         --Buffer->Reference;
 
-        __TransmitterPutTag(Ring, Tag);
+        __TransmitterPutFragment(Ring, Fragment);
 
         ASSERT3P(Buffer->Context, ==, Packet);
         Buffer->Context = NULL;        
@@ -856,20 +691,20 @@ fail1:
 }
 
 static FORCEINLINE NTSTATUS
-__RingGrantPayload(
-    IN  PTRANSMITTER_RING       Ring
+__TransmitterRingGrantPayload(
+    IN  PXENVIF_TRANSMITTER_RING    Ring
     )
 {
-    PXENVIF_TRANSMITTER         Transmitter;
-    PXENVIF_FRONTEND            Frontend;
-    PTRANSMITTER_STATE          State;
-    PXENVIF_TRANSMITTER_PACKET  Packet;
-    PXENVIF_PACKET_PAYLOAD      Payload;
-    PMDL                        Mdl;
-    ULONG                       Offset;
-    ULONG                       Length;
-    PTRANSMITTER_TAG            Tag;
-    NTSTATUS                    status;
+    PXENVIF_TRANSMITTER             Transmitter;
+    PXENVIF_FRONTEND                Frontend;
+    PXENVIF_TRANSMITTER_STATE       State;
+    PXENVIF_TRANSMITTER_PACKET      Packet;
+    PXENVIF_PACKET_PAYLOAD          Payload;
+    PMDL                            Mdl;
+    ULONG                           Offset;
+    ULONG                           Length;
+    PXENVIF_TRANSMITTER_FRAGMENT    Fragment;
+    NTSTATUS                        status;
 
     Transmitter = Ring->Transmitter;
     Frontend = Transmitter->Frontend;
@@ -899,10 +734,14 @@ __RingGrantPayload(
             ULONG               PageOffset;
             ULONG               PageLength;
 
-            Tag = __TransmitterGetTag(Ring);
+            Fragment = __TransmitterGetFragment(Ring);
 
-            Tag->Type = TAG_PACKET;
-            Tag->Context = Packet;
+            status = STATUS_NO_MEMORY;
+            if (Fragment == NULL)
+                goto fail1;
+
+            Fragment->Type = XENVIF_TRANSMITTER_FRAGMENT_TYPE_PACKET;
+            Fragment->Context = Packet;
             INCREMENT_PACKET_REFERENCE(Packet);
 
             Pfn = MmGetMdlPfnArray(Mdl)[MdlOffset / PAGE_SIZE];
@@ -912,23 +751,23 @@ __RingGrantPayload(
             status = GranterPermitAccess(FrontendGetGranter(Frontend),
                                          Pfn,
                                          TRUE,
-                                         &Tag->Handle);
+                                         &Fragment->Handle);
             if (!NT_SUCCESS(status))
-                goto fail1;
+                goto fail2;
 
-            Tag->Offset = PageOffset;
-            Tag->Length = PageLength;
+            Fragment->Offset = PageOffset;
+            Fragment->Length = PageLength;
 
-            ASSERT(IsZeroMemory(&Tag->ListEntry, sizeof (LIST_ENTRY)));
-            InsertTailList(&State->List, &Tag->ListEntry);
+            ASSERT(IsZeroMemory(&Fragment->ListEntry, sizeof (LIST_ENTRY)));
+            InsertTailList(&State->List, &Fragment->ListEntry);
             State->Count++;
 
-            Tag = NULL;
+            Fragment = NULL;
 
             // Bounce the packet if it is too highly fragmented
             status = STATUS_BUFFER_OVERFLOW;
-            if (State->Count > MAX_SKB_FRAGS + 1)
-                goto fail2;
+            if (State->Count > XEN_NETIF_NR_SLOTS_MIN)
+                goto fail3;
 
             MdlOffset += PageLength;
 
@@ -946,20 +785,24 @@ __RingGrantPayload(
     Ring->PacketsGranted++;
     return STATUS_SUCCESS;
 
+fail3:
 fail2:
-fail1:
-    if (status != STATUS_INSUFFICIENT_RESOURCES &&
-        status != STATUS_BUFFER_OVERFLOW)
-        Error("fail1 (%08x)\n", status);
+    Error("fail2\n");
 
-    if (Tag != NULL) {
-        Tag->Context = NULL;
-        Tag->Type = TAG_TYPE_INVALID;
+    if (Fragment != NULL) {
+        ASSERT3P(Fragment->Context, ==, Packet);
+        Fragment->Context = NULL;
+        Fragment->Type = XENVIF_TRANSMITTER_FRAGMENT_TYPE_INVALID;
 
         DECREMENT_PACKET_REFERENCE(Packet);
 
-        __TransmitterPutTag(Ring, Tag);
+        __TransmitterPutFragment(Ring, Fragment);
     }
+
+fail1:
+    Error("fail1 (%08x)\n", status);
+
+    ASSERT3P(Fragment, ==, NULL);
 
     while (PACKET_REFERENCE(Packet) != 1) {
         PLIST_ENTRY         ListEntry;
@@ -972,45 +815,46 @@ fail1:
 
         RtlZeroMemory(ListEntry, sizeof (LIST_ENTRY));
 
-        Tag = CONTAINING_RECORD(ListEntry, TRANSMITTER_TAG, ListEntry);
+        Fragment = CONTAINING_RECORD(ListEntry, XENVIF_TRANSMITTER_FRAGMENT, ListEntry);
 
-        Tag->Length = 0;
-        Tag->Offset = 0;
+        Fragment->Length = 0;
+        Fragment->Offset = 0;
 
         GranterRevokeAccess(FrontendGetGranter(Frontend),
-                            Tag->Handle);
-        Tag->Handle = NULL;
+                            Fragment->Handle);
+        Fragment->Handle = NULL;
 
-        Tag->Context = NULL;
-        Tag->Type = TAG_TYPE_INVALID;
+        ASSERT3P(Fragment->Context, ==, Packet);
+        Fragment->Context = NULL;
+        Fragment->Type = XENVIF_TRANSMITTER_FRAGMENT_TYPE_INVALID;
 
         DECREMENT_PACKET_REFERENCE(Packet);
 
-        __TransmitterPutTag(Ring, Tag);
+        __TransmitterPutFragment(Ring, Fragment);
     }
 
     return status;
 }
 
 static FORCEINLINE NTSTATUS
-__RingPrepareHeader(
-    IN  PTRANSMITTER_RING       Ring
+__TransmitterRingPrepareHeader(
+    IN  PXENVIF_TRANSMITTER_RING    Ring
     )
 {
-    PXENVIF_TRANSMITTER         Transmitter;
-    PXENVIF_FRONTEND            Frontend;
-    PXENVIF_MAC                 Mac;
-    PTRANSMITTER_STATE          State;
-    PXENVIF_TRANSMITTER_PACKET  Packet;
-    PXENVIF_PACKET_PAYLOAD      Payload;
-    PXENVIF_PACKET_INFO         Info;
-    PTRANSMITTER_TAG            Tag;
-    PTRANSMITTER_BUFFER         Buffer;
-    PMDL                        Mdl;
-    PUCHAR                      StartVa;
-    PFN_NUMBER                  Pfn;
-    PETHERNET_HEADER            EthernetHeader;
-    NTSTATUS                    status;
+    PXENVIF_TRANSMITTER             Transmitter;
+    PXENVIF_FRONTEND                Frontend;
+    PXENVIF_MAC                     Mac;
+    PXENVIF_TRANSMITTER_STATE       State;
+    PXENVIF_TRANSMITTER_PACKET      Packet;
+    PXENVIF_PACKET_PAYLOAD          Payload;
+    PXENVIF_PACKET_INFO             Info;
+    PXENVIF_TRANSMITTER_FRAGMENT    Fragment;
+    PXENVIF_TRANSMITTER_BUFFER      Buffer;
+    PMDL                            Mdl;
+    PUCHAR                          StartVa;
+    PFN_NUMBER                      Pfn;
+    PETHERNET_HEADER                EthernetHeader;
+    NTSTATUS                        status;
 
     Transmitter = Ring->Transmitter;
     Frontend = Transmitter->Frontend;
@@ -1037,7 +881,7 @@ __RingPrepareHeader(
     StartVa = MmGetSystemAddressForMdlSafe(Mdl, NormalPagePriority);
     ASSERT(StartVa != NULL);
 
-    status = ParsePacket(StartVa, TransmitterPullup, NULL, &Ring->HeaderStatistics, Payload, Info);
+    status = ParsePacket(StartVa, TransmitterRingPullup, Ring, Payload, Info);
     if (!NT_SUCCESS(status))
         goto fail2;
 
@@ -1045,10 +889,15 @@ __RingPrepareHeader(
 
     Mdl->ByteCount = Info->Length;
 
-    Tag = __TransmitterGetTag(Ring);
+    Fragment = __TransmitterGetFragment(Ring);
 
-    Tag->Context = Buffer;
-    Tag->Type = TAG_BUFFER;
+    status = STATUS_NO_MEMORY;
+    if (Buffer == NULL)
+        goto fail3;
+
+    Fragment->Type = XENVIF_TRANSMITTER_FRAGMENT_TYPE_BUFFER;
+    Fragment->Context = Buffer;
+ 
     Buffer->Reference++;
 
     Pfn = MmGetMdlPfnArray(Mdl)[0];
@@ -1056,15 +905,15 @@ __RingPrepareHeader(
     status = GranterPermitAccess(FrontendGetGranter(Frontend),
                                  Pfn,
                                  TRUE,
-                                 &Tag->Handle);
+                                 &Fragment->Handle);
     if (!NT_SUCCESS(status))
-        goto fail3;
+        goto fail4;
 
-    Tag->Offset = 0;
-    Tag->Length = Mdl->ByteCount + Payload->Length;
+    Fragment->Offset = 0;
+    Fragment->Length = Mdl->ByteCount + Payload->Length;
 
-    ASSERT(IsZeroMemory(&Tag->ListEntry, sizeof (LIST_ENTRY)));
-    InsertTailList(&State->List, &Tag->ListEntry);
+    ASSERT(IsZeroMemory(&Fragment->ListEntry, sizeof (LIST_ENTRY)));
+    InsertTailList(&State->List, &Fragment->ListEntry);
     State->Count++;
 
     ASSERT(Info->EthernetHeader.Length != 0);
@@ -1072,10 +921,6 @@ __RingPrepareHeader(
 
     if (State->Send.OffloadOptions.OffloadTagManipulation) {
         ULONG   Offset;
-
-        Ring->OffloadStatistics.TagManipulation++;
-
-        ASSERT(!ETHERNET_HEADER_IS_TAGGED(EthernetHeader));
 
         Offset = FIELD_OFFSET(ETHERNET_TAGGED_HEADER, Tag);
 
@@ -1088,10 +933,8 @@ __RingPrepareHeader(
         EthernetHeader->Tagged.Tag.ControlInformation = HTONS(State->Send.TagControlInformation);
         ASSERT(ETHERNET_HEADER_IS_TAGGED(EthernetHeader));
 
-        Ring->HeaderStatistics.Tagged++;
-
         Mdl->ByteCount += sizeof (ETHERNET_TAG);
-        Tag->Length += sizeof (ETHERNET_TAG);
+        Fragment->Length += sizeof (ETHERNET_TAG);
 
         // Fix up the packet information
         Info->EthernetHeader.Length += sizeof (ETHERNET_TAG);
@@ -1118,9 +961,7 @@ __RingPrepareHeader(
         PTCP_HEADER TcpHeader;
         ULONG       Length;
 
-        ASSERT(!Info->Flags.IsAFragment);
-
-        Ring->OffloadStatistics.IpVersion4LargePacket++;
+        ASSERT(!Info->IsAFragment);
 
         ASSERT(Info->IpHeader.Length != 0);
         IpHeader = (PIP_HEADER)(StartVa + Info->IpHeader.Offset);
@@ -1160,9 +1001,7 @@ __RingPrepareHeader(
         PTCP_HEADER TcpHeader;
         ULONG       Length;
 
-        ASSERT(!Info->Flags.IsAFragment);
-
-        Ring->OffloadStatistics.IpVersion6LargePacket++;
+        ASSERT(!Info->IsAFragment);
 
         ASSERT(Info->IpHeader.Length != 0);
         IpHeader = (PIP_HEADER)(StartVa + Info->IpHeader.Offset);
@@ -1198,11 +1037,11 @@ __RingPrepareHeader(
         !State->Send.OffloadOptions.OffloadIpVersion6LargePacket) {
         ULONG   MaximumFrameSize;
 
-        MaximumFrameSize = MacGetMaximumFrameSize(Mac);
+        MacQueryMaximumFrameSize(Mac, &MaximumFrameSize);
         
-        if (Tag->Length > MaximumFrameSize) {
+        if (Fragment->Length > MaximumFrameSize) {
             status = STATUS_INVALID_PARAMETER;
-            goto fail4;
+            goto fail5;
         }
     }
 
@@ -1214,68 +1053,44 @@ __RingPrepareHeader(
 
         ASSERT3U(IpHeader->Version, ==, 4);
         IpHeader->Version4.Checksum = ChecksumIpVersion4Header(StartVa, Info);
-
-        Ring->OffloadStatistics.IpVersion4HeaderChecksum++;
-    }
-
-    if (State->Send.OffloadOptions.OffloadIpVersion4TcpChecksum) {
-        ASSERT(!Info->Flags.IsAFragment);
-        Ring->OffloadStatistics.IpVersion4TcpChecksum++;
-    }
-
-    if (State->Send.OffloadOptions.OffloadIpVersion6TcpChecksum) {
-        ASSERT(!Info->Flags.IsAFragment);
-        Ring->OffloadStatistics.IpVersion6TcpChecksum++;
-    }
-
-    if (State->Send.OffloadOptions.OffloadIpVersion4UdpChecksum) {
-        ASSERT(!Info->Flags.IsAFragment);
-        Ring->OffloadStatistics.IpVersion4UdpChecksum++;
-    }
-
-    if (State->Send.OffloadOptions.OffloadIpVersion6UdpChecksum) {
-        ASSERT(!Info->Flags.IsAFragment);
-        Ring->OffloadStatistics.IpVersion6UdpChecksum++;
     }
 
     return STATUS_SUCCESS;
 
-fail4:
-    if (status != STATUS_INVALID_PARAMETER)
-        Error("fail4\n");
+fail5:
+    Error("fail5\n");
 
     ASSERT(State->Count != 0);
     --State->Count;
 
-    RemoveEntryList(&Tag->ListEntry);
-    RtlZeroMemory(&Tag->ListEntry, sizeof (LIST_ENTRY));
+    RemoveEntryList(&Fragment->ListEntry);
+    RtlZeroMemory(&Fragment->ListEntry, sizeof (LIST_ENTRY));
 
-    Tag->Length = 0;
-    Tag->Offset = 0;
+    Fragment->Length = 0;
+    Fragment->Offset = 0;
 
     GranterRevokeAccess(FrontendGetGranter(Frontend),
-                        Tag->Handle);
-    Tag->Handle = NULL;
+                        Fragment->Handle);
+    Fragment->Handle = NULL;
 
-fail3:
-    if (status != STATUS_INSUFFICIENT_RESOURCES &&
-        status != STATUS_INVALID_PARAMETER)
-        Error("fail3\n");
+fail4:
+    Error("fail4\n");
 
-    Tag->Context = NULL;
-    Tag->Type = TAG_TYPE_INVALID;
+    Fragment->Context = NULL;
+    Fragment->Type = XENVIF_TRANSMITTER_FRAGMENT_TYPE_INVALID;
 
     ASSERT(Buffer->Reference != 0);
     --Buffer->Reference;
 
-    __TransmitterPutTag(Ring, Tag);
+    __TransmitterPutFragment(Ring, Fragment);
+
+fail3:
+    Error("fail3\n");
 
     Mdl->ByteCount = 0;
 
 fail2:
-    if (status != STATUS_INSUFFICIENT_RESOURCES &&
-        status != STATUS_INVALID_PARAMETER)
-        Error("fail2\n");
+    Error("fail2\n");
 
     DECREMENT_PACKET_REFERENCE(Packet);
     Buffer->Context = NULL;
@@ -1283,9 +1098,7 @@ fail2:
     __TransmitterPutBuffer(Ring, Buffer);
 
 fail1:
-    if (status != STATUS_INSUFFICIENT_RESOURCES &&
-        status != STATUS_INVALID_PARAMETER)
-        Error("fail1 (%08x)\n", status);
+    Error("fail1 (%08x)\n", status);
 
     ASSERT3U(PACKET_REFERENCE(Packet), ==, 0);
 
@@ -1293,13 +1106,13 @@ fail1:
 }
 
 static FORCEINLINE VOID
-__RingUnprepareTags(
-    IN  PTRANSMITTER_RING   Ring
+__TransmitterRingUnprepareFragments(
+    IN  PXENVIF_TRANSMITTER_RING    Ring
     )
 {
-    PXENVIF_TRANSMITTER     Transmitter;
-    PXENVIF_FRONTEND        Frontend;
-    PTRANSMITTER_STATE      State;
+    PXENVIF_TRANSMITTER             Transmitter;
+    PXENVIF_FRONTEND                Frontend;
+    PXENVIF_TRANSMITTER_STATE       State;
 
     Transmitter = Ring->Transmitter;
     Frontend = Transmitter->Frontend;
@@ -1307,9 +1120,9 @@ __RingUnprepareTags(
     State = &Ring->State;
 
     while (State->Count != 0) {
-        PLIST_ENTRY                 ListEntry;
-        PTRANSMITTER_TAG            Tag;
-        PXENVIF_TRANSMITTER_PACKET  Packet;
+        PLIST_ENTRY                     ListEntry;
+        PXENVIF_TRANSMITTER_FRAGMENT    Fragment;
+        PXENVIF_TRANSMITTER_PACKET      Packet;
 
         --State->Count;
 
@@ -1318,22 +1131,22 @@ __RingUnprepareTags(
 
         RtlZeroMemory(ListEntry, sizeof (LIST_ENTRY));
 
-        Tag = CONTAINING_RECORD(ListEntry, TRANSMITTER_TAG, ListEntry);
+        Fragment = CONTAINING_RECORD(ListEntry, XENVIF_TRANSMITTER_FRAGMENT, ListEntry);
 
-        Tag->Length = 0;
-        Tag->Offset = 0;
+        Fragment->Length = 0;
+        Fragment->Offset = 0;
 
         GranterRevokeAccess(FrontendGetGranter(Frontend),
-                            Tag->Handle);
-        Tag->Handle = NULL;
+                            Fragment->Handle);
+        Fragment->Handle = NULL;
 
-        switch (Tag->Type) {
-        case TAG_BUFFER: {
-            PTRANSMITTER_BUFFER Buffer;
+        switch (Fragment->Type) {
+        case XENVIF_TRANSMITTER_FRAGMENT_TYPE_BUFFER: {
+            PXENVIF_TRANSMITTER_BUFFER  Buffer;
 
-            Buffer = Tag->Context;
-            Tag->Context = NULL;
-            Tag->Type = TAG_TYPE_INVALID;
+            Buffer = Fragment->Context;
+            Fragment->Context = NULL;
+            Fragment->Type = XENVIF_TRANSMITTER_FRAGMENT_TYPE_INVALID;
 
             Packet = Buffer->Context;
             Buffer->Context = NULL;
@@ -1344,10 +1157,10 @@ __RingUnprepareTags(
 
             break;
         }
-        case TAG_PACKET:
-            Packet = Tag->Context;
-            Tag->Context = NULL;
-            Tag->Type = TAG_TYPE_INVALID;
+        case XENVIF_TRANSMITTER_FRAGMENT_TYPE_PACKET:
+            Packet = Fragment->Context;
+            Fragment->Context = NULL;
+            Fragment->Type = XENVIF_TRANSMITTER_FRAGMENT_TYPE_INVALID;
 
             break;
 
@@ -1356,7 +1169,7 @@ __RingUnprepareTags(
             ASSERT(FALSE);
         }
 
-        __TransmitterPutTag(Ring, Tag);
+        __TransmitterPutFragment(Ring, Fragment);
 
         if (Packet != NULL)
             DECREMENT_PACKET_REFERENCE(Packet);
@@ -1364,26 +1177,27 @@ __RingUnprepareTags(
 }
 
 static FORCEINLINE NTSTATUS
-__RingPreparePacket(
-    IN  PTRANSMITTER_RING           Ring,
+__TransmitterRingPreparePacket(
+    IN  PXENVIF_TRANSMITTER_RING    Ring,
     IN  PXENVIF_TRANSMITTER_PACKET  Packet
     )
 {
-#define METADATA_EXISTS(_Ring, _Packet, _Type)                                          \
-        ((_Ring)->Transmitter->Metadata. _Type ## Offset != 0)
+#define OFFSET_EXISTS(_Ring, _Packet, _Type)                                                        \
+    ((_Ring)->Transmitter->Offset[XENVIF_TRANSMITTER_PACKET_ ## _Type ## _OFFSET] != 0)
 
-#define METADATA(_Ring, _Packet, _Type)                                                 \
-        ((METADATA_EXISTS(_Ring, _Packet, _Type)) ?                                     \
-         (PVOID)((PUCHAR)(_Packet) + (_Ring)->Transmitter->Metadata. _Type ## Offset) : \
+#define OFFSET(_Ring, _Packet, _Type)                                                               \
+        ((OFFSET_EXISTS(_Ring, _Packet, _Type)) ?                                                   \
+         (PVOID)((PUCHAR)(_Packet) +                                                                \
+                 (_Ring)->Transmitter->Offset[XENVIF_TRANSMITTER_PACKET_ ## _Type ## _OFFSET]) :    \
          NULL)
 
     PXENVIF_TRANSMITTER             Transmitter;
-    PTRANSMITTER_STATE              State;
+    PXENVIF_TRANSMITTER_STATE       State;
     PXENVIF_PACKET_PAYLOAD          Payload;
     PXENVIF_PACKET_INFO             Info;
     NTSTATUS                        status;
 
-    ASSERT(IsZeroMemory(&Ring->State, sizeof (TRANSMITTER_STATE)));
+    ASSERT(IsZeroMemory(&Ring->State, sizeof (XENVIF_TRANSMITTER_STATE)));
     ASSERT3P(Packet->Next, ==, NULL);
 
     Transmitter = Ring->Transmitter;
@@ -1393,25 +1207,25 @@ __RingPreparePacket(
     State->Packet = Packet;
 
     State->Send = Packet->Send;
-    RtlZeroMemory(&Packet->Send, sizeof (XENVIF_SEND_INFO));
+    RtlZeroMemory(&Packet->Send, sizeof (XENVIF_TRANSMITTER_PACKET_SEND_INFO));
 
     Payload = &State->Payload;
 
-    ASSERT(METADATA_EXISTS(Ring, Packet, Mdl));
-    Payload->Mdl = *(PMDL *)METADATA(Ring, Packet, Mdl);
+    ASSERT(OFFSET_EXISTS(Ring, Packet, MDL));
+    Payload->Mdl = *(PMDL *)OFFSET(Ring, Packet, MDL);
 
-    if (METADATA_EXISTS(Ring, Packet, Offset))
-        Payload->Offset = *(PULONG)METADATA(Ring, Packet, Offset);
+    if (OFFSET_EXISTS(Ring, Packet, OFFSET))
+        Payload->Offset = *(PULONG)OFFSET(Ring, Packet, OFFSET);
     else
         Payload->Offset = 0;
 
-    ASSERT(METADATA_EXISTS(Ring, Packet, Length));
-    Payload->Length = *(PULONG)METADATA(Ring, Packet, Length);
+    ASSERT(OFFSET_EXISTS(Ring, Packet, LENGTH));
+    Payload->Length = *(PULONG)OFFSET(Ring, Packet, LENGTH);
 
     InitializeListHead(&State->List);
     ASSERT3U(State->Count, ==, 0);
 
-    status = __RingPrepareHeader(Ring);
+    status = __TransmitterRingPrepareHeader(Ring);
     if (!NT_SUCCESS(status))
         goto fail1;
 
@@ -1427,21 +1241,21 @@ __RingPreparePacket(
         Trailer = ETHERNET_MIN - Payload->Length - Info->Length;
         SingleFragment = (Payload->Length == 0) ? TRUE : FALSE;
 
-        status = __RingCopyPayload(Ring);
+        status = __TransmitterRingCopyPayload(Ring);
 
         if (NT_SUCCESS(status)) {
-            PLIST_ENTRY         ListEntry;
-            PTRANSMITTER_TAG    Tag;
-            PTRANSMITTER_BUFFER Buffer;
-            PMDL                Mdl;
-            PUCHAR              MdlMappedSystemVa;
+            PLIST_ENTRY                     ListEntry;
+            PXENVIF_TRANSMITTER_FRAGMENT    Fragment;
+            PXENVIF_TRANSMITTER_BUFFER      Buffer;
+            PMDL                            Mdl;
+            PUCHAR                          MdlMappedSystemVa;
 
             // Add padding to the tail buffer
             ListEntry = State->List.Blink;
-            Tag = CONTAINING_RECORD(ListEntry, TRANSMITTER_TAG, ListEntry);
+            Fragment = CONTAINING_RECORD(ListEntry, XENVIF_TRANSMITTER_FRAGMENT, ListEntry);
 
-            ASSERT3U(Tag->Type, ==, TAG_BUFFER);
-            Buffer = Tag->Context;
+            ASSERT3U(Fragment->Type, ==, XENVIF_TRANSMITTER_FRAGMENT_TYPE_BUFFER);
+            Buffer = Fragment->Context;
 
             Mdl = Buffer->Mdl;
 
@@ -1457,25 +1271,25 @@ __RingPreparePacket(
 
             if (!SingleFragment) {
                 ASSERT3P(State->List.Flink, !=, ListEntry);
-                Tag->Length += Trailer;
+                Fragment->Length += Trailer;
             }
 
-            // Adjust length of header tag
+            // Adjust length of header fragment
             ListEntry = State->List.Flink;
-            Tag = CONTAINING_RECORD(ListEntry, TRANSMITTER_TAG, ListEntry);
+            Fragment = CONTAINING_RECORD(ListEntry, XENVIF_TRANSMITTER_FRAGMENT, ListEntry);
 
-            Tag->Length += Trailer;
-            ASSERT3U(Tag->Length, ==, ETHERNET_MIN);
+            Fragment->Length += Trailer;
+            ASSERT3U(Fragment->Length, ==, ETHERNET_MIN);
         }
     } else {
         if (Transmitter->AlwaysCopy == 0)
-            status = __RingGrantPayload(Ring);
+            status = __TransmitterRingGrantPayload(Ring);
 
         if (Transmitter->AlwaysCopy != 0 ||
             (!NT_SUCCESS(status) && status == STATUS_BUFFER_OVERFLOW)) {
             ASSERT3U(State->Count, ==, PACKET_REFERENCE(Packet));
 
-            status = __RingCopyPayload(Ring);
+            status = __TransmitterRingCopyPayload(Ring);
         }
     }
 
@@ -1488,16 +1302,12 @@ __RingPreparePacket(
     return STATUS_SUCCESS;
 
 fail2:
-    if (status != STATUS_INSUFFICIENT_RESOURCES &&
-        status != STATUS_INVALID_PARAMETER)
-        Error("fail2\n");
+    Error("fail2\n");
 
-    __RingUnprepareTags(Ring);
+    __TransmitterRingUnprepareFragments(Ring);
 
 fail1:
-    if (status != STATUS_INSUFFICIENT_RESOURCES &&
-        status != STATUS_INVALID_PARAMETER)
-        Error("fail1 (%08x)\n", status);
+    Error("fail1 (%08x)\n", status);
 
     State->StartVa = NULL;
     RtlZeroMemory(&State->Info, sizeof (XENVIF_PACKET_INFO));
@@ -1508,25 +1318,25 @@ fail1:
     RtlZeroMemory(&State->Payload, sizeof (XENVIF_PACKET_PAYLOAD));
 
     Packet->Send = State->Send;
-    RtlZeroMemory(&State->Send, sizeof (XENVIF_SEND_INFO));
+    RtlZeroMemory(&State->Send, sizeof (XENVIF_TRANSMITTER_PACKET_SEND_INFO));
 
     State->Packet = NULL;
 
-    ASSERT(IsZeroMemory(&Ring->State, sizeof (TRANSMITTER_STATE)));
+    ASSERT(IsZeroMemory(&Ring->State, sizeof (XENVIF_TRANSMITTER_STATE)));
 
     return status;
 
-#undef  METADATA
-#undef  METADATA_EXISTS
+#undef  OFFSET
+#undef  OFFSET_EXISTS
 }
 
 static FORCEINLINE PXENVIF_TRANSMITTER_PACKET
-__RingUnpreparePacket(
-    IN  PTRANSMITTER_RING       Ring
+__TransmitterRingUnpreparePacket(
+    IN  PXENVIF_TRANSMITTER_RING    Ring
     )
 {
-    PTRANSMITTER_STATE          State;
-    PXENVIF_TRANSMITTER_PACKET  Packet;
+    PXENVIF_TRANSMITTER_STATE       State;
+    PXENVIF_TRANSMITTER_PACKET      Packet;
 
     State = &Ring->State;
     Packet = State->Packet;
@@ -1534,7 +1344,7 @@ __RingUnpreparePacket(
     // This has the side effect of freeing up resources associated with a pending
     // gratuitous ARP, which is why the call is not conditional on Packet being
     // non-NULL
-    __RingUnprepareTags(Ring);
+    __TransmitterRingUnprepareFragments(Ring);
     RtlZeroMemory(&State->Info, sizeof (XENVIF_PACKET_INFO));
 
     if (Packet == NULL)
@@ -1548,40 +1358,40 @@ __RingUnpreparePacket(
     RtlZeroMemory(&State->Payload, sizeof (XENVIF_PACKET_PAYLOAD));
 
     Packet->Send = State->Send;
-    RtlZeroMemory(&State->Send, sizeof (XENVIF_SEND_INFO));
+    RtlZeroMemory(&State->Send, sizeof (XENVIF_TRANSMITTER_PACKET_SEND_INFO));
 
     State->Packet = NULL;
 
-    ASSERT(IsZeroMemory(&Ring->State, sizeof (TRANSMITTER_STATE)));
+    ASSERT(IsZeroMemory(&Ring->State, sizeof (XENVIF_TRANSMITTER_STATE)));
 
 done:
     return Packet;
 }
 
 static FORCEINLINE NTSTATUS
-__RingPrepareGratuitousArp(
-    IN  PTRANSMITTER_RING       Ring,
-    IN  PIPV4_ADDRESS           Address
+__TransmitterRingPrepareArp(
+    IN  PXENVIF_TRANSMITTER_RING    Ring,
+    IN  PIPV4_ADDRESS               Address
     )
 {
-    PXENVIF_TRANSMITTER         Transmitter;
-    PXENVIF_FRONTEND            Frontend;
-    PXENVIF_MAC                 Mac;
-    PTRANSMITTER_STATE          State;
-    PTRANSMITTER_TAG            Tag;
-    PTRANSMITTER_BUFFER         Buffer;
-    PMDL                        Mdl;
-    PUCHAR                      MdlMappedSystemVa;
-    PETHERNET_UNTAGGED_HEADER   EthernetHeader;
-    PARP_HEADER                 ArpHeader;
-    PETHERNET_ADDRESS           SenderHardwareAddress;
-    PIPV4_ADDRESS               SenderProtocolAddress;
-    PETHERNET_ADDRESS           TargetHardwareAddress;
-    PIPV4_ADDRESS               TargetProtocolAddress;
-    PFN_NUMBER                  Pfn;
-    NTSTATUS                    status;
+    PXENVIF_TRANSMITTER             Transmitter;
+    PXENVIF_FRONTEND                Frontend;
+    PXENVIF_MAC                     Mac;
+    PXENVIF_TRANSMITTER_STATE       State;
+    PXENVIF_TRANSMITTER_FRAGMENT    Fragment;
+    PXENVIF_TRANSMITTER_BUFFER      Buffer;
+    PMDL                            Mdl;
+    PUCHAR                          MdlMappedSystemVa;
+    PETHERNET_UNTAGGED_HEADER       EthernetHeader;
+    PARP_HEADER                     ArpHeader;
+    ETHERNET_ADDRESS                SenderHardwareAddress;
+    IPV4_ADDRESS                    SenderProtocolAddress;
+    ETHERNET_ADDRESS                TargetHardwareAddress;
+    IPV4_ADDRESS                    TargetProtocolAddress;
+    PFN_NUMBER                      Pfn;
+    NTSTATUS                        status;
 
-    ASSERT(IsZeroMemory(&Ring->State, sizeof (TRANSMITTER_STATE)));
+    ASSERT(IsZeroMemory(&Ring->State, sizeof (XENVIF_TRANSMITTER_STATE)));
 
     Info("%u.%u.%u.%u\n",
          Address->Byte[0],
@@ -1593,9 +1403,10 @@ __RingPrepareGratuitousArp(
     Frontend = Transmitter->Frontend;
     Mac = FrontendGetMac(Frontend);
 
-    TargetProtocolAddress = SenderProtocolAddress = Address;
-    SenderHardwareAddress = MacGetCurrentAddress(Mac);
-    TargetHardwareAddress = MacGetBroadcastAddress(Mac);
+    SenderProtocolAddress = *Address;
+    TargetProtocolAddress = *Address;
+    MacQueryCurrentAddress(Mac, &SenderHardwareAddress);
+    MacQueryBroadcastAddress(Mac, &TargetHardwareAddress);
 
     State = &Ring->State;
 
@@ -1612,8 +1423,8 @@ __RingPrepareGratuitousArp(
 
     EthernetHeader = (PETHERNET_UNTAGGED_HEADER)MdlMappedSystemVa;
 
-    RtlCopyMemory(EthernetHeader->DestinationAddress.Byte, MacGetBroadcastAddress(Mac), ETHERNET_ADDRESS_LENGTH);
-    RtlCopyMemory(EthernetHeader->SourceAddress.Byte, MacGetCurrentAddress(Mac), ETHERNET_ADDRESS_LENGTH);
+    MacQueryBroadcastAddress(Mac, &EthernetHeader->DestinationAddress);
+    MacQueryCurrentAddress(Mac, &EthernetHeader->SourceAddress);
     EthernetHeader->TypeOrLength = HTONS(ETHERTYPE_ARP);
 
     MdlMappedSystemVa += sizeof (ETHERNET_UNTAGGED_HEADER);
@@ -1628,24 +1439,28 @@ __RingPrepareGratuitousArp(
 
     MdlMappedSystemVa += sizeof (ARP_HEADER);
 
-    RtlCopyMemory(MdlMappedSystemVa, SenderHardwareAddress->Byte, ETHERNET_ADDRESS_LENGTH);
+    RtlCopyMemory(MdlMappedSystemVa, SenderHardwareAddress.Byte, ETHERNET_ADDRESS_LENGTH);
     MdlMappedSystemVa += ETHERNET_ADDRESS_LENGTH;
 
-    RtlCopyMemory(MdlMappedSystemVa, SenderProtocolAddress->Byte, IPV4_ADDRESS_LENGTH);
+    RtlCopyMemory(MdlMappedSystemVa, SenderProtocolAddress.Byte, IPV4_ADDRESS_LENGTH);
     MdlMappedSystemVa += IPV4_ADDRESS_LENGTH;
 
-    RtlCopyMemory(MdlMappedSystemVa, TargetHardwareAddress->Byte, ETHERNET_ADDRESS_LENGTH);
+    RtlCopyMemory(MdlMappedSystemVa, TargetHardwareAddress.Byte, ETHERNET_ADDRESS_LENGTH);
     MdlMappedSystemVa += ETHERNET_ADDRESS_LENGTH;
 
-    RtlCopyMemory(MdlMappedSystemVa, TargetProtocolAddress->Byte, IPV4_ADDRESS_LENGTH);
+    RtlCopyMemory(MdlMappedSystemVa, TargetProtocolAddress.Byte, IPV4_ADDRESS_LENGTH);
     MdlMappedSystemVa += IPV4_ADDRESS_LENGTH;
 
     Mdl->ByteCount = (ULONG)(MdlMappedSystemVa - (PUCHAR)MmGetSystemAddressForMdlSafe(Mdl, NormalPagePriority));
 
-    Tag = __TransmitterGetTag(Ring);
+    Fragment = __TransmitterGetFragment(Ring);
 
-    Tag->Context = Buffer;
-    Tag->Type = TAG_BUFFER;
+    status = STATUS_NO_MEMORY;
+    if (Fragment == NULL)
+        goto fail2;
+
+    Fragment->Context = Buffer;
+    Fragment->Type = XENVIF_TRANSMITTER_FRAGMENT_TYPE_BUFFER;
     Buffer->Reference++;
 
     Pfn = MmGetMdlPfnArray(Mdl)[0];
@@ -1653,71 +1468,74 @@ __RingPrepareGratuitousArp(
     status = GranterPermitAccess(FrontendGetGranter(Frontend),
                                  Pfn,
                                  TRUE,
-                                 &Tag->Handle);
+                                 &Fragment->Handle);
     if (!NT_SUCCESS(status))
-        goto fail2;
+        goto fail3;
 
-    Tag->Offset = 0;
-    Tag->Length = Mdl->ByteCount;
+    Fragment->Offset = 0;
+    Fragment->Length = Mdl->ByteCount;
 
     InitializeListHead(&State->List);
 
-    ASSERT(IsZeroMemory(&Tag->ListEntry, sizeof (LIST_ENTRY)));
-    InsertTailList(&State->List, &Tag->ListEntry);
+    ASSERT(IsZeroMemory(&Fragment->ListEntry, sizeof (LIST_ENTRY)));
+    InsertTailList(&State->List, &Fragment->ListEntry);
     State->Count++;
 
     return STATUS_SUCCESS;
 
-fail2:
-    if (status != STATUS_INSUFFICIENT_RESOURCES)
-        Error("fail2\n");
+fail3:
+    Error("fail3\n");
 
-    ASSERT3U(Tag->Type, ==, TAG_BUFFER);
-    ASSERT3P(Buffer, ==, Tag->Context);
-    Tag->Context = NULL;
-    Tag->Type = TAG_TYPE_INVALID;
+    ASSERT3U(Fragment->Type, ==, XENVIF_TRANSMITTER_FRAGMENT_TYPE_BUFFER);
+    ASSERT3P(Buffer, ==, Fragment->Context);
+    Fragment->Context = NULL;
+    Fragment->Type = XENVIF_TRANSMITTER_FRAGMENT_TYPE_INVALID;
 
     ASSERT(Buffer->Reference != 0);
     --Buffer->Reference;
 
-    __TransmitterPutTag(Ring, Tag);
+    __TransmitterPutFragment(Ring, Fragment);
+
+fail2:
+    Error("fail2\n");
+
+    Mdl->ByteCount = 0;
 
     __TransmitterPutBuffer(Ring, Buffer);
 
 fail1:
-    if (status != STATUS_INSUFFICIENT_RESOURCES)
-        Error("fail1 (%08x)\n", status);
+    Error("fail1 (%08x)\n", status);
 
-    ASSERT(IsZeroMemory(&Ring->State, sizeof (TRANSMITTER_STATE)));
+    ASSERT(IsZeroMemory(&Ring->State, sizeof (XENVIF_TRANSMITTER_STATE)));
 
     return status;
 }
 
 static FORCEINLINE NTSTATUS
-__RingPrepareNeighbourAdvertisement(
-    IN  PTRANSMITTER_RING       Ring,
-    IN  PIPV6_ADDRESS           Address
+__TransmitterRingPrepareNeighbourAdvertisement(
+    IN  PXENVIF_TRANSMITTER_RING    Ring,
+    IN  PIPV6_ADDRESS               Address
     )
 {
-    PXENVIF_TRANSMITTER         Transmitter;
-    PXENVIF_FRONTEND            Frontend;
-    PXENVIF_MAC                 Mac;
-    PTRANSMITTER_STATE          State;
-    PTRANSMITTER_TAG            Tag;
-    PTRANSMITTER_BUFFER         Buffer;
-    PMDL                        Mdl;
-    PUCHAR                      MdlMappedSystemVa;
-    PETHERNET_UNTAGGED_HEADER   EthernetHeader;
-    PIPV6_HEADER                IpHeader;
-    PICMPV6_HEADER              IcmpHeader;
-    PIPV6_ADDRESS               TargetProtocolAddress;
-    PETHERNET_ADDRESS           SenderHardwareAddress;
-    USHORT                      PayloadLength;
-    ULONG                       Accumulator;
-    PFN_NUMBER                  Pfn;
-    NTSTATUS                    status;
+    PXENVIF_TRANSMITTER             Transmitter;
+    PXENVIF_FRONTEND                Frontend;
+    PXENVIF_MAC                     Mac;
+    PXENVIF_TRANSMITTER_STATE       State;
+    PXENVIF_TRANSMITTER_FRAGMENT    Fragment;
+    PXENVIF_TRANSMITTER_BUFFER      Buffer;
+    PMDL                            Mdl;
+    PUCHAR                          MdlMappedSystemVa;
+    PETHERNET_UNTAGGED_HEADER       EthernetHeader;
+    PIPV6_HEADER                    IpHeader;
+    PICMPV6_HEADER                  IcmpHeader;
+    IPV6_ADDRESS                    TargetProtocolAddress;
+    ETHERNET_ADDRESS                SenderHardwareAddress;
+    USHORT                          PayloadLength;
+    ULONG                           Accumulator;
+    PFN_NUMBER                      Pfn;
+    NTSTATUS                        status;
 
-    ASSERT(IsZeroMemory(&Ring->State, sizeof (TRANSMITTER_STATE)));
+    ASSERT(IsZeroMemory(&Ring->State, sizeof (XENVIF_TRANSMITTER_STATE)));
 
     Info("%04x:%04x:%04x:%04x:%04x:%04x:%04x:%04x\n",
          HTONS(Address->Word[0]),
@@ -1733,8 +1551,8 @@ __RingPrepareNeighbourAdvertisement(
     Frontend = Transmitter->Frontend;
     Mac = FrontendGetMac(Frontend);
 
-    TargetProtocolAddress = Address;
-    SenderHardwareAddress = MacGetCurrentAddress(Mac);
+    TargetProtocolAddress = *Address;
+    MacQueryCurrentAddress(Mac, &SenderHardwareAddress);
 
     State = &Ring->State;
 
@@ -1751,8 +1569,8 @@ __RingPrepareNeighbourAdvertisement(
 
     EthernetHeader = (PETHERNET_UNTAGGED_HEADER)MdlMappedSystemVa;
 
-    RtlCopyMemory(EthernetHeader->DestinationAddress.Byte, MacGetBroadcastAddress(Mac), ETHERNET_ADDRESS_LENGTH);
-    RtlCopyMemory(EthernetHeader->SourceAddress.Byte, MacGetCurrentAddress(Mac), ETHERNET_ADDRESS_LENGTH);
+    MacQueryBroadcastAddress(Mac, &EthernetHeader->DestinationAddress);
+    MacQueryCurrentAddress(Mac, &EthernetHeader->SourceAddress);
     EthernetHeader->TypeOrLength = HTONS(ETHERTYPE_IPV6);
 
     MdlMappedSystemVa += sizeof (ETHERNET_UNTAGGED_HEADER);
@@ -1764,7 +1582,9 @@ __RingPrepareNeighbourAdvertisement(
     IpHeader->NextHeader = IPPROTO_ICMPV6;
     IpHeader->HopLimit = 255;
 
-    RtlCopyMemory(IpHeader->SourceAddress.Byte, Address, IPV6_ADDRESS_LENGTH);
+    RtlCopyMemory(IpHeader->SourceAddress.Byte, 
+                  Address,
+                  IPV6_ADDRESS_LENGTH);
 
     // Destination is all-nodes multicast address
     IpHeader->DestinationAddress.Byte[0] = 0xFF;
@@ -1783,12 +1603,12 @@ __RingPrepareNeighbourAdvertisement(
     PayloadLength += sizeof (ICMPV6_HEADER);
     MdlMappedSystemVa += sizeof (ICMPV6_HEADER);
 
-    RtlCopyMemory(MdlMappedSystemVa, TargetProtocolAddress->Byte, IPV6_ADDRESS_LENGTH);
+    RtlCopyMemory(MdlMappedSystemVa, TargetProtocolAddress.Byte, IPV6_ADDRESS_LENGTH);
 
     PayloadLength += IPV6_ADDRESS_LENGTH;
     MdlMappedSystemVa += IPV6_ADDRESS_LENGTH;
 
-    RtlCopyMemory(MdlMappedSystemVa, SenderHardwareAddress->Byte, ETHERNET_ADDRESS_LENGTH);
+    RtlCopyMemory(MdlMappedSystemVa, SenderHardwareAddress.Byte, ETHERNET_ADDRESS_LENGTH);
 
     PayloadLength += ETHERNET_ADDRESS_LENGTH;
     MdlMappedSystemVa += ETHERNET_ADDRESS_LENGTH;
@@ -1806,10 +1626,14 @@ __RingPrepareNeighbourAdvertisement(
 
     IcmpHeader->Checksum = (USHORT)~Accumulator;
 
-    Tag = __TransmitterGetTag(Ring);
+    Fragment = __TransmitterGetFragment(Ring);
 
-    Tag->Context = Buffer;
-    Tag->Type = TAG_BUFFER;
+    status = STATUS_NO_MEMORY;
+    if (Fragment == NULL)
+        goto fail2;
+
+    Fragment->Context = Buffer;
+    Fragment->Type = XENVIF_TRANSMITTER_FRAGMENT_TYPE_BUFFER;
     Buffer->Reference++;
 
     Pfn = MmGetMdlPfnArray(Mdl)[0];
@@ -1817,66 +1641,69 @@ __RingPrepareNeighbourAdvertisement(
     status = GranterPermitAccess(FrontendGetGranter(Frontend),
                                  Pfn,
                                  TRUE,
-                                 &Tag->Handle);
+                                 &Fragment->Handle);
     if (!NT_SUCCESS(status))
-        goto fail2;
+        goto fail3;
 
-    Tag->Offset = 0;
-    Tag->Length = Mdl->ByteCount;
+    Fragment->Offset = 0;
+    Fragment->Length = Mdl->ByteCount;
 
     InitializeListHead(&State->List);
 
-    ASSERT(IsZeroMemory(&Tag->ListEntry, sizeof (LIST_ENTRY)));
-    InsertTailList(&State->List, &Tag->ListEntry);
+    ASSERT(IsZeroMemory(&Fragment->ListEntry, sizeof (LIST_ENTRY)));
+    InsertTailList(&State->List, &Fragment->ListEntry);
     State->Count++;
 
     return STATUS_SUCCESS;
 
-fail2:
-    if (status != STATUS_INSUFFICIENT_RESOURCES)
-        Error("fail2\n");
+fail3:
+    Error("fail3\n");
 
-    ASSERT3U(Tag->Type, ==, TAG_BUFFER);
-    ASSERT3P(Buffer, ==, Tag->Context);
-    Tag->Context = NULL;
-    Tag->Type = TAG_TYPE_INVALID;
+    ASSERT3U(Fragment->Type, ==, XENVIF_TRANSMITTER_FRAGMENT_TYPE_BUFFER);
+    ASSERT3P(Buffer, ==, Fragment->Context);
+    Fragment->Context = NULL;
+    Fragment->Type = XENVIF_TRANSMITTER_FRAGMENT_TYPE_INVALID;
 
     ASSERT(Buffer->Reference != 0);
     --Buffer->Reference;
 
-    __TransmitterPutTag(Ring, Tag);
+    __TransmitterPutFragment(Ring, Fragment);
+
+fail2:
+    Error("fail2\n");
+
+    Mdl->ByteCount = 0;
 
     __TransmitterPutBuffer(Ring, Buffer);
 
 fail1:
-    if (status != STATUS_INSUFFICIENT_RESOURCES)
-        Error("fail1 (%08x)\n", status);
+    Error("fail1 (%08x)\n", status);
 
-    ASSERT(IsZeroMemory(&Ring->State, sizeof (TRANSMITTER_STATE)));
+    ASSERT(IsZeroMemory(&Ring->State, sizeof (XENVIF_TRANSMITTER_STATE)));
 
     return status;
 }
 
 static FORCEINLINE NTSTATUS
-__RingPostTags(
-    IN  PTRANSMITTER_RING       Ring
+__TransmitterRingPostFragments(
+    IN  PXENVIF_TRANSMITTER_RING    Ring
     )
 {
 #define RING_SLOTS_AVAILABLE(_Front, _req_prod, _rsp_cons)   \
         (RING_SIZE(_Front) - ((_req_prod) - (_rsp_cons)))
 
-    PXENVIF_TRANSMITTER         Transmitter;
-    PXENVIF_FRONTEND            Frontend;
-    PTRANSMITTER_STATE          State;
-    PXENVIF_TRANSMITTER_PACKET  Packet;
-    PXENVIF_PACKET_PAYLOAD      Payload;
-    RING_IDX                    req_prod;
-    RING_IDX                    rsp_cons;
-    ULONG                       Extra;
-    ULONG                       PacketLength;
-    BOOLEAN                     FirstRequest;
-    netif_tx_request_t          *req;
-    NTSTATUS                    status;
+    PXENVIF_TRANSMITTER             Transmitter;
+    PXENVIF_FRONTEND                Frontend;
+    PXENVIF_TRANSMITTER_STATE       State;
+    PXENVIF_TRANSMITTER_PACKET      Packet;
+    PXENVIF_PACKET_PAYLOAD          Payload;
+    RING_IDX                        req_prod;
+    RING_IDX                        rsp_cons;
+    ULONG                           Extra;
+    ULONG                           PacketLength;
+    BOOLEAN                         FirstRequest;
+    netif_tx_request_t              *req;
+    NTSTATUS                        status;
 
     Transmitter = Ring->Transmitter;
     Frontend = Transmitter->Frontend;
@@ -1887,7 +1714,7 @@ __RingPostTags(
 
     ASSERT(!IsListEmpty(&State->List));
     ASSERT(State->Count != 0);
-    ASSERT3U(State->Count, <=, MAX_SKB_FRAGS + 1);
+    ASSERT3U(State->Count, <=, XEN_NETIF_NR_SLOTS_MIN);
     ASSERT(IMPLY(Packet != NULL, State->Count == PACKET_REFERENCE(Packet)));
 
     req_prod = Ring->Front.req_prod_pvt;
@@ -1909,9 +1736,8 @@ __RingPostTags(
     FirstRequest = TRUE;
     PacketLength = 0;
     while (State->Count != 0) {
-        PLIST_ENTRY         ListEntry;
-        PTRANSMITTER_TAG    Tag;
-        uint16_t            id;
+        PLIST_ENTRY                     ListEntry;
+        PXENVIF_TRANSMITTER_FRAGMENT    Fragment;
 
         --State->Count;
 
@@ -1920,19 +1746,17 @@ __RingPostTags(
 
         RtlZeroMemory(ListEntry, sizeof (LIST_ENTRY));
 
-        Tag = CONTAINING_RECORD(ListEntry, TRANSMITTER_TAG, ListEntry);
+        Fragment = CONTAINING_RECORD(ListEntry, XENVIF_TRANSMITTER_FRAGMENT, ListEntry);
 
         req = RING_GET_REQUEST(&Ring->Front, req_prod);
         req_prod++;
         Ring->RequestsPosted++;
 
-        id = (USHORT)(Tag - &Ring->Tag[0]);
-
-        req->id = id | REQ_ID_INTEGRITY_CHECK;
+        req->id = Fragment->Id;
         req->gref = GranterGetReference(FrontendGetGranter(Frontend),
-                                        Tag->Handle);
-        req->offset = (USHORT)Tag->Offset;
-        req->size = (USHORT)Tag->Length;
+                                        Fragment->Handle);
+        req->offset = (USHORT)Fragment->Offset;
+        req->size = (USHORT)Fragment->Length;
         req->flags = NETTXF_more_data;
 
         if (FirstRequest) {
@@ -1951,6 +1775,7 @@ __RingPostTags(
                 struct netif_extra_info *extra;
 
                 ASSERT(Extra != 0);
+                Fragment->Extra = TRUE;
 
                 ASSERT(!(State->Send.OffloadOptions.OffloadIpVersion4LargePacket &&
                          State->Send.OffloadOptions.OffloadIpVersion6LargePacket));
@@ -1977,14 +1802,14 @@ __RingPostTags(
                 extra->u.gso.features = 0;
             }
 
-            // The first tag length is the length of the entire packet
-            PacketLength = Tag->Length;
+            // The first fragment length is the length of the entire packet
+            PacketLength = Fragment->Length;
         }
 
         // Store a copy of the request in case we need to fake a response ourselves
-        ASSERT3U(id, <, MAXIMUM_TAG_COUNT);
-        ASSERT(IsZeroMemory(&Ring->Pending[id], sizeof (netif_tx_request_t)));
-        Ring->Pending[id] = *req;
+        ASSERT3U(req->id, <=, XENVIF_TRANSMITTER_MAXIMUM_FRAGMENT_ID);
+        ASSERT3P(Ring->Pending[req->id], ==, NULL);
+        Ring->Pending[req->id] = Fragment;
     }
     ASSERT(!FirstRequest);
     ASSERT(PacketLength != 0);
@@ -2006,26 +1831,26 @@ __RingPostTags(
         StartVa = State->StartVa;
         Info = &State->Info;
 
-        ASSERT(IsZeroMemory(&Packet->Completion, sizeof (XENVIF_COMPLETION_INFO)));
+        ASSERT(IsZeroMemory(&Packet->Completion, sizeof (XENVIF_TRANSMITTER_PACKET_COMPLETION_INFO)));
 
         ASSERT(Info->EthernetHeader.Length != 0);
         Header = (PETHERNET_HEADER)(StartVa + Info->EthernetHeader.Offset);
 
         Packet->Completion.Type = GET_ETHERNET_ADDRESS_TYPE(&Header->Untagged.DestinationAddress);
-        Packet->Completion.Status = PACKET_PENDING;
+        Packet->Completion.Status = XENVIF_TRANSMITTER_PACKET_PENDING;
         Packet->Completion.PacketLength = (USHORT)PacketLength;
         Packet->Completion.PayloadLength = (USHORT)Payload->Length;
 
         State->StartVa = NULL;
         RtlZeroMemory(&State->Info, sizeof (XENVIF_PACKET_INFO));
         RtlZeroMemory(&State->Payload, sizeof (XENVIF_PACKET_PAYLOAD));
-        RtlZeroMemory(&State->Send, sizeof (XENVIF_SEND_INFO));
+        RtlZeroMemory(&State->Send, sizeof (XENVIF_TRANSMITTER_PACKET_SEND_INFO));
         State->Packet = NULL;
 
         Ring->PacketsSent++;
     }
 
-    ASSERT(IsZeroMemory(&Ring->State, sizeof (TRANSMITTER_STATE)));
+    ASSERT(IsZeroMemory(&Ring->State, sizeof (XENVIF_TRANSMITTER_STATE)));
 
     return STATUS_SUCCESS;
 
@@ -2036,13 +1861,13 @@ fail1:
 }
 
 static FORCEINLINE VOID
-__RingFakeResponses(
-    IN  PTRANSMITTER_RING   Ring
+__TransmitterRingFakeResponses(
+    IN  PXENVIF_TRANSMITTER_RING    Ring
     )
 {
-    RING_IDX                rsp_prod;
-    USHORT                  id;
-    ULONG                   Count;
+    RING_IDX                        rsp_prod;
+    USHORT                          id;
+    ULONG                           Count;
 
     // This is only called when the backend went away. We need
     // to mimic the behavior of the backend and turn requests into
@@ -2055,25 +1880,24 @@ __RingFakeResponses(
     KeMemoryBarrier();
 
     Count = 0;
-    for (id = 0; id < MAXIMUM_TAG_COUNT; id++) {
-        netif_tx_request_t  *req;
-        netif_tx_response_t *rsp;
+    for (id = 0; id <= XENVIF_TRANSMITTER_MAXIMUM_FRAGMENT_ID; id++) {
+        PXENVIF_TRANSMITTER_FRAGMENT    Fragment;
+        netif_tx_response_t             *rsp;
 
-        req = &Ring->Pending[id];
-        if (req->id == 0)
+        Fragment = Ring->Pending[id];
+        Ring->Pending[id] = NULL;
+
+        if (Fragment == NULL)
             continue;
-
-        ASSERT3U((req->id & REQ_ID_INTEGRITY_CHECK), ==, REQ_ID_INTEGRITY_CHECK);
-        ASSERT3U((req->id & ~REQ_ID_INTEGRITY_CHECK), ==, id);
 
         rsp = RING_GET_RESPONSE(&Ring->Front, rsp_prod);
         rsp_prod++;
         Count++;
 
-        rsp->id = req->id;
+        rsp->id = Fragment->Id;
         rsp->status = NETIF_RSP_DROPPED;
 
-        if (req->flags & NETTXF_extra_info) {
+        if (Fragment->Extra) {
             rsp = RING_GET_RESPONSE(&Ring->Front, rsp_prod);
             rsp_prod++;
             Count++;
@@ -2095,40 +1919,28 @@ __RingFakeResponses(
 }
 
 static FORCEINLINE VOID
-__RingReleaseTag(
-    IN  PTRANSMITTER_RING   Ring,
-    IN  PTRANSMITTER_TAG    Tag
+__TransmitterRingCompletePacket(
+    IN  PXENVIF_TRANSMITTER_RING    Ring,
+    IN  PXENVIF_TRANSMITTER_PACKET  Packet
     )
 {
-    PXENVIF_TRANSMITTER     Transmitter;
-    PXENVIF_FRONTEND        Frontend;
+    PXENVIF_TRANSMITTER             Transmitter;
+    PXENVIF_FRONTEND                Frontend;
 
     Transmitter = Ring->Transmitter;
     Frontend = Transmitter->Frontend;
 
-    Tag->Length = 0;
-    Tag->Offset = 0;
+    ASSERT(Packet->Completion.Status != XENVIF_TRANSMITTER_PACKET_PENDING);
 
-    GranterRevokeAccess(FrontendGetGranter(Frontend),
-                        Tag->Handle);
-    Tag->Handle = NULL;
+    if (Packet->Completion.Status != XENVIF_TRANSMITTER_PACKET_OK) {
+        FrontendIncrementStatistic(Frontend,
+                                   XENVIF_TRANSMITTER_PACKETS_DROPPED,
+                                   1);
 
-    __TransmitterPutTag(Ring, Tag);
-}
-
-static FORCEINLINE VOID
-__RingCompletePacket(
-    IN  PTRANSMITTER_RING           Ring,
-    IN  PXENVIF_TRANSMITTER_PACKET  Packet
-    )
-{
-    ASSERT(Packet->Completion.Status != PACKET_PENDING);
-
-    if (Packet->Completion.Status != PACKET_OK) {
-        Ring->PacketStatistics.Drop++;
-
-        if (Packet->Completion.Status == PACKET_ERROR)
-            Ring->PacketStatistics.BackendError++;
+        if (Packet->Completion.Status == XENVIF_TRANSMITTER_PACKET_ERROR)
+            FrontendIncrementStatistic(Frontend,
+                                       XENVIF_TRANSMITTER_BACKEND_ERRORS,
+                                       1);
     } else {
         ULONG   Length;
 
@@ -2136,18 +1948,30 @@ __RingCompletePacket(
 
         switch (Packet->Completion.Type) {
         case ETHERNET_ADDRESS_UNICAST:
-            Ring->PacketStatistics.Unicast++;
-            Ring->PacketStatistics.UnicastBytes += Length;
+            FrontendIncrementStatistic(Frontend,
+                                       XENVIF_TRANSMITTER_UNICAST_PACKETS,
+                                       1);
+            FrontendIncrementStatistic(Frontend,
+                                       XENVIF_TRANSMITTER_UNICAST_OCTETS,
+                                       Length);
             break;
             
         case ETHERNET_ADDRESS_MULTICAST:
-            Ring->PacketStatistics.Multicast++;
-            Ring->PacketStatistics.MulticastBytes += Length;
+            FrontendIncrementStatistic(Frontend,
+                                       XENVIF_TRANSMITTER_MULTICAST_PACKETS,
+                                       1);
+            FrontendIncrementStatistic(Frontend,
+                                       XENVIF_TRANSMITTER_MULTICAST_OCTETS,
+                                       Length);
             break;
 
         case ETHERNET_ADDRESS_BROADCAST:
-            Ring->PacketStatistics.Broadcast++;
-            Ring->PacketStatistics.BroadcastBytes += Length;
+            FrontendIncrementStatistic(Frontend,
+                                       XENVIF_TRANSMITTER_BROADCAST_PACKETS,
+                                       1);
+            FrontendIncrementStatistic(Frontend,
+                                       XENVIF_TRANSMITTER_BROADCAST_OCTETS,
+                                       Length);
             break;
 
         default:
@@ -2163,13 +1987,19 @@ __RingCompletePacket(
     Ring->PacketsCompleted++;
 }
 
-#define TRANSMITTER_BATCH(_Ring)   (RING_SIZE(&(_Ring)->Front) / 4)
-
 static DECLSPEC_NOINLINE VOID
-RingPoll(
-    IN  PTRANSMITTER_RING   Ring
+TransmitterRingPoll(
+    IN  PXENVIF_TRANSMITTER_RING    Ring
     )
 {
+#define XENVIF_TRANSMITTER_BATCH(_Ring) (RING_SIZE(&(_Ring)->Front) / 4)
+
+    PXENVIF_TRANSMITTER             Transmitter;
+    PXENVIF_FRONTEND                Frontend;
+
+    Transmitter = Ring->Transmitter;
+    Frontend = Transmitter->Frontend;
+
     for (;;) {
         RING_IDX    rsp_prod;
         RING_IDX    rsp_cons;
@@ -2186,11 +2016,10 @@ RingPoll(
             break;
 
         while (rsp_cons != rsp_prod) {
-            netif_tx_response_t         *rsp;
-            uint16_t                    id;
-            netif_tx_request_t          *req;
-            PTRANSMITTER_TAG            Tag;
-            PXENVIF_TRANSMITTER_PACKET  Packet;
+            netif_tx_response_t             *rsp;
+            uint16_t                        id;
+            PXENVIF_TRANSMITTER_FRAGMENT    Fragment;
+            PXENVIF_TRANSMITTER_PACKET      Packet;
 
             rsp = RING_GET_RESPONSE(&Ring->Front, rsp_cons);
             rsp_cons++;
@@ -2201,24 +2030,22 @@ RingPoll(
             if (rsp->status == NETIF_RSP_NULL)
                 continue;
 
-            ASSERT3U((rsp->id & REQ_ID_INTEGRITY_CHECK), ==, REQ_ID_INTEGRITY_CHECK);
-            id = rsp->id & ~REQ_ID_INTEGRITY_CHECK;
+            id = rsp->id;
 
-            ASSERT3U(id, <, MAXIMUM_TAG_COUNT);
-            req = &Ring->Pending[id];
+            ASSERT3U(id, <=, XENVIF_TRANSMITTER_MAXIMUM_FRAGMENT_ID);
+            Fragment = Ring->Pending[id];
+            Ring->Pending[id] = NULL;
 
-            ASSERT3U(req->id, ==, rsp->id);
-            RtlZeroMemory(req, sizeof (netif_tx_request_t));
+            ASSERT(Fragment != NULL);
+            ASSERT3U(Fragment->Id, ==, id);
 
-            Tag = &Ring->Tag[id];
+            switch (Fragment->Type) {
+            case XENVIF_TRANSMITTER_FRAGMENT_TYPE_BUFFER: {
+                PXENVIF_TRANSMITTER_BUFFER  Buffer;
 
-            switch (Tag->Type) {
-            case TAG_BUFFER: {
-                PTRANSMITTER_BUFFER  Buffer;
-
-                Buffer = Tag->Context;
-                Tag->Context = NULL;
-                Tag->Type = TAG_TYPE_INVALID;
+                Buffer = Fragment->Context;
+                Fragment->Context = NULL;
+                Fragment->Type = XENVIF_TRANSMITTER_FRAGMENT_TYPE_INVALID;
 
                 Packet = Buffer->Context;
                 Buffer->Context = NULL;
@@ -2229,10 +2056,10 @@ RingPoll(
 
                 break;
             }
-            case TAG_PACKET:
-                Packet = Tag->Context;
-                Tag->Context = NULL;
-                Tag->Type = TAG_TYPE_INVALID;
+            case XENVIF_TRANSMITTER_FRAGMENT_TYPE_PACKET:
+                Packet = Fragment->Context;
+                Fragment->Context = NULL;
+                Fragment->Type = XENVIF_TRANSMITTER_FRAGMENT_TYPE_INVALID;
 
                 break;
 
@@ -2241,8 +2068,15 @@ RingPoll(
                 ASSERT(FALSE);
             }
 
-            __RingReleaseTag(Ring, Tag);
-            Tag = NULL;
+            Fragment->Length = 0;
+            Fragment->Offset = 0;
+
+            GranterRevokeAccess(FrontendGetGranter(Frontend),
+                                Fragment->Handle);
+            Fragment->Handle = NULL;
+
+            Fragment->Extra = FALSE;
+            __TransmitterPutFragment(Ring, Fragment);
 
             if (Packet == NULL) {
                 RtlZeroMemory(rsp, sizeof (netif_tx_response_t));
@@ -2252,14 +2086,14 @@ RingPoll(
             DECREMENT_PACKET_REFERENCE(Packet);
 
             if (rsp->status != NETIF_RSP_OKAY &&
-                Packet->Completion.Status == PACKET_PENDING) {
+                Packet->Completion.Status == XENVIF_TRANSMITTER_PACKET_PENDING) {
                 switch (rsp->status) {
                 case NETIF_RSP_DROPPED:
-                    Packet->Completion.Status = PACKET_DROPPED;
+                    Packet->Completion.Status = XENVIF_TRANSMITTER_PACKET_DROPPED;
                     break;
 
                 case NETIF_RSP_ERROR:
-                    Packet->Completion.Status = PACKET_ERROR;
+                    Packet->Completion.Status = XENVIF_TRANSMITTER_PACKET_ERROR;
                     break;
 
                 default:
@@ -2273,10 +2107,10 @@ RingPoll(
             if (PACKET_REFERENCE(Packet) != 0)
                 continue;
 
-            if (Packet->Completion.Status == PACKET_PENDING)
-                Packet->Completion.Status = PACKET_OK;
+            if (Packet->Completion.Status == XENVIF_TRANSMITTER_PACKET_PENDING)
+                Packet->Completion.Status = XENVIF_TRANSMITTER_PACKET_OK;
 
-            __RingCompletePacket(Ring, Packet);
+            __TransmitterRingCompletePacket(Ring, Packet);
         }
 
         KeMemoryBarrier();
@@ -2284,19 +2118,21 @@ RingPoll(
         Ring->Front.rsp_cons = rsp_cons;
 
         Delta = Ring->Front.req_prod_pvt - rsp_cons;
-        Delta = __min(Delta, TRANSMITTER_BATCH(Ring));
+        Delta = __min(Delta, XENVIF_TRANSMITTER_BATCH(Ring));
         Delta = __max(Delta, 1);
 
         Ring->Shared->rsp_event = rsp_cons + Delta;
     }
+
+#undef XENVIF_TRANSMITTER_BATCH
 }
 
 static FORCEINLINE VOID
-__RingPushRequests(
-    IN  PTRANSMITTER_RING   Ring
+__TransmitterRingPushRequests(
+    IN  PXENVIF_TRANSMITTER_RING    Ring
     )
 {
-    BOOLEAN                 Notify;
+    BOOLEAN                         Notify;
 
     if (Ring->RequestsPosted == Ring->RequestsPushed)
         return;
@@ -2322,17 +2158,17 @@ __RingPushRequests(
     Ring->RequestsPushed = Ring->RequestsPosted;
 }
 
-#define TRANSMITTER_ADVERTISEMENT_COUNT 3
+#define XENVIF_TRANSMITTER_ADVERTISEMENT_COUNT 3
 
-#define LOCK_BIT    ((ULONG_PTR)1)
+#define XENVIF_TRANSMITTER_LOCK_BIT ((ULONG_PTR)1)
 
 static FORCEINLINE ULONG
-__RingReversePacketList(
+__TransmitterReversePacketList(
     IN  PXENVIF_TRANSMITTER_PACKET  *Packet
     )
 {
-    PXENVIF_TRANSMITTER_PACKET  HeadPacket;
-    ULONG                       Count;
+    PXENVIF_TRANSMITTER_PACKET      HeadPacket;
+    ULONG                           Count;
 
     HeadPacket = NULL;
     Count = 0;
@@ -2340,7 +2176,7 @@ __RingReversePacketList(
     while (*Packet != NULL) {
         PXENVIF_TRANSMITTER_PACKET  Next;
 
-        ASSERT(((ULONG_PTR)*Packet & LOCK_BIT) == 0);
+        ASSERT(((ULONG_PTR)*Packet & XENVIF_TRANSMITTER_LOCK_BIT) == 0);
 
         Next = (*Packet)->Next;
 
@@ -2357,23 +2193,23 @@ __RingReversePacketList(
 }
 
 static DECLSPEC_NOINLINE VOID
-RingSwizzle(
-    IN  PTRANSMITTER_RING       Ring
+TransmitterRingSwizzle(
+    IN  PXENVIF_TRANSMITTER_RING    Ring
     )
 {
-    ULONG_PTR                   Old;
-    ULONG_PTR                   New;
-    PXENVIF_TRANSMITTER_PACKET  HeadPacket;
-    PXENVIF_TRANSMITTER_PACKET  *TailPacket;
-    ULONG                       Count;
+    ULONG_PTR                       Old;
+    ULONG_PTR                       New;
+    PXENVIF_TRANSMITTER_PACKET      HeadPacket;
+    PXENVIF_TRANSMITTER_PACKET      *TailPacket;
+    ULONG                           Count;
 
     ASSERT3P(Ring->LockThread, ==, KeGetCurrentThread());
 
-    New = LOCK_BIT;    
+    New = XENVIF_TRANSMITTER_LOCK_BIT;    
     Old = (ULONG_PTR)InterlockedExchangePointer(&Ring->Lock, (PVOID)New);
 
-    ASSERT(Old & LOCK_BIT);
-    HeadPacket = (PVOID)(Old & ~LOCK_BIT);
+    ASSERT(Old & XENVIF_TRANSMITTER_LOCK_BIT);
+    HeadPacket = (PVOID)(Old & ~XENVIF_TRANSMITTER_LOCK_BIT);
 
     if (HeadPacket == NULL)
         return;
@@ -2383,7 +2219,7 @@ RingSwizzle(
     // necessary to allow addition to the list to be done atomically.
 
     TailPacket = &HeadPacket->Next;
-    Count = __RingReversePacketList(&HeadPacket);
+    Count = __TransmitterReversePacketList(&HeadPacket);
     ASSERT3P(*TailPacket, ==, NULL);
 
     *(Ring->Queued.TailPacket) = HeadPacket;
@@ -2392,11 +2228,11 @@ RingSwizzle(
 }
 
 static DECLSPEC_NOINLINE VOID
-RingSchedule(
-    IN  PTRANSMITTER_RING   Ring
+TransmitterRingSchedule(
+    IN  PXENVIF_TRANSMITTER_RING    Ring
     )
 {
-    PTRANSMITTER_STATE      State;
+    PXENVIF_TRANSMITTER_STATE       State;
 
     if(!Ring->Enabled || Ring->Stopped)
         return;
@@ -2408,7 +2244,7 @@ RingSchedule(
         NTSTATUS                    status;
 
         if (State->Count != 0) {
-            status = __RingPostTags(Ring);
+            status = __TransmitterRingPostFragments(Ring);
             if (!NT_SUCCESS(status)) {
                 Ring->Stopped = TRUE;
                 break;
@@ -2417,7 +2253,7 @@ RingSchedule(
 
         if (Ring->RequestsPosted - Ring->RequestsPushed >=
             RING_SIZE(&Ring->Front) / 4)
-            __RingPushRequests(Ring);
+            __TransmitterRingPushRequests(Ring);
 
         ASSERT3U(State->Count, ==, 0);
 
@@ -2432,7 +2268,7 @@ RingSchedule(
                               &Ring->AddressTable[Index].Ipv4.sin_addr.s_addr,
                               IPV4_ADDRESS_LENGTH);
 
-                (VOID) __RingPrepareGratuitousArp(Ring, &Address);
+                (VOID) __TransmitterRingPrepareArp(Ring, &Address);
 
                 break;
             }
@@ -2443,7 +2279,7 @@ RingSchedule(
                               &Ring->AddressTable[Index].Ipv6.sin6_addr.s6_addr,
                               IPV6_ADDRESS_LENGTH);
 
-                (VOID) __RingPrepareNeighbourAdvertisement(Ring, &Address);
+                (VOID) __TransmitterRingPrepareNeighbourAdvertisement(Ring, &Address);
 
                 break;
             }
@@ -2467,8 +2303,14 @@ RingSchedule(
             Packet->Next = NULL;
         }
 
-        status = __RingPreparePacket(Ring, Packet);
+        status = __TransmitterRingPreparePacket(Ring, Packet);
         if (!NT_SUCCESS(status)) {
+            PXENVIF_TRANSMITTER Transmitter;
+            PXENVIF_FRONTEND    Frontend;
+
+            Transmitter = Ring->Transmitter;
+            Frontend = Transmitter->Frontend;
+
             ASSERT(status != STATUS_BUFFER_OVERFLOW);
 
             // Fake that we prapared and sent this packet
@@ -2476,11 +2318,13 @@ RingSchedule(
             Ring->PacketsSent++;
             Ring->PacketsFaked++;
 
-            Packet->Completion.Status = PACKET_DROPPED;
+            Packet->Completion.Status = XENVIF_TRANSMITTER_PACKET_DROPPED;
 
-            Ring->PacketStatistics.FrontendError++;
+            FrontendIncrementStatistic(Frontend,
+                                       XENVIF_TRANSMITTER_FRONTEND_ERRORS,
+                                       1);
 
-            __RingCompletePacket(Ring, Packet);
+            __TransmitterRingCompletePacket(Ring, Packet);
         }
 
         ASSERT3U(Ring->PacketsPrepared, ==, Ring->PacketsCopied + Ring->PacketsGranted + Ring->PacketsFaked);
@@ -2488,27 +2332,29 @@ RingSchedule(
 
     ASSERT(IMPLY(Ring->Queued.HeadPacket == NULL, Ring->Queued.TailPacket == &Ring->Queued.HeadPacket));
 
-    __RingPushRequests(Ring);
+    __TransmitterRingPushRequests(Ring);
 }
 
 static FORCEINLINE BOOLEAN
 __drv_requiresIRQL(DISPATCH_LEVEL)
-__RingTryAcquireLock(
-    IN  PTRANSMITTER_RING   Ring
+__TransmitterRingTryAcquireLock(
+    IN  PXENVIF_TRANSMITTER_RING    Ring
     )
 {
-    ULONG_PTR               Old;
-    ULONG_PTR               New;
-    BOOLEAN                 Acquired;
+    ULONG_PTR                       Old;
+    ULONG_PTR                       New;
+    BOOLEAN                         Acquired;
 
     ASSERT3U(KeGetCurrentIrql(), ==, DISPATCH_LEVEL);
 
     KeMemoryBarrier();
 
-    Old = (ULONG_PTR)Ring->Lock & ~LOCK_BIT;
-    New = Old | LOCK_BIT;
+    Old = (ULONG_PTR)Ring->Lock & ~XENVIF_TRANSMITTER_LOCK_BIT;
+    New = Old | XENVIF_TRANSMITTER_LOCK_BIT;
 
-    Acquired = ((ULONG_PTR)InterlockedCompareExchangePointer(&Ring->Lock, (PVOID)New, (PVOID)Old) == Old) ? TRUE : FALSE;
+    Acquired = ((ULONG_PTR)InterlockedCompareExchangePointer(&Ring->Lock,
+                                                             (PVOID)New,
+                                                             (PVOID)Old) == Old) ? TRUE : FALSE;
 
     KeMemoryBarrier();
 
@@ -2523,47 +2369,51 @@ __RingTryAcquireLock(
 
 static FORCEINLINE VOID
 __drv_requiresIRQL(DISPATCH_LEVEL)
-__RingAcquireLock(
-    IN  PTRANSMITTER_RING   Ring
+__TransmitterRingAcquireLock(
+    IN  PXENVIF_TRANSMITTER_RING    Ring
     )
 {
     ASSERT3U(KeGetCurrentIrql(), ==, DISPATCH_LEVEL);
 
     for (;;) {
-        if (__RingTryAcquireLock(Ring))
+        if (__TransmitterRingTryAcquireLock(Ring))
             break;
+
+        _mm_pause();
     }
 }
 
-static DECLSPEC_NOINLINE VOID
-RingAcquireLock(
-    IN  PTRANSMITTER_RING   Ring
+static VOID
+TransmitterRingAcquireLock(
+    IN  PXENVIF_TRANSMITTER_RING    Ring
     )
 {
-    __RingAcquireLock(Ring);
+    __TransmitterRingAcquireLock(Ring);
 }
 
 static FORCEINLINE BOOLEAN
 __drv_requiresIRQL(DISPATCH_LEVEL)
-__RingTryReleaseLock(
-    IN  PTRANSMITTER_RING   Ring
+__TransmitterRingTryReleaseLock(
+    IN  PXENVIF_TRANSMITTER_RING    Ring
     )
 {
-    ULONG_PTR               Old;
-    ULONG_PTR               New;
-    BOOLEAN                 Released;
+    ULONG_PTR                       Old;
+    ULONG_PTR                       New;
+    BOOLEAN                         Released;
 
     ASSERT3U(KeGetCurrentIrql(), ==, DISPATCH_LEVEL);
     ASSERT3P(KeGetCurrentThread(), ==, Ring->LockThread);
 
-    Old = LOCK_BIT;
+    Old = XENVIF_TRANSMITTER_LOCK_BIT;
     New = 0;
 
     Ring->LockThread = NULL;
 
     KeMemoryBarrier();
 
-    Released = ((ULONG_PTR)InterlockedCompareExchangePointer(&Ring->Lock, (PVOID)New, (PVOID)Old) == Old) ? TRUE : FALSE;
+    Released = ((ULONG_PTR)InterlockedCompareExchangePointer(&Ring->Lock,
+                                                             (PVOID)New,
+                                                             (PVOID)Old) == Old) ? TRUE : FALSE;
 
     KeMemoryBarrier();
 
@@ -2578,13 +2428,13 @@ __RingTryReleaseLock(
 
 static FORCEINLINE VOID
 __drv_requiresIRQL(DISPATCH_LEVEL)
-__RingReleaseLock(
-    IN  PTRANSMITTER_RING       Ring
+__TransmitterRingReleaseLock(
+    IN  PXENVIF_TRANSMITTER_RING    Ring
     )
 {
-    PXENVIF_TRANSMITTER_PACKET  HeadPacket;
-    PXENVIF_TRANSMITTER_PACKET  *TailPacket;
-
+    PXENVIF_TRANSMITTER_PACKET      HeadPacket;
+    PXENVIF_TRANSMITTER_PACKET      *TailPacket;
+    
     HeadPacket = NULL;
     TailPacket = &HeadPacket;
 
@@ -2596,52 +2446,56 @@ __RingReleaseLock(
     // thread could be simuntaneously adding to the list.
 
     do {
-        RingSwizzle(Ring);
-        RingSchedule(Ring);
+        TransmitterRingSwizzle(Ring);
+        TransmitterRingSchedule(Ring);
 
         *TailPacket = Ring->Completed.HeadPacket;
         TailPacket = Ring->Completed.TailPacket;
 
         Ring->Completed.HeadPacket = NULL;
         Ring->Completed.TailPacket = &Ring->Completed.HeadPacket;
-    } while (!__RingTryReleaseLock(Ring));
+    } while (!__TransmitterRingTryReleaseLock(Ring));
 
     if (HeadPacket != NULL) {
         PXENVIF_TRANSMITTER Transmitter;
+        PXENVIF_FRONTEND    Frontend;
 
         Transmitter = Ring->Transmitter;
+        Frontend = Transmitter->Frontend;
 
-        VifCompletePackets(Transmitter->VifInterface, HeadPacket);
+        VifTransmitterReturnPackets(PdoGetVifContext(FrontendGetPdo(Frontend)),
+                                    HeadPacket);
     }
 }
 
 static DECLSPEC_NOINLINE VOID
-RingReleaseLock(
-    IN  PTRANSMITTER_RING   Ring
+TransmitterRingReleaseLock(
+    IN  PXENVIF_TRANSMITTER_RING    Ring
     )
 {
-    __RingReleaseLock(Ring);
+    __TransmitterRingReleaseLock(Ring);
 }
 
 #define TIME_US(_us)        ((_us) * 10)
 #define TIME_MS(_ms)        (TIME_US((_ms) * 1000))
+#define TIME_S(_s)          (TIME_MS((_s) * 1000))
 #define TIME_RELATIVE(_t)   (-(_t))
 
-#define RING_PERIOD         30000
+#define XENVIF_TRANSMITTER_WATCHDOG_PERIOD  30
 
 static NTSTATUS
-RingWatchdog(
-    IN  PXENVIF_THREAD  Self,
-    IN  PVOID           Context
+TransmitterRingWatchdog(
+    IN  PXENVIF_THREAD          Self,
+    IN  PVOID                   Context
     )
 {
-    PTRANSMITTER_RING   Ring = Context;
-    LARGE_INTEGER       Timeout;
-    ULONG               PacketsQueued;
+    PXENVIF_TRANSMITTER_RING    Ring = Context;
+    LARGE_INTEGER               Timeout;
+    ULONG                       PacketsQueued;
 
     Trace("====>\n");
 
-    Timeout.QuadPart = TIME_RELATIVE(TIME_MS(RING_PERIOD));
+    Timeout.QuadPart = TIME_RELATIVE(TIME_S(XENVIF_TRANSMITTER_WATCHDOG_PERIOD));
     PacketsQueued = 0;
 
     for (;;) { 
@@ -2661,7 +2515,7 @@ RingWatchdog(
             break;
 
         KeRaiseIrql(DISPATCH_LEVEL, &Irql);
-        __RingAcquireLock(Ring);
+        __TransmitterRingAcquireLock(Ring);
 
         if (Ring->Enabled) {
             if (Ring->PacketsQueued == PacketsQueued &&
@@ -2672,47 +2526,19 @@ RingWatchdog(
                 Transmitter = Ring->Transmitter;
                 Frontend = Transmitter->Frontend;
 
-                DEBUG(Printf,
-                      Transmitter->DebugInterface,
-                      Transmitter->DebugCallback,
-                      "WATCHDOG: %s\n",
-                      FrontendGetPath(Frontend));
-
-                DEBUG(Printf,
-                      Transmitter->DebugInterface,
-                      Transmitter->DebugCallback,
-                      "FRONT: req_prod_pvt = %u rsp_cons = %u nr_ents = %u sring = %p\n",
-                      Ring->Front.req_prod_pvt,
-                      Ring->Front.rsp_cons,
-                      Ring->Front.nr_ents,
-                      Ring->Front.sring);
-
-                DEBUG(Printf,
-                      Transmitter->DebugInterface,
-                      Transmitter->DebugCallback,
-                      "SHARED: req_prod = %u req_event = %u rsp_prod = %u rsp_event = %u\n",
-                      Ring->Shared->req_prod,
-                      Ring->Shared->req_event,
-                      Ring->Shared->rsp_prod,
-                      Ring->Shared->rsp_event);
-
-                DEBUG(Printf,
-                      Transmitter->DebugInterface,
-                      Transmitter->DebugCallback,
-                      "RequestsPosted = %u RequestsPushed = %u ResponsesProcessed = %u\n",
-                      Ring->RequestsPosted,
-                      Ring->RequestsPushed,
-                      Ring->ResponsesProcessed);
+                XENBUS_DEBUG(Trigger,
+                             &Transmitter->DebugInterface,
+                             Ring->DebugCallback);
 
                 // Try to move things along
                 NotifierSendTx(FrontendGetNotifier(Frontend));
-                RingPoll(Ring);
+                TransmitterRingPoll(Ring);
             }
 
             PacketsQueued = Ring->PacketsQueued;
         }
 
-        __RingReleaseLock(Ring);
+        __TransmitterRingReleaseLock(Ring);
         KeLowerIrql(Irql);
     }
 
@@ -2721,201 +2547,16 @@ RingWatchdog(
     return STATUS_SUCCESS;
 }
 
-static FORCEINLINE NTSTATUS
-__RingDumpAddressTable(
-    IN  PTRANSMITTER_RING       Ring
-    )
-{
-    PXENVIF_TRANSMITTER         Transmitter;
-    PXENVIF_FRONTEND            Frontend;
-    PXENBUS_STORE_TRANSACTION   Transaction;
-    ULONG                       Index;
-    ULONG                       IpVersion4Count;
-    ULONG                       IpVersion6Count;
-    NTSTATUS                    status;
-
-    __RingAcquireLock(Ring);
-
-    status = STATUS_SUCCESS;
-    if (!Ring->Connected)
-        goto done;
-
-    Transmitter = Ring->Transmitter;
-    Frontend = Transmitter->Frontend;
-
-    ASSERT(Transmitter->StoreInterface != NULL);
-
-    status = STORE(TransactionStart,
-                   Transmitter->StoreInterface,
-                   &Transaction);
-    if (!NT_SUCCESS(status))
-        goto fail1;
-
-    status = STORE(Remove,
-                   Transmitter->StoreInterface,
-                   Transaction,
-                   FrontendGetPrefix(Frontend),
-                   "ip");
-    if (!NT_SUCCESS(status) &&
-        status != STATUS_OBJECT_NAME_NOT_FOUND)
-        goto fail2;
-
-    status = STORE(Remove,
-                   Transmitter->StoreInterface,
-                   Transaction,
-                   FrontendGetPrefix(Frontend),
-                   "ipv4");
-    if (!NT_SUCCESS(status) &&
-        status != STATUS_OBJECT_NAME_NOT_FOUND)
-        goto fail3;
-
-    status = STORE(Remove,
-                   Transmitter->StoreInterface,
-                   Transaction,
-                   FrontendGetPrefix(Frontend),
-                   "ipv6");
-    if (!NT_SUCCESS(status) &&
-        status != STATUS_OBJECT_NAME_NOT_FOUND)
-        goto fail4;
-
-    IpVersion4Count = 0;
-    IpVersion6Count = 0;
-
-    for (Index = 0; Index < Ring->AddressCount; Index++) {
-        switch (Ring->AddressTable[Index].si_family) {
-        case AF_INET: {
-            IPV4_ADDRESS    Address;
-            CHAR            Node[sizeof ("ipv4/XXXXXXXX/addr")];
-
-            RtlCopyMemory(Address.Byte,
-                          &Ring->AddressTable[Index].Ipv4.sin_addr.s_addr,
-                          IPV4_ADDRESS_LENGTH);
-
-            status = RtlStringCbPrintfA(Node,
-                                        sizeof (Node),
-                                        "ipv4/%u/addr",
-                                        IpVersion4Count);
-            ASSERT(NT_SUCCESS(status));
-
-            status = STORE(Printf,
-                           Transmitter->StoreInterface,
-                           Transaction,
-                           FrontendGetPrefix(Frontend),
-                           Node,
-                           "%u.%u.%u.%u",
-                           Address.Byte[0],
-                           Address.Byte[1],
-                           Address.Byte[2],
-                           Address.Byte[3]);
-            if (!NT_SUCCESS(status))
-                goto fail5;
-
-            if (IpVersion4Count == 0) {
-                status = STORE(Printf,
-                               Transmitter->StoreInterface,
-                               Transaction,
-                               FrontendGetPrefix(Frontend),
-                               "ip",
-                               "%u.%u.%u.%u",
-                               Address.Byte[0],
-                               Address.Byte[1],
-                               Address.Byte[2],
-                               Address.Byte[3]);
-                if (!NT_SUCCESS(status))
-                    goto fail6;
-            }
-
-            IpVersion4Count++;
-            break;
-        }
-        case AF_INET6: {
-            IPV6_ADDRESS    Address;
-            CHAR            Node[sizeof ("ipv6/XXXXXXXX/addr")];
-
-            RtlCopyMemory(Address.Byte,
-                          &Ring->AddressTable[Index].Ipv6.sin6_addr.s6_addr,
-                          IPV6_ADDRESS_LENGTH);
-
-            status = RtlStringCbPrintfA(Node,
-                                        sizeof (Node),
-                                        "ipv6/%u/addr",
-                                        IpVersion6Count);
-            ASSERT(NT_SUCCESS(status));
-
-            status = STORE(Printf,
-                           Transmitter->StoreInterface,
-                           Transaction,
-                           FrontendGetPrefix(Frontend),
-                           Node,
-                           "%04x:%04x:%04x:%04x:%04x:%04x:%04x:%04x",
-                           NTOHS(Address.Word[0]),
-                           NTOHS(Address.Word[1]),
-                           NTOHS(Address.Word[2]),
-                           NTOHS(Address.Word[3]),
-                           NTOHS(Address.Word[4]),
-                           NTOHS(Address.Word[5]),
-                           NTOHS(Address.Word[6]),
-                           NTOHS(Address.Word[7]));
-            if (!NT_SUCCESS(status))
-                goto fail5;
-
-            IpVersion6Count++;
-            break;
-        }
-        default:
-            break;
-        }
-    }
-
-    status = STORE(TransactionEnd,
-                   Transmitter->StoreInterface,
-                   Transaction,
-                   TRUE);
-
-done:
-    __RingReleaseLock(Ring);
-
-    return status;
-
-fail6:
-    Error("fail6\n");
-
-fail5:
-    Error("fail5\n");
-
-fail4:
-    Error("fail4\n");
-
-fail3:
-    Error("fail3\n");
-
-fail2:
-    Error("fail2\n");
-
-    (VOID) STORE(TransactionEnd,
-                 Transmitter->StoreInterface,
-                 Transaction,
-                 FALSE);
-
-fail1:
-    Error("fail1 (%08x)\n", status);
-
-    __RingReleaseLock(Ring);
-
-    return status;
-}
-
 static FORCEINLINE VOID
-__RingUpdateAddressTable(
-    IN  PTRANSMITTER_RING   Ring,
-    IN  PSOCKADDR_INET      Table,
-    IN  ULONG               Count
+__TransmitterRingUpdateAddressTable(
+    IN  PXENVIF_TRANSMITTER_RING    Ring,
+    IN  PSOCKADDR_INET              Table,
+    IN  ULONG                       Count
     )
 {
-    ULONG                   Attempt;
-    NTSTATUS                status;
+    NTSTATUS                        status;
 
-    __RingAcquireLock(Ring);
+    __TransmitterRingAcquireLock(Ring);
 
     if (Ring->AddressCount != 0) {
         Ring->AddressCount = 0;
@@ -2942,84 +2583,185 @@ __RingUpdateAddressTable(
         Ring->AddressIndex = Ring->AddressCount * 3;
 
 done:
-    __RingReleaseLock(Ring);
-
-    Attempt = 0;
-    do {
-        status = __RingDumpAddressTable(Ring);
-    } while (status == STATUS_RETRY && ++Attempt <= 10);
+    __TransmitterRingReleaseLock(Ring);
 
     return;
 
 fail1:
     Error("fail1 (%08x)\n", status);
 
-    __RingReleaseLock(Ring);
+    __TransmitterRingReleaseLock(Ring);
 }
 
 static FORCEINLINE VOID
-__RingAdvertizeAddresses(
-    IN  PTRANSMITTER_RING   Ring
+__TransmitterRingAdvertiseAddresses(
+    IN  PXENVIF_TRANSMITTER_RING    Ring
     )
 {
-    __RingAcquireLock(Ring);
+    __TransmitterRingAcquireLock(Ring);
     Ring->AddressIndex = Ring->AddressCount * 3;
-    __RingReleaseLock(Ring);
+    __TransmitterRingReleaseLock(Ring);
 }
 
 static FORCEINLINE NTSTATUS
-__RingInitialize(
-    IN  PXENVIF_TRANSMITTER Transmitter,
-    OUT PTRANSMITTER_RING   *Ring
+__TransmitterRingInitialize(
+    IN  PXENVIF_TRANSMITTER         Transmitter,
+    IN  ULONG                       Index,
+    OUT PXENVIF_TRANSMITTER_RING    *Ring
     )
 {
-    NTSTATUS                status;
+    PXENVIF_FRONTEND                Frontend;
+    CHAR                            Name[MAXNAMELEN];
+    NTSTATUS                        status;
 
-    *Ring = __TransmitterAllocate(sizeof (TRANSMITTER_RING));
+    Frontend = Transmitter->Frontend;
+
+    *Ring = __TransmitterAllocate(sizeof (XENVIF_TRANSMITTER_RING));
 
     status = STATUS_NO_MEMORY;
     if (*Ring == NULL)
         goto fail1;
 
-    status = PoolInitialize("TransmitterBuffer",
-                            sizeof (TRANSMITTER_BUFFER),
-                            TransmitterBufferCtor,
-                            TransmitterBufferDtor,
-                            RingAcquireLock,
-                            RingReleaseLock,
-                            *Ring,
-                            &(*Ring)->BufferPool);
-    if (!NT_SUCCESS(status))
-        goto fail2;
-
+    (*Ring)->Transmitter = Transmitter;
+    (*Ring)->Index = Index;
     (*Ring)->Queued.TailPacket = &(*Ring)->Queued.HeadPacket;
     (*Ring)->Completed.TailPacket = &(*Ring)->Completed.HeadPacket;
 
-    (*Ring)->Transmitter = Transmitter;
+    status = RtlStringCbPrintfA(Name,
+                                sizeof (Name),
+                                "%s_transmitter_buffer",
+                                FrontendGetPath(Frontend));
+    if (!NT_SUCCESS(status))
+        goto fail2;
 
-    status = ThreadCreate(RingWatchdog,
+    for (Index = 0; Name[Index] != '\0'; Index++)
+        if (Name[Index] == '/')
+            Name[Index] = '_';
+
+    status = XENBUS_CACHE(Create,
+                          &Transmitter->CacheInterface,
+                          Name,
+                          sizeof (XENVIF_TRANSMITTER_BUFFER),
+                          0,
+                          TransmitterBufferCtor,
+                          TransmitterBufferDtor,
+                          TransmitterRingAcquireLock,
+                          TransmitterRingReleaseLock,
                           *Ring,
-                          &(*Ring)->Thread);
+                          &(*Ring)->BufferCache);
     if (!NT_SUCCESS(status))
         goto fail3;
 
+    status = RtlStringCbPrintfA(Name,
+                                sizeof (Name),
+                                "%s_transmitter_req_id",
+                                FrontendGetPath(Frontend));
+    if (!NT_SUCCESS(status))
+        goto fail4;
+
+    for (Index = 0; Name[Index] != '\0'; Index++)
+        if (Name[Index] == '/')
+            Name[Index] = '_';
+
+    status = XENBUS_RANGE_SET(Create,
+                              &Transmitter->RangeSetInterface,
+                              Name,
+                              &(*Ring)->RangeSet);
+    if (!NT_SUCCESS(status))
+        goto fail5;
+
+    status = XENBUS_RANGE_SET(Put,
+                              &Transmitter->RangeSetInterface,
+                              (*Ring)->RangeSet,
+                              1,
+                              XENVIF_TRANSMITTER_MAXIMUM_FRAGMENT_ID);
+    if (!NT_SUCCESS(status))
+        goto fail6;
+
+    status = RtlStringCbPrintfA(Name,
+                                sizeof (Name),
+                                "%s_transmitter_fragment",
+                                FrontendGetPath(Frontend));
+    if (!NT_SUCCESS(status))
+        goto fail7;
+
+    for (Index = 0; Name[Index] != '\0'; Index++)
+        if (Name[Index] == '/')
+            Name[Index] = '_';
+
+    status = XENBUS_CACHE(Create,
+                          &Transmitter->CacheInterface,
+                          Name,
+                          sizeof (XENVIF_TRANSMITTER_FRAGMENT),
+                          0,
+                          TransmitterFragmentCtor,
+                          TransmitterFragmentDtor,
+                          TransmitterRingAcquireLock,
+                          TransmitterRingReleaseLock,
+                          (*Ring),
+                          &(*Ring)->FragmentCache);
+    if (!NT_SUCCESS(status))
+        goto fail8;
+
+    status = ThreadCreate(TransmitterRingWatchdog,
+                          *Ring,
+                          &(*Ring)->WatchdogThread);
+    if (!NT_SUCCESS(status))
+        goto fail9;
+
     return STATUS_SUCCESS;
+
+fail9:
+    Error("fail9\n");
+
+    XENBUS_CACHE(Destroy,
+                 &Transmitter->CacheInterface,
+                 (*Ring)->FragmentCache);
+    (*Ring)->FragmentCache = NULL;
+
+fail8:
+    Error("fail8\n");
+
+fail7:
+    Error("fail7\n");
+
+    (VOID) XENBUS_RANGE_SET(Get,
+                            &Transmitter->RangeSetInterface,
+                            (*Ring)->RangeSet,
+                            1,
+                            XENVIF_TRANSMITTER_MAXIMUM_FRAGMENT_ID);
+
+fail6:
+    Error("fail6\n");
+
+    XENBUS_RANGE_SET(Destroy,
+                     &Transmitter->RangeSetInterface,
+                     (*Ring)->RangeSet);
+    (*Ring)->RangeSet = NULL;
+
+fail5:
+    Error("fail5\n");
+
+fail4:
+    Error("fail4\n");
+
+    XENBUS_CACHE(Destroy,
+                 &Transmitter->CacheInterface,
+                 (*Ring)->BufferCache);
+    (*Ring)->BufferCache = NULL;
 
 fail3:
     Error("fail3\n");
 
-    (*Ring)->Transmitter = NULL;
-
-    (*Ring)->Queued.TailPacket = NULL;
-    (*Ring)->Completed.TailPacket = NULL;
-
-    PoolTeardown((*Ring)->BufferPool);
-    (*Ring)->BufferPool = NULL;
-
 fail2:
     Error("fail2\n");
 
-    ASSERT(IsZeroMemory(*Ring, sizeof (TRANSMITTER_RING)));
+    (*Ring)->Queued.TailPacket = NULL;
+    (*Ring)->Completed.TailPacket = NULL;
+    (*Ring)->Index = 0;
+    (*Ring)->Transmitter = NULL;
+
+    ASSERT(IsZeroMemory(*Ring, sizeof (XENVIF_TRANSMITTER_RING)));
     __TransmitterFree(*Ring);
     *Ring = NULL;
 
@@ -3030,15 +2772,15 @@ fail1:
 }
 
 static FORCEINLINE NTSTATUS
-__RingConnect(
-    IN  PTRANSMITTER_RING   Ring
+__TransmitterRingConnect(
+    IN  PXENVIF_TRANSMITTER_RING    Ring
     )
 {
-    PXENVIF_TRANSMITTER     Transmitter;
-    PXENVIF_FRONTEND        Frontend;
-    ULONG                   Index;
-    PFN_NUMBER              Pfn;
-    NTSTATUS                status;
+    PXENVIF_TRANSMITTER             Transmitter;
+    PXENVIF_FRONTEND                Frontend;
+    PFN_NUMBER                      Pfn;
+    CHAR                            Name[MAXNAMELEN];
+    NTSTATUS                        status;
 
     ASSERT(!Ring->Connected);
 
@@ -3049,7 +2791,7 @@ __RingConnect(
 
     status = STATUS_NO_MEMORY;
     if (Ring->Mdl == NULL)
-	goto fail1;
+        goto fail1;
 
     Ring->Shared = MmGetSystemAddressForMdlSafe(Ring->Mdl, NormalPagePriority);
     ASSERT(Ring->Shared != NULL);
@@ -3057,14 +2799,6 @@ __RingConnect(
     SHARED_RING_INIT(Ring->Shared);
     FRONT_RING_INIT(&Ring->Front, Ring->Shared, PAGE_SIZE);
     ASSERT3P(Ring->Front.sring, ==, Ring->Shared);
-
-    Ring->HeadFreeTag = TAG_INDEX_INVALID;
-    for (Index = 0; Index < MAXIMUM_TAG_COUNT; Index++) {
-        PTRANSMITTER_TAG Tag = &Ring->Tag[Index];
-
-        Tag->Next = Ring->HeadFreeTag;
-        Ring->HeadFreeTag = Index;
-    }
 
     Pfn = MmGetMdlPfnArray(Ring->Mdl)[0];
 
@@ -3075,20 +2809,38 @@ __RingConnect(
     if (!NT_SUCCESS(status))
         goto fail2;
 
+    status = RtlStringCbPrintfA(Name,
+                                sizeof (Name),
+                                __MODULE__ "|TRANSMITTER[%u]",
+                                Ring->Index);
+    if (!NT_SUCCESS(status))
+        goto fail3;
+
+    status = XENBUS_DEBUG(Register,
+                          &Transmitter->DebugInterface,
+                          Name,
+                          TransmitterRingDebugCallback,
+                          Ring,
+                          &Ring->DebugCallback);
+    if (!NT_SUCCESS(status))
+        goto fail4;
+
     Ring->Connected = TRUE;
 
     return STATUS_SUCCESS;
 
+fail4:
+    Error("fail4\n");
+
+fail3:
+    Error("fail3\n");
+
+    GranterRevokeAccess(FrontendGetGranter(Frontend),
+                        Ring->Handle);
+    Ring->Handle = NULL;
+
 fail2:
     Error("fail2\n");
-
-    while (Ring->HeadFreeTag != TAG_INDEX_INVALID) {
-        PTRANSMITTER_TAG    Tag = &Ring->Tag[Ring->HeadFreeTag];
-
-        Ring->HeadFreeTag = Tag->Next;
-        Tag->Next = 0;
-    }
-    Ring->HeadFreeTag = 0;
 
     RtlZeroMemory(&Ring->Front, sizeof (netif_tx_front_ring_t));
     RtlZeroMemory(Ring->Shared, PAGE_SIZE);
@@ -3104,8 +2856,8 @@ fail1:
 }
 
 static FORCEINLINE NTSTATUS
-__RingStoreWrite(
-    IN  PTRANSMITTER_RING           Ring,
+__TransmitterRingStoreWrite(
+    IN  PXENVIF_TRANSMITTER_RING    Ring,
     IN  PXENBUS_STORE_TRANSACTION   Transaction
     )
 {
@@ -3116,14 +2868,14 @@ __RingStoreWrite(
     Transmitter = Ring->Transmitter;
     Frontend = Transmitter->Frontend;
 
-    status = STORE(Printf,
-                   Transmitter->StoreInterface,
-                   Transaction,
-                   FrontendGetPath(Frontend),
-                   "tx-ring-ref",
-                   "%u",
-                   GranterGetReference(FrontendGetGranter(Frontend),
-                                       Ring->Handle));
+    status = XENBUS_STORE(Printf,
+                          &Transmitter->StoreInterface,
+                          Transaction,
+                          FrontendGetPath(Frontend),
+                          "tx-ring-ref",
+                          "%u",
+                          GranterGetReference(FrontendGetGranter(Frontend),
+                                              Ring->Handle));
 
     if (!NT_SUCCESS(status))
         goto fail1;
@@ -3137,43 +2889,43 @@ fail1:
 }
 
 static FORCEINLINE NTSTATUS
-__RingEnable(
-    IN  PTRANSMITTER_RING   Ring
+__TransmitterRingEnable(
+    IN  PXENVIF_TRANSMITTER_RING    Ring
     )
 {
-    __RingAcquireLock(Ring);
+    __TransmitterRingAcquireLock(Ring);
 
     ASSERT(!Ring->Enabled);
     Ring->Enabled = TRUE;
 
-    __RingReleaseLock(Ring);
+    __TransmitterRingReleaseLock(Ring);
 
     return STATUS_SUCCESS;
 }
 
 static FORCEINLINE VOID
-__RingDisable(
-    IN  PTRANSMITTER_RING       Ring
+__TransmitterRingDisable(
+    IN  PXENVIF_TRANSMITTER_RING    Ring
     )
 {    
-    PXENVIF_TRANSMITTER         Transmitter;
-    PXENVIF_FRONTEND            Frontend;
-    PXENVIF_TRANSMITTER_PACKET  Packet;
-    PCHAR                       Buffer;
-    XenbusState                 State;
-    ULONG                       Attempt;
-    NTSTATUS                    status;
+    PXENVIF_TRANSMITTER             Transmitter;
+    PXENVIF_FRONTEND                Frontend;
+    PXENVIF_TRANSMITTER_PACKET      Packet;
+    PCHAR                           Buffer;
+    XenbusState                     State;
+    ULONG                           Attempt;
+    NTSTATUS                        status;
 
     Transmitter = Ring->Transmitter;
     Frontend = Transmitter->Frontend;
 
-    __RingAcquireLock(Ring);
+    __TransmitterRingAcquireLock(Ring);
 
     ASSERT(Ring->Enabled);
     Ring->Enabled = FALSE;
 
-    // Release any tags associated with a pending packet
-    Packet = __RingUnpreparePacket(Ring);
+    // Release any fragments associated with a pending packet
+    Packet = __TransmitterRingUnpreparePacket(Ring);
 
     // Put any packet back on the head of the queue
     if (Packet != NULL) {
@@ -3189,20 +2941,20 @@ __RingDisable(
 
     Ring->AddressIndex = 0;
 
-    status = STORE(Read,
-                   Transmitter->StoreInterface,
-                   NULL,
-                   FrontendGetBackendPath(Frontend),
-                   "state",
-                   &Buffer);
+    status = XENBUS_STORE(Read,
+                          &Transmitter->StoreInterface,
+                          NULL,
+                          FrontendGetBackendPath(Frontend),
+                          "state",
+                          &Buffer);
     if (!NT_SUCCESS(status)) {
         State = XenbusStateUnknown;
     } else {
         State = (XenbusState)strtol(Buffer, NULL, 10);
 
-        STORE(Free,
-              Transmitter->StoreInterface,
-              Buffer);
+        XENBUS_STORE(Free,
+                     &Transmitter->StoreInterface,
+                     Buffer);
     }
 
     Attempt = 0;
@@ -3211,25 +2963,29 @@ __RingDisable(
         Attempt++;
         ASSERT(Attempt < 100);
 
-        RingPoll(Ring);
+        TransmitterRingPoll(Ring);
 
         if (State != XenbusStateConnected)
-            __RingFakeResponses(Ring);
+            __TransmitterRingFakeResponses(Ring);
 
-        KeStallExecutionProcessor(10000);   // 10 ms
+        // We are waiting for a watch event at DISPATCH_LEVEL so
+        // it is our responsibility to poll the store ring.
+        XENBUS_STORE(Poll,
+                     &Transmitter->StoreInterface);
+
+        KeStallExecutionProcessor(1000);    // 1ms
     }
 
-    __RingReleaseLock(Ring);
+    __TransmitterRingReleaseLock(Ring);
 }
 
 static FORCEINLINE VOID
-__RingDisconnect(
-    IN  PTRANSMITTER_RING   Ring
+__TransmitterRingDisconnect(
+    IN  PXENVIF_TRANSMITTER_RING    Ring
     )
 {
-    PXENVIF_TRANSMITTER     Transmitter;
-    PXENVIF_FRONTEND        Frontend;
-    ULONG                   Count;
+    PXENVIF_TRANSMITTER             Transmitter;
+    PXENVIF_FRONTEND                Frontend;
 
     ASSERT(Ring->Connected);
     Ring->Connected = FALSE;
@@ -3244,23 +3000,14 @@ __RingDisconnect(
     Ring->RequestsPushed = 0;
     Ring->RequestsPosted = 0;
 
+    XENBUS_DEBUG(Deregister,
+                 &Transmitter->DebugInterface,
+                 Ring->DebugCallback);
+    Ring->DebugCallback = NULL;
+
     GranterRevokeAccess(FrontendGetGranter(Frontend),
                         Ring->Handle);
     Ring->Handle = NULL;
-
-    Count = 0;
-    while (Ring->HeadFreeTag != TAG_INDEX_INVALID) {
-        ULONG               Index = Ring->HeadFreeTag;
-        PTRANSMITTER_TAG    Tag = &Ring->Tag[Index];
-
-        Ring->HeadFreeTag = Tag->Next;
-        Tag->Next = 0;
-
-        Count++;
-    }
-    ASSERT3U(Count, ==, MAXIMUM_TAG_COUNT);
-
-    Ring->HeadFreeTag = 0;
 
     RtlZeroMemory(&Ring->Front, sizeof (netif_tx_front_ring_t));
     RtlZeroMemory(Ring->Shared, PAGE_SIZE);
@@ -3268,15 +3015,16 @@ __RingDisconnect(
     Ring->Shared = NULL;
     __FreePage(Ring->Mdl);
     Ring->Mdl = NULL;
+
 }
 
 static FORCEINLINE VOID
-__RingTeardown(
-    IN  PTRANSMITTER_RING   Ring
+__TransmitterRingTeardown(
+    IN  PXENVIF_TRANSMITTER_RING    Ring
     )
 {
-    PXENVIF_TRANSMITTER     Transmitter;
-    PXENVIF_FRONTEND        Frontend;
+    PXENVIF_TRANSMITTER             Transmitter;
+    PXENVIF_FRONTEND                Frontend;
 
     Transmitter = Ring->Transmitter;
     Frontend = Transmitter->Frontend;
@@ -3295,10 +3043,6 @@ __RingTeardown(
     Ring->PacketsPrepared = 0;
     Ring->PacketsQueued = 0;
 
-    RtlZeroMemory(&Ring->HeaderStatistics, sizeof (XENVIF_HEADER_STATISTICS));
-    RtlZeroMemory(&Ring->OffloadStatistics, sizeof (TRANSMITTER_OFFLOAD_STATISTICS));
-    RtlZeroMemory(&Ring->PacketStatistics, sizeof (XENVIF_TRANSMITTER_PACKET_STATISTICS));
-
     if (Ring->AddressCount != 0) {
         ASSERT(Ring->AddressTable != NULL);
         __TransmitterFree(Ring->AddressTable);
@@ -3307,11 +3051,30 @@ __RingTeardown(
     Ring->AddressTable = NULL;
     Ring->AddressCount = 0;
 
-    ThreadAlert(Ring->Thread);
-    ThreadJoin(Ring->Thread);
-    Ring->Thread = NULL;
+    ThreadAlert(Ring->WatchdogThread);
+    ThreadJoin(Ring->WatchdogThread);
+    Ring->WatchdogThread = NULL;
 
-    Ring->Transmitter = NULL;
+    XENBUS_CACHE(Destroy,
+                 &Transmitter->CacheInterface,
+                 Ring->FragmentCache);
+    Ring->FragmentCache = NULL;
+
+    (VOID) XENBUS_RANGE_SET(Get,
+                            &Transmitter->RangeSetInterface,
+                            Ring->RangeSet,
+                            1,
+                            XENVIF_TRANSMITTER_MAXIMUM_FRAGMENT_ID);
+
+    XENBUS_RANGE_SET(Destroy,
+                     &Transmitter->RangeSetInterface,
+                     Ring->RangeSet);
+    Ring->RangeSet = NULL;
+
+    XENBUS_CACHE(Destroy,
+                 &Transmitter->CacheInterface,
+                 Ring->BufferCache);
+    Ring->BufferCache = NULL;
 
     ASSERT3P(Ring->Queued.TailPacket, ==, &Ring->Queued.HeadPacket);
     Ring->Queued.TailPacket = NULL;
@@ -3319,16 +3082,16 @@ __RingTeardown(
     ASSERT3P(Ring->Completed.TailPacket, ==, &Ring->Completed.HeadPacket);
     Ring->Completed.TailPacket = NULL;
 
-    PoolTeardown(Ring->BufferPool);
-    Ring->BufferPool = NULL;
+    Ring->Index = 0;
+    Ring->Transmitter = NULL;
 
-    ASSERT(IsZeroMemory(Ring, sizeof (TRANSMITTER_RING)));
+    ASSERT(IsZeroMemory(Ring, sizeof (XENVIF_TRANSMITTER_RING)));
     __TransmitterFree(Ring);
 }
 
 static FORCEINLINE VOID
-__RingQueuePackets(
-    IN  PTRANSMITTER_RING           Ring,
+__TransmitterRingQueuePackets(
+    IN  PXENVIF_TRANSMITTER_RING    Ring,
     IN  PXENVIF_TRANSMITTER_PACKET  HeadPacket
     )
 {
@@ -3338,40 +3101,38 @@ __RingQueuePackets(
     ULONG_PTR                       New;
 
     TailPacket = &HeadPacket->Next;
-    (VOID) __RingReversePacketList(&HeadPacket);
+    (VOID) __TransmitterReversePacketList(&HeadPacket);
     ASSERT3P(*TailPacket, ==, NULL);
 
     do {
         Old = (ULONG_PTR)Ring->Lock;
-        LockBit = Old & LOCK_BIT;
+        LockBit = Old & XENVIF_TRANSMITTER_LOCK_BIT;
 
-        *TailPacket = (PVOID)(Old & ~LOCK_BIT);
+        *TailPacket = (PVOID)(Old & ~XENVIF_TRANSMITTER_LOCK_BIT);
         New = (ULONG_PTR)HeadPacket;
-        ASSERT((New & LOCK_BIT) == 0);
+        ASSERT((New & XENVIF_TRANSMITTER_LOCK_BIT) == 0);
         New |= LockBit;
     } while ((ULONG_PTR)InterlockedCompareExchangePointer(&Ring->Lock, (PVOID)New, (PVOID)Old) != Old);
 
-    // __RingReleaseLock() drains the atomic packet list into the transmit queue therefore,
+    // __TransmitterRingReleaseLock() drains the atomic packet list into the transmit queue therefore,
     // after adding to the list we need to attempt to grab and release the lock. If we can't
     // grab it then that's ok because whichever thread is holding it will have to call
-    // __RingReleaseLock() and will therefore drain the atomic packet list.
+    // __TransmitterRingReleaseLock() and will therefore drain the atomic packet list.
 
-    if (!__RingTryAcquireLock(Ring))
-        return;
-
-    __RingReleaseLock(Ring);
+    if (__TransmitterRingTryAcquireLock(Ring))
+        __TransmitterRingReleaseLock(Ring);
 }
 
 static FORCEINLINE VOID
-__RingAbortPackets(
-    IN  PTRANSMITTER_RING       Ring
+__TransmitterRingAbortPackets(
+    IN  PXENVIF_TRANSMITTER_RING    Ring
     )
 {
-    PXENVIF_TRANSMITTER_PACKET  Packet;
+    PXENVIF_TRANSMITTER_PACKET      Packet;
 
-    __RingAcquireLock(Ring);
+    __TransmitterRingAcquireLock(Ring);
 
-    RingSwizzle(Ring);
+    TransmitterRingSwizzle(Ring);
 
     Packet = Ring->Queued.HeadPacket;
 
@@ -3389,9 +3150,9 @@ __RingAbortPackets(
         Ring->PacketsSent++;
         Ring->PacketsFaked++;
 
-        Packet->Completion.Status = PACKET_DROPPED;
+        Packet->Completion.Status = XENVIF_TRANSMITTER_PACKET_DROPPED;
 
-        __RingCompletePacket(Ring, Packet);
+        __TransmitterRingCompletePacket(Ring, Packet);
 
         Packet = Next;
     }
@@ -3400,49 +3161,18 @@ __RingAbortPackets(
     ASSERT3U(Ring->PacketsPrepared, ==, Ring->PacketsCopied + Ring->PacketsGranted + Ring->PacketsFaked);
     ASSERT3U(Ring->PacketsQueued, ==, Ring->PacketsPrepared - Ring->PacketsUnprepared);
 
-    ASSERT3P((ULONG_PTR)Ring->Lock, ==, LOCK_BIT);
-    __RingReleaseLock(Ring);
+    ASSERT3P((ULONG_PTR)Ring->Lock, ==, XENVIF_TRANSMITTER_LOCK_BIT);
+    __TransmitterRingReleaseLock(Ring);
 }
 
 static FORCEINLINE VOID
-__RingNotify(
-    IN  PTRANSMITTER_RING   Ring
+__TransmitterRingNotify(
+    IN  PXENVIF_TRANSMITTER_RING    Ring
     )
 {
-    __RingAcquireLock(Ring);
-
-    RingPoll(Ring);
-
-    __RingReleaseLock(Ring);
-}
-
-static FORCEINLINE VOID
-__RingAddPacketStatistics(
-    IN      PTRANSMITTER_RING                       Ring,
-    IN OUT  PXENVIF_TRANSMITTER_PACKET_STATISTICS   Statistics
-    )
-{
-    // Don't bother locking
-
-    Statistics->Drop += Ring->PacketStatistics.Drop;
-    Statistics->BackendError += Ring->PacketStatistics.BackendError;
-    Statistics->FrontendError += Ring->PacketStatistics.FrontendError;
-    Statistics->Unicast += Ring->PacketStatistics.Unicast;
-    Statistics->UnicastBytes += Ring->PacketStatistics.UnicastBytes;
-    Statistics->Multicast += Ring->PacketStatistics.Multicast;
-    Statistics->MulticastBytes += Ring->PacketStatistics.MulticastBytes;
-    Statistics->Broadcast += Ring->PacketStatistics.Broadcast;
-    Statistics->BroadcastBytes += Ring->PacketStatistics.BroadcastBytes;
-}
-
-static FORCEINLINE ULONG
-__RingGetSize(
-    IN  PTRANSMITTER_RING   Ring
-    )
-{
-    UNREFERENCED_PARAMETER(Ring);
-
-    return TRANSMITTER_RING_SIZE;
+    __TransmitterRingAcquireLock(Ring);
+    TransmitterRingPoll(Ring);
+    __TransmitterRingReleaseLock(Ring);
 }
 
 static VOID
@@ -3452,27 +3182,15 @@ TransmitterDebugCallback(
     )
 {
     PXENVIF_TRANSMITTER Transmitter = Argument;
-    PLIST_ENTRY         ListEntry;
 
     UNREFERENCED_PARAMETER(Crashing);
 
-    for (ListEntry = Transmitter->List.Flink;
-         ListEntry != &Transmitter->List;
-         ListEntry = ListEntry->Flink) {
-        PTRANSMITTER_RING    Ring;
-
-        Ring = CONTAINING_RECORD(ListEntry, TRANSMITTER_RING, ListEntry);
-
-        __RingDebugCallback(Ring);
-    }    
-
-    DEBUG(Printf,
-          Transmitter->DebugInterface,
-          Transmitter->DebugCallback,
-          "METADATA: Offset @ %ld Length @ %ld Mdl @ %ld\n",
-          Transmitter->Metadata.OffsetOffset,
-          Transmitter->Metadata.LengthOffset,
-          Transmitter->Metadata.MdlOffset);
+    XENBUS_DEBUG(Printf,
+                 &Transmitter->DebugInterface,
+                 "OFFSETS: Offset @ %ld Length @ %ld Mdl @ %ld\n",
+                 Transmitter->Offset[XENVIF_TRANSMITTER_PACKET_OFFSET_OFFSET],
+                 Transmitter->Offset[XENVIF_TRANSMITTER_PACKET_LENGTH_OFFSET],
+                 Transmitter->Offset[XENVIF_TRANSMITTER_PACKET_MDL_OFFSET]);
 }
 
 NTSTATUS
@@ -3483,7 +3201,7 @@ TransmitterInitialize(
     )
 {
     HANDLE                  ParametersKey;
-    ULONG                   Done;
+    ULONG                   Index;
     NTSTATUS                status;
 
     *Transmitter = __TransmitterAllocate(sizeof (XENVIF_TRANSMITTER));
@@ -3524,40 +3242,84 @@ TransmitterInitialize(
 
     InitializeListHead(&(*Transmitter)->List);
 
-    Done = 0;
-    while (Done < Count) {
-        PTRANSMITTER_RING   Ring;
+    FdoGetDebugInterface(PdoGetFdo(FrontendGetPdo(Frontend)),
+                         &(*Transmitter)->DebugInterface);
 
-        status = __RingInitialize(*Transmitter, &Ring);
-        if (!NT_SUCCESS(status))
-            goto fail2;
+    FdoGetStoreInterface(PdoGetFdo(FrontendGetPdo(Frontend)),
+                         &(*Transmitter)->StoreInterface);
 
-        InsertTailList(&(*Transmitter)->List, &Ring->ListEntry);
-        Done++;
-    }
+    FdoGetRangeSetInterface(PdoGetFdo(FrontendGetPdo(Frontend)),
+                            &(*Transmitter)->RangeSetInterface);
+
+    FdoGetCacheInterface(PdoGetFdo(FrontendGetPdo(Frontend)),
+                         &(*Transmitter)->CacheInterface);
 
     (*Transmitter)->Frontend = Frontend;
 
+    status = XENBUS_RANGE_SET(Acquire, &(*Transmitter)->RangeSetInterface);
+    if (!NT_SUCCESS(status))
+        goto fail2;
+
+    status = XENBUS_CACHE(Acquire, &(*Transmitter)->CacheInterface);
+    if (!NT_SUCCESS(status))
+        goto fail3;
+
+    Index = 0;
+    while (Index < Count) {
+        PXENVIF_TRANSMITTER_RING    Ring;
+
+        status = __TransmitterRingInitialize(*Transmitter, Index, &Ring);
+        if (!NT_SUCCESS(status))
+            goto fail4;
+
+        InsertTailList(&(*Transmitter)->List, &Ring->ListEntry);
+        Index++;
+    }
+
     return STATUS_SUCCESS;
 
-fail2:
-    Error("fail2\n");    
+fail4:
+    Error("fail4\n");
 
     while (!IsListEmpty(&(*Transmitter)->List)) {
-        PLIST_ENTRY         ListEntry;
-        PTRANSMITTER_RING   Ring;
+        PLIST_ENTRY                 ListEntry;
+        PXENVIF_TRANSMITTER_RING    Ring;
 
         ListEntry = RemoveTailList(&(*Transmitter)->List);
         ASSERT3P(ListEntry, !=, &(*Transmitter)->List);
 
         RtlZeroMemory(ListEntry, sizeof (LIST_ENTRY));
 
-        Ring = CONTAINING_RECORD(ListEntry, TRANSMITTER_RING, ListEntry);
+        Ring = CONTAINING_RECORD(ListEntry, XENVIF_TRANSMITTER_RING, ListEntry);
 
-        __RingTeardown(Ring);
-        --Done;
+        __TransmitterRingTeardown(Ring);
+        --Index;
     }
-    ASSERT3U(Done, ==, 0);
+    ASSERT3U(Index, ==, 0);
+
+    XENBUS_CACHE(Release, &(*Transmitter)->CacheInterface);
+
+fail3:
+    Error("fail3\n");
+
+    XENBUS_RANGE_SET(Release, &(*Transmitter)->RangeSetInterface);
+
+fail2:
+    Error("fail2\n");
+
+    (*Transmitter)->Frontend = NULL;
+
+    RtlZeroMemory(&(*Transmitter)->CacheInterface,
+                  sizeof (XENBUS_CACHE_INTERFACE));
+
+    RtlZeroMemory(&(*Transmitter)->RangeSetInterface,
+                  sizeof (XENBUS_RANGE_SET_INTERFACE));
+
+    RtlZeroMemory(&(*Transmitter)->StoreInterface,
+                  sizeof (XENBUS_STORE_INTERFACE));
+
+    RtlZeroMemory(&(*Transmitter)->DebugInterface,
+                  sizeof (XENBUS_DEBUG_INTERFACE));
 
     RtlZeroMemory(&(*Transmitter)->List, sizeof (LIST_ENTRY));
 
@@ -3576,82 +3338,76 @@ fail1:
 
 NTSTATUS
 TransmitterConnect(
-    IN  PXENVIF_TRANSMITTER Transmitter
+    IN  PXENVIF_TRANSMITTER     Transmitter
     )
 {
-    PXENVIF_FRONTEND        Frontend;
-    PLIST_ENTRY             ListEntry;
-    PTRANSMITTER_RING       Ring;
-    ULONG                   Attempt;
-    NTSTATUS                status;
+    PXENVIF_FRONTEND            Frontend;
+    PLIST_ENTRY                 ListEntry;
+    NTSTATUS                    status;
 
     Frontend = Transmitter->Frontend;
 
-    Transmitter->StoreInterface = FrontendGetStoreInterface(Frontend);
+    status = XENBUS_DEBUG(Acquire, &Transmitter->DebugInterface);
+    if (!NT_SUCCESS(status))
+        goto fail1;
 
-    STORE(Acquire, Transmitter->StoreInterface);
+    status = XENBUS_STORE(Acquire, &Transmitter->StoreInterface);
+    if (!NT_SUCCESS(status))
+        goto fail2;
 
     for (ListEntry = Transmitter->List.Flink;
          ListEntry != &Transmitter->List;
          ListEntry = ListEntry->Flink) {
+        PXENVIF_TRANSMITTER_RING    Ring;
 
-        Ring = CONTAINING_RECORD(ListEntry, TRANSMITTER_RING, ListEntry);
+        Ring = CONTAINING_RECORD(ListEntry, XENVIF_TRANSMITTER_RING, ListEntry);
 
-        status = __RingConnect(Ring);
+        status = __TransmitterRingConnect(Ring);
         if (!NT_SUCCESS(status))
-            goto fail1;
+            goto fail3;
     }    
 
-    Transmitter->DebugInterface = FrontendGetDebugInterface(Frontend);
-
-    DEBUG(Acquire, Transmitter->DebugInterface);
-
-    status = DEBUG(Register,
-                   Transmitter->DebugInterface,
-                   __MODULE__ "|TRANSMITTER",
-                   TransmitterDebugCallback,
-                   Transmitter,
-                   &Transmitter->DebugCallback);
+    status = XENBUS_DEBUG(Register,
+                          &Transmitter->DebugInterface,
+                          __MODULE__ "|TRANSMITTER",
+                          TransmitterDebugCallback,
+                          Transmitter,
+                          &Transmitter->DebugCallback);
     if (!NT_SUCCESS(status))
-        goto fail2;
-
-    ListEntry = Transmitter->List.Flink;
-    Ring = CONTAINING_RECORD(ListEntry, TRANSMITTER_RING, ListEntry);
-
-    Attempt = 0;
-    do {
-        status = __RingDumpAddressTable(Ring);
-    } while (status == STATUS_RETRY && ++Attempt <= 10);
-
-    Transmitter->VifInterface = FrontendGetVifInterface(Frontend);
+        goto fail4;
 
     return STATUS_SUCCESS;
 
-fail2:
-    Error("fail2\n");
-
-    DEBUG(Release, Transmitter->DebugInterface);
-    Transmitter->DebugInterface = NULL;
+fail4:
+    Error("fail4\n");
 
     ListEntry = &Transmitter->List;
 
-fail1:
-    Error("fail1 (%08x)\n", status);
+fail3:
+    Error("fail3\n");
 
     ListEntry = ListEntry->Blink;
 
     while (ListEntry != &Transmitter->List) {
-        PLIST_ENTRY         Prev = ListEntry->Blink;
+        PLIST_ENTRY                 Prev = ListEntry->Blink;
+        PXENVIF_TRANSMITTER_RING    Ring;
 
-        Ring = CONTAINING_RECORD(ListEntry, TRANSMITTER_RING, ListEntry);
+        Ring = CONTAINING_RECORD(ListEntry, XENVIF_TRANSMITTER_RING, ListEntry);
 
-        __RingDisconnect(Ring);
+        __TransmitterRingDisconnect(Ring);
 
         ListEntry = Prev;
     }
 
-    STORE(Release, Transmitter->StoreInterface);
-    Transmitter->StoreInterface = NULL;
+    XENBUS_STORE(Release, &Transmitter->StoreInterface);
+
+fail2:
+    Error("fail2\n");
+
+    XENBUS_DEBUG(Release, &Transmitter->DebugInterface);
+
+fail1:
+    Error("fail1 (%08x)\n", status);
 
     return status;
 }
@@ -3668,11 +3424,11 @@ TransmitterStoreWrite(
     for (ListEntry = Transmitter->List.Flink;
          ListEntry != &Transmitter->List;
          ListEntry = ListEntry->Flink) {
-        PTRANSMITTER_RING   Ring;
+        PXENVIF_TRANSMITTER_RING    Ring;
 
-        Ring = CONTAINING_RECORD(ListEntry, TRANSMITTER_RING, ListEntry);
+        Ring = CONTAINING_RECORD(ListEntry, XENVIF_TRANSMITTER_RING, ListEntry);
 
-        status = __RingStoreWrite(Ring, Transaction);
+        status = __TransmitterRingStoreWrite(Ring, Transaction);
         if (!NT_SUCCESS(status))
             goto fail1;
     }    
@@ -3695,11 +3451,11 @@ TransmitterEnable(
     for (ListEntry = Transmitter->List.Flink;
          ListEntry != &Transmitter->List;
          ListEntry = ListEntry->Flink) {
-        PTRANSMITTER_RING   Ring;
+        PXENVIF_TRANSMITTER_RING    Ring;
 
-        Ring = CONTAINING_RECORD(ListEntry, TRANSMITTER_RING, ListEntry);
+        Ring = CONTAINING_RECORD(ListEntry, XENVIF_TRANSMITTER_RING, ListEntry);
 
-        __RingEnable(Ring);
+        __TransmitterRingEnable(Ring);
     }    
 
     return STATUS_SUCCESS;
@@ -3715,11 +3471,11 @@ TransmitterDisable(
     for (ListEntry = Transmitter->List.Blink;
          ListEntry != &Transmitter->List;
          ListEntry = ListEntry->Blink) {
-        PTRANSMITTER_RING   Ring;
+        PXENVIF_TRANSMITTER_RING    Ring;
 
-        Ring = CONTAINING_RECORD(ListEntry, TRANSMITTER_RING, ListEntry);
+        Ring = CONTAINING_RECORD(ListEntry, XENVIF_TRANSMITTER_RING, ListEntry);
 
-        __RingDisable(Ring);
+        __TransmitterRingDisable(Ring);
     }
 }
 
@@ -3733,46 +3489,24 @@ TransmitterDisconnect(
 
     Frontend = Transmitter->Frontend;
 
-    Transmitter->VifInterface = NULL;
-
-    DEBUG(Deregister,
-          Transmitter->DebugInterface,
-          Transmitter->DebugCallback);
+    XENBUS_DEBUG(Deregister,
+                 &Transmitter->DebugInterface,
+                 Transmitter->DebugCallback);
     Transmitter->DebugCallback = NULL;
-
-    DEBUG(Release, Transmitter->DebugInterface);
-    Transmitter->DebugInterface = NULL;
 
     for (ListEntry = Transmitter->List.Blink;
          ListEntry != &Transmitter->List;
          ListEntry = ListEntry->Blink) {
-        PTRANSMITTER_RING    Ring;
+        PXENVIF_TRANSMITTER_RING    Ring;
 
-        Ring = CONTAINING_RECORD(ListEntry, TRANSMITTER_RING, ListEntry);
+        Ring = CONTAINING_RECORD(ListEntry, XENVIF_TRANSMITTER_RING, ListEntry);
 
-        __RingDisconnect(Ring);
+        __TransmitterRingDisconnect(Ring);
     }
 
-    STORE(Remove,
-          Transmitter->StoreInterface,
-          NULL,
-          FrontendGetPrefix(Frontend),
-          "ip");
+    XENBUS_STORE(Release, &Transmitter->StoreInterface);
 
-    STORE(Remove,
-          Transmitter->StoreInterface,
-          NULL,
-          FrontendGetPrefix(Frontend),
-          "ipv4");
-
-    STORE(Remove,
-          Transmitter->StoreInterface,
-          NULL,
-          FrontendGetPrefix(Frontend),
-          "ipv6");
-
-    STORE(Release, Transmitter->StoreInterface);
-    Transmitter->StoreInterface = NULL;
+    XENBUS_DEBUG(Release, &Transmitter->DebugInterface);
 }
 
 VOID
@@ -3780,22 +3514,39 @@ TransmitterTeardown(
     IN  PXENVIF_TRANSMITTER Transmitter
     )
 {
-    RtlZeroMemory(&Transmitter->Metadata, sizeof (XENVIF_TRANSMITTER_PACKET_METADATA));
-
-    Transmitter->Frontend = NULL;
+    RtlZeroMemory(Transmitter->Offset,
+                  sizeof (LONG_PTR) *  XENVIF_TRANSMITTER_PACKET_OFFSET_COUNT); 
 
     while (!IsListEmpty(&Transmitter->List)) {
-        PLIST_ENTRY         ListEntry;
-        PTRANSMITTER_RING   Ring;
+        PLIST_ENTRY                 ListEntry;
+        PXENVIF_TRANSMITTER_RING    Ring;
 
         ListEntry = RemoveHeadList(&Transmitter->List);
         ASSERT3P(ListEntry, !=, &Transmitter->List);
         RtlZeroMemory(ListEntry, sizeof (LIST_ENTRY));
 
-        Ring = CONTAINING_RECORD(ListEntry, TRANSMITTER_RING, ListEntry);
+        Ring = CONTAINING_RECORD(ListEntry, XENVIF_TRANSMITTER_RING, ListEntry);
 
-        __RingTeardown(Ring);
+        __TransmitterRingTeardown(Ring);
     }
+
+    XENBUS_CACHE(Release, &Transmitter->CacheInterface);
+
+    XENBUS_RANGE_SET(Release, &Transmitter->RangeSetInterface);
+
+    Transmitter->Frontend = NULL;
+
+    RtlZeroMemory(&Transmitter->CacheInterface,
+                  sizeof (XENBUS_CACHE_INTERFACE));
+
+    RtlZeroMemory(&Transmitter->RangeSetInterface,
+                  sizeof (XENBUS_RANGE_SET_INTERFACE));
+
+    RtlZeroMemory(&Transmitter->StoreInterface,
+                  sizeof (XENBUS_STORE_INTERFACE));
+
+    RtlZeroMemory(&Transmitter->DebugInterface,
+                  sizeof (XENBUS_DEBUG_INTERFACE));
 
     RtlZeroMemory(&Transmitter->List, sizeof (LIST_ENTRY));
 
@@ -3809,49 +3560,63 @@ TransmitterTeardown(
 
 VOID
 TransmitterUpdateAddressTable(
-    IN  PXENVIF_TRANSMITTER Transmitter,
-    IN  SOCKADDR_INET       Table[],
-    IN  ULONG               Count
+    IN  PXENVIF_TRANSMITTER     Transmitter,
+    IN  SOCKADDR_INET           Table[],
+    IN  ULONG                   Count
     )
 {
-    KIRQL                   Irql;
-    PLIST_ENTRY             ListEntry;
-    PTRANSMITTER_RING       Ring;
+    KIRQL                       Irql;
+    PLIST_ENTRY                 ListEntry;
+    PXENVIF_TRANSMITTER_RING    Ring;
 
     // Make sure we don't suspend
     KeRaiseIrql(DISPATCH_LEVEL, &Irql);
 
     // Use the first ring for address advertisment
     ListEntry = Transmitter->List.Flink;
-    Ring = CONTAINING_RECORD(ListEntry, TRANSMITTER_RING, ListEntry);
+    Ring = CONTAINING_RECORD(ListEntry, XENVIF_TRANSMITTER_RING, ListEntry);
 
-    __RingUpdateAddressTable(Ring, Table, Count);
+    __TransmitterRingUpdateAddressTable(Ring, Table, Count);
 
     KeLowerIrql(Irql);
 }
 
 VOID
-TransmitterAdvertizeAddresses(
-    IN  PXENVIF_TRANSMITTER Transmitter
+TransmitterAdvertiseAddresses(
+    IN  PXENVIF_TRANSMITTER     Transmitter
     )
 {
-    PLIST_ENTRY             ListEntry;
-    PTRANSMITTER_RING       Ring;
+    PLIST_ENTRY                 ListEntry;
+    PXENVIF_TRANSMITTER_RING    Ring;
 
     // Use the first ring for address advertisment
     ListEntry = Transmitter->List.Flink;
-    Ring = CONTAINING_RECORD(ListEntry, TRANSMITTER_RING, ListEntry);
+    Ring = CONTAINING_RECORD(ListEntry, XENVIF_TRANSMITTER_RING, ListEntry);
 
-    __RingAdvertizeAddresses(Ring);
+    __TransmitterRingAdvertiseAddresses(Ring);
 }
 
-VOID
-TransmitterSetPacketMetadata(
+NTSTATUS
+TransmitterSetPacketOffset(
     IN  PXENVIF_TRANSMITTER                 Transmitter,
-    IN  XENVIF_TRANSMITTER_PACKET_METADATA  Metadata
+    IN  XENVIF_TRANSMITTER_PACKET_OFFSET    Type,
+    IN  LONG_PTR                            Value
     )
 {
-    Transmitter->Metadata = Metadata;
+    NTSTATUS                                status;
+
+    status = STATUS_INVALID_PARAMETER;
+    if (Type >= XENVIF_TRANSMITTER_PACKET_OFFSET_COUNT)
+        goto fail1;
+
+    Transmitter->Offset[Type] = Value;
+
+    return STATUS_SUCCESS;
+
+fail1:
+    Error("fail1 (%08x)\n", status);
+
+    return status;
 }
 
 VOID
@@ -3861,14 +3626,14 @@ TransmitterQueuePackets(
     )
 {
     PLIST_ENTRY                     ListEntry;
-    PTRANSMITTER_RING               Ring;
+    PXENVIF_TRANSMITTER_RING        Ring;
 
     // We need to hash for a ring eventually. Since there is only a
     // single ring for now, we just use that.
     ListEntry = Transmitter->List.Flink;
-    Ring = CONTAINING_RECORD(ListEntry, TRANSMITTER_RING, ListEntry);
+    Ring = CONTAINING_RECORD(ListEntry, XENVIF_TRANSMITTER_RING, ListEntry);
 
-    __RingQueuePackets(Ring, HeadPacket);
+    __TransmitterRingQueuePackets(Ring, HeadPacket);
 }
 
 VOID
@@ -3884,50 +3649,25 @@ TransmitterAbortPackets(
     for (ListEntry = Transmitter->List.Flink;
          ListEntry != &Transmitter->List;
          ListEntry = ListEntry->Flink) {
-        PTRANSMITTER_RING   Ring;
+        PXENVIF_TRANSMITTER_RING    Ring;
 
-        Ring = CONTAINING_RECORD(ListEntry, TRANSMITTER_RING, ListEntry);
+        Ring = CONTAINING_RECORD(ListEntry, XENVIF_TRANSMITTER_RING, ListEntry);
 
-        __RingAbortPackets(Ring);
+        __TransmitterRingAbortPackets(Ring);
     }    
 
     KeLowerIrql(Irql);
 }
 
 VOID
-TransmitterGetPacketStatistics(
-    IN  PXENVIF_TRANSMITTER                     Transmitter,
-    OUT PXENVIF_TRANSMITTER_PACKET_STATISTICS   Statistics
+TransmitterQueryRingSize(
+    IN  PXENVIF_TRANSMITTER Transmitter,
+    OUT PULONG              Size
     )
 {
-    PLIST_ENTRY                                 ListEntry;
+    UNREFERENCED_PARAMETER(Transmitter);
 
-    RtlZeroMemory(Statistics, sizeof (XENVIF_TRANSMITTER_PACKET_STATISTICS));
-
-    for (ListEntry = Transmitter->List.Flink;
-         ListEntry != &Transmitter->List;
-         ListEntry = ListEntry->Flink) {
-        PTRANSMITTER_RING   Ring;
-
-        Ring = CONTAINING_RECORD(ListEntry, TRANSMITTER_RING, ListEntry);
-
-        __RingAddPacketStatistics(Ring, Statistics);
-    }    
-}
-
-ULONG
-TransmitterGetRingSize(
-    IN  PXENVIF_TRANSMITTER Transitter
-    )
-{
-    PLIST_ENTRY             ListEntry;
-    PTRANSMITTER_RING       Ring;
-
-    // Use the first ring
-    ListEntry = Transitter->List.Flink;
-    Ring = CONTAINING_RECORD(ListEntry, TRANSMITTER_RING, ListEntry);
-
-    return __RingGetSize(Ring);
+    *Size = XENVIF_TRANSMITTER_RING_SIZE;
 }
 
 VOID
@@ -3940,23 +3680,23 @@ TransmitterNotify(
     for (ListEntry = Transmitter->List.Flink;
          ListEntry != &Transmitter->List;
          ListEntry = ListEntry->Flink) {
-        PTRANSMITTER_RING   Ring;
+        PXENVIF_TRANSMITTER_RING    Ring;
 
-        Ring = CONTAINING_RECORD(ListEntry, TRANSMITTER_RING, ListEntry);
+        Ring = CONTAINING_RECORD(ListEntry, XENVIF_TRANSMITTER_RING, ListEntry);
 
-        __RingNotify(Ring);
+        __TransmitterRingNotify(Ring);
     }    
 }
 
 VOID
-TransmitterGetOffloadOptions(
-    IN  PXENVIF_TRANSMITTER     Transmitter,
-    OUT PXENVIF_OFFLOAD_OPTIONS Options
+TransmitterQueryOffloadOptions(
+    IN  PXENVIF_TRANSMITTER         Transmitter,
+    OUT PXENVIF_VIF_OFFLOAD_OPTIONS Options
     )
 {
-    PXENVIF_FRONTEND            Frontend;
-    PCHAR                       Buffer;
-    NTSTATUS                    status;
+    PXENVIF_FRONTEND                Frontend;
+    PCHAR                           Buffer;
+    NTSTATUS                        status;
 
     Frontend = Transmitter->Frontend;
 
@@ -3965,12 +3705,12 @@ TransmitterGetOffloadOptions(
     Options->OffloadTagManipulation = 1;
 
     if (Transmitter->DisableIpVersion4Gso == 0) {
-        status = STORE(Read,
-                       Transmitter->StoreInterface,
-                       NULL,
-                       FrontendGetBackendPath(Frontend),
-                       "feature-gso-tcpv4",
-                       &Buffer);
+        status = XENBUS_STORE(Read,
+                              &Transmitter->StoreInterface,
+                              NULL,
+                              FrontendGetBackendPath(Frontend),
+                              "feature-gso-tcpv4",
+                              &Buffer);
     } else {
         Buffer = NULL;
         status = STATUS_NOT_SUPPORTED;
@@ -3981,18 +3721,18 @@ TransmitterGetOffloadOptions(
     } else {
         Options->OffloadIpVersion4LargePacket = (USHORT)strtol(Buffer, NULL, 2);
 
-        STORE(Free,
-              Transmitter->StoreInterface,
-              Buffer);
+        XENBUS_STORE(Free,
+                     &Transmitter->StoreInterface,
+                     Buffer);
     }
 
     if (Transmitter->DisableIpVersion6Gso == 0) {
-        status = STORE(Read,
-                       Transmitter->StoreInterface,
-                       NULL,
-                       FrontendGetBackendPath(Frontend),
-                       "feature-gso-tcpv6",
-                       &Buffer);
+        status = XENBUS_STORE(Read,
+                              &Transmitter->StoreInterface,
+                              NULL,
+                              FrontendGetBackendPath(Frontend),
+                              "feature-gso-tcpv6",
+                              &Buffer);
     } else {
         Buffer = NULL;
         status = STATUS_NOT_SUPPORTED;
@@ -4003,19 +3743,19 @@ TransmitterGetOffloadOptions(
     } else {
         Options->OffloadIpVersion6LargePacket = (USHORT)strtol(Buffer, NULL, 2);
 
-        STORE(Free,
-              Transmitter->StoreInterface,
-              Buffer);
+        XENBUS_STORE(Free,
+                     &Transmitter->StoreInterface,
+                     Buffer);
     }
 
     Options->OffloadIpVersion4HeaderChecksum = 1;
 
-    status = STORE(Read,
-                   Transmitter->StoreInterface,
-                   NULL,
-                   FrontendGetBackendPath(Frontend),
-                   "feature-no-csum-offload",
-                   &Buffer);
+    status = XENBUS_STORE(Read,
+                          &Transmitter->StoreInterface,
+                          NULL,
+                          FrontendGetBackendPath(Frontend),
+                          "feature-no-csum-offload",
+                          &Buffer);
     if (!NT_SUCCESS(status)) {
         Options->OffloadIpVersion4TcpChecksum = 1;
         Options->OffloadIpVersion4UdpChecksum = 1;
@@ -4027,17 +3767,17 @@ TransmitterGetOffloadOptions(
         Options->OffloadIpVersion4TcpChecksum = (Flag) ? 0 : 1;
         Options->OffloadIpVersion4UdpChecksum = (Flag) ? 0 : 1;
 
-        STORE(Free,
-              Transmitter->StoreInterface,
-              Buffer);
+        XENBUS_STORE(Free,
+                     &Transmitter->StoreInterface,
+                     Buffer);
     }
 
-    status = STORE(Read,
-                   Transmitter->StoreInterface,
-                   NULL,
-                   FrontendGetBackendPath(Frontend),
-                   "feature-ipv6-csum-offload",
-                   &Buffer);
+    status = XENBUS_STORE(Read,
+                          &Transmitter->StoreInterface,
+                          NULL,
+                          FrontendGetBackendPath(Frontend),
+                          "feature-ipv6-csum-offload",
+                          &Buffer);
     if (!NT_SUCCESS(status)) {
         Options->OffloadIpVersion6TcpChecksum = 0;
         Options->OffloadIpVersion6UdpChecksum = 0;
@@ -4049,29 +3789,30 @@ TransmitterGetOffloadOptions(
         Options->OffloadIpVersion6TcpChecksum = (Flag) ? 1 : 0;
         Options->OffloadIpVersion6UdpChecksum = (Flag) ? 1 : 0;
 
-        STORE(Free,
-              Transmitter->StoreInterface,
-              Buffer);
+        XENBUS_STORE(Free,
+                     &Transmitter->StoreInterface,
+                     Buffer);
     }
 }
 
-#define MAXIMUM_TX_REQ_SIZE         ((1 << (RTL_FIELD_SIZE(netif_tx_request_t, size) * 8)) - 1)
+#define XENVIF_TRANSMITTER_MAXIMUM_REQ_SIZE  ((1 << (RTL_FIELD_SIZE(netif_tx_request_t, size) * 8)) - 1)
 
-#define MAXIMUM_TCPV4_PAYLOAD_SIZE    (MAXIMUM_TX_REQ_SIZE -          \
-                                       sizeof (ETHERNET_HEADER) -     \
-                                       MAXIMUM_IPV4_HEADER_LENGTH -   \
-                                       MAXIMUM_TCP_HEADER_LENGTH)
+#define XENVIF_TRANSMITTER_MAXIMUM_TCPV4_PAYLOAD_SIZE   (XENVIF_TRANSMITTER_MAXIMUM_REQ_SIZE -  \
+                                                         sizeof (ETHERNET_HEADER) -             \
+                                                         MAXIMUM_IPV4_HEADER_LENGTH -           \
+                                                         MAXIMUM_TCP_HEADER_LENGTH)
 
-#define MAXIMUM_TCPV6_PAYLOAD_SIZE    (MAXIMUM_TX_REQ_SIZE -          \
-                                       sizeof (ETHERNET_HEADER) -     \
-                                       MAXIMUM_IPV6_HEADER_LENGTH -   \
-                                       MAXIMUM_IPV6_OPTIONS_LENGTH -  \
-                                       MAXIMUM_TCP_HEADER_LENGTH)
+#define XENVIF_TRANSMITTER_MAXIMUM_TCPV6_PAYLOAD_SIZE   (XENVIF_TRANSMITTER_MAXIMUM_REQ_SIZE -  \
+                                                         sizeof (ETHERNET_HEADER) -             \
+                                                         MAXIMUM_IPV6_HEADER_LENGTH -           \
+                                                         MAXIMUM_IPV6_OPTIONS_LENGTH -          \
+                                                         MAXIMUM_TCP_HEADER_LENGTH)
 
-ULONG
-TransmitterGetLargePacketSize(
+VOID
+TransmitterQueryLargePacketSize(
     IN  PXENVIF_TRANSMITTER     Transmitter,
-    IN  UCHAR                   Version
+    IN  UCHAR                   Version,
+    OUT PULONG                  Size
     )
 {
     PXENVIF_FRONTEND            Frontend;
@@ -4082,19 +3823,19 @@ TransmitterGetLargePacketSize(
     Frontend = Transmitter->Frontend;
 
     if (Version == 4) {
-        status = STORE(Read,
-                       Transmitter->StoreInterface,
-                       NULL,
-                       FrontendGetBackendPath(Frontend),
-                       "feature-gso-tcpv4",
-                       &Buffer);
+        status = XENBUS_STORE(Read,
+                              &Transmitter->StoreInterface,
+                              NULL,
+                              FrontendGetBackendPath(Frontend),
+                              "feature-gso-tcpv4",
+                              &Buffer);
     } else if (Version == 6) {
-        status = STORE(Read,
-                       Transmitter->StoreInterface,
-                       NULL,
-                       FrontendGetBackendPath(Frontend),
-                       "feature-gso-tcpv6",
-                       &Buffer);
+        status = XENBUS_STORE(Read,
+                              &Transmitter->StoreInterface,
+                              NULL,
+                              FrontendGetBackendPath(Frontend),
+                              "feature-gso-tcpv6",
+                              &Buffer);
     } else {
         Buffer = NULL;
         status = STATUS_UNSUCCESSFUL;
@@ -4105,11 +3846,14 @@ TransmitterGetLargePacketSize(
     } else {
         OffloadIpLargePacket = (ULONG)strtol(Buffer, NULL, 2);
 
-        STORE(Free,
-              Transmitter->StoreInterface,
-              Buffer);
+        XENBUS_STORE(Free,
+                     &Transmitter->StoreInterface,
+                     Buffer);
     }
 
     // The OffloadParity certification test requires that we have a single LSO size for IPv4 and IPv6 packets
-    return (OffloadIpLargePacket) ? __min(MAXIMUM_TCPV4_PAYLOAD_SIZE, MAXIMUM_TCPV6_PAYLOAD_SIZE) : 0;
+    *Size = (OffloadIpLargePacket) ?
+            __min(XENVIF_TRANSMITTER_MAXIMUM_TCPV4_PAYLOAD_SIZE,
+                 XENVIF_TRANSMITTER_MAXIMUM_TCPV6_PAYLOAD_SIZE) :
+            0;
 }

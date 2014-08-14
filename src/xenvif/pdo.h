@@ -71,8 +71,20 @@ PdoGetName(
     IN  PXENVIF_PDO Pdo
     );
 
+extern PXENVIF_FDO
+PdoGetFdo(
+    IN  PXENVIF_PDO Pdo
+    );
+
 extern PDEVICE_OBJECT
 PdoGetDeviceObject(
+    IN  PXENVIF_PDO Pdo
+    );
+
+#include "vif.h"
+
+extern PXENVIF_VIF_CONTEXT
+PdoGetVifContext(
     IN  PXENVIF_PDO Pdo
     );
 
@@ -111,34 +123,35 @@ PdoGetBusData(
     );
 
 extern PNET_LUID
-PdoGetNetLuid(
+PdoGetLuid(
     IN  PXENVIF_PDO Pdo
     );
 
 extern PETHERNET_ADDRESS
-PdoGetPermanentMacAddress(
+PdoGetPermanentAddress(
     IN  PXENVIF_PDO Pdo
     );
 
 extern PETHERNET_ADDRESS
-PdoGetCurrentMacAddress(
+PdoGetCurrentAddress(
     IN  PXENVIF_PDO Pdo
     );
 
 extern NTSTATUS
 PdoCreate(
-    IN  PXENVIF_FDO     Fdo,
-    IN  PANSI_STRING    Name
+    IN  PXENVIF_FDO Fdo,
+    IN  ULONG       Number,
+    IN  PCHAR       Address
     );
 
 extern VOID
 PdoResume(
-    IN  PXENVIF_PDO     Pdo
+    IN  PXENVIF_PDO Pdo
     );
 
 extern VOID
 PdoSuspend(
-    IN  PXENVIF_PDO     Pdo
+    IN  PXENVIF_PDO Pdo
     );
 
 extern VOID
@@ -165,6 +178,11 @@ PdoGetDebugInterface(
 
 extern PXENBUS_STORE_INTERFACE
 PdoGetStoreInterface(
+    IN  PXENVIF_PDO     Pdo
+    );
+
+extern PXENBUS_CACHE_INTERFACE
+PdoGetCacheInterface(
     IN  PXENVIF_PDO     Pdo
     );
 

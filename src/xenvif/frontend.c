@@ -32,11 +32,9 @@
 #include <ntddk.h>
 #include <ntstrsafe.h>
 #include <stdlib.h>
+#include <netioapi.h>
 #include <util.h>
 #include <xen.h>
-#include <store_interface.h>
-#include <gnttab_interface.h>
-#include <vif_interface.h>
 
 #include "driver.h"
 #include "registry.h"
@@ -51,7 +49,7 @@
 #include "tcpip.h"
 #include "receiver.h"
 #include "transmitter.h"
-#include "netio.h"
+#include "link.h"
 #include "dbg_print.h"
 #include "assert.h"
 
@@ -63,21 +61,25 @@ struct _XENVIF_FRONTEND {
     KSPIN_LOCK                  Lock;
     PXENVIF_THREAD              MibThread;
     PXENVIF_THREAD              EjectThread;
-    PXENBUS_STORE_WATCH         Watch;
+
     PCHAR                       BackendPath;
     USHORT                      BackendDomain;
+
     PXENVIF_GRANTER             Granter;
     PXENVIF_NOTIFIER            Notifier;
     PXENVIF_MAC                 Mac;
     PXENVIF_RECEIVER            Receiver;
     PXENVIF_TRANSMITTER         Transmitter;
 
-    PXENBUS_SUSPEND_INTERFACE   SuspendInterface;
-    PXENBUS_STORE_INTERFACE     StoreInterface;
-    PXENBUS_DEBUG_INTERFACE     DebugInterface;
+    XENBUS_DEBUG_INTERFACE      DebugInterface;
+    XENBUS_SUSPEND_INTERFACE    SuspendInterface;
+    XENBUS_STORE_INTERFACE      StoreInterface;
 
     PXENBUS_SUSPEND_CALLBACK    SuspendCallbackLate;
     PXENBUS_DEBUG_CALLBACK      DebugCallback;
+    PXENBUS_STORE_WATCH         Watch;
+
+    ULONGLONG                   Statistic[XENVIF_VIF_STATISTIC_COUNT][MAXIMUM_PROCESSORS];
 };
 
 static const PCHAR
@@ -129,100 +131,12 @@ __FrontendGetPdo(
     return Frontend->Pdo;
 }
 
-static FORCEINLINE PXENBUS_EVTCHN_INTERFACE
-__FrontendGetEvtchnInterface(
+PXENVIF_PDO
+FrontendGetPdo(
     IN  PXENVIF_FRONTEND    Frontend
     )
 {
-    return PdoGetEvtchnInterface(__FrontendGetPdo(Frontend));
-}
-
-PXENBUS_EVTCHN_INTERFACE
-FrontendGetEvtchnInterface(
-    IN  PXENVIF_FRONTEND    Frontend
-    )
-{
-    return __FrontendGetEvtchnInterface(Frontend);
-}
-
-static FORCEINLINE PXENBUS_DEBUG_INTERFACE
-__FrontendGetDebugInterface(
-    IN  PXENVIF_FRONTEND    Frontend
-    )
-{
-    return PdoGetDebugInterface(__FrontendGetPdo(Frontend));
-}
-
-PXENBUS_DEBUG_INTERFACE
-FrontendGetDebugInterface(
-    IN  PXENVIF_FRONTEND    Frontend
-    )
-{
-    return __FrontendGetDebugInterface(Frontend);
-}
-
-static FORCEINLINE PXENBUS_SUSPEND_INTERFACE
-__FrontendGetSuspendInterface(
-    IN  PXENVIF_FRONTEND    Frontend
-    )
-{
-    return PdoGetSuspendInterface(__FrontendGetPdo(Frontend));
-}
-
-PXENBUS_SUSPEND_INTERFACE
-FrontendGetSuspendInterface(
-    IN  PXENVIF_FRONTEND    Frontend
-    )
-{
-    return __FrontendGetSuspendInterface(Frontend);
-}
-
-static FORCEINLINE PXENBUS_STORE_INTERFACE
-__FrontendGetStoreInterface(
-    IN  PXENVIF_FRONTEND    Frontend
-    )
-{
-    return PdoGetStoreInterface(__FrontendGetPdo(Frontend));
-}
-
-PXENBUS_STORE_INTERFACE
-FrontendGetStoreInterface(
-    IN  PXENVIF_FRONTEND    Frontend
-    )
-{
-    return __FrontendGetStoreInterface(Frontend);
-}
-
-static FORCEINLINE PXENBUS_GNTTAB_INTERFACE
-__FrontendGetGnttabInterface(
-    IN  PXENVIF_FRONTEND    Frontend
-    )
-{
-    return PdoGetGnttabInterface(__FrontendGetPdo(Frontend));
-}
-
-PXENBUS_GNTTAB_INTERFACE
-FrontendGetGnttabInterface(
-    IN  PXENVIF_FRONTEND    Frontend
-    )
-{
-    return __FrontendGetGnttabInterface(Frontend);
-}
-
-static FORCEINLINE PXENVIF_VIF_INTERFACE
-__FrontendGetVifInterface(
-    IN  PXENVIF_FRONTEND    Frontend
-    )
-{
-    return PdoGetVifInterface(__FrontendGetPdo(Frontend));
-}
-
-PXENVIF_VIF_INTERFACE
-FrontendGetVifInterface(
-    IN  PXENVIF_FRONTEND    Frontend
-    )
-{
-    return __FrontendGetVifInterface(Frontend);
+    return __FrontendGetPdo(Frontend);
 }
 
 static FORCEINLINE PCHAR
@@ -289,125 +203,28 @@ FrontendGetBackendDomain(
     return __FrontendGetBackendDomain(Frontend);
 }
 
-static FORCEINLINE PXENVIF_GRANTER
-__FrontendGetGranter(
-    IN  PXENVIF_FRONTEND    Frontend
-    )
-{
-    return Frontend->Granter;
+#define DEFINE_FRONTEND_GET_FUNCTION(_Function, _Type)  \
+static FORCEINLINE _Type                                \
+__FrontendGet ## _Function(                             \
+    IN  PXENVIF_FRONTEND    Frontend                    \
+    )                                                   \
+{                                                       \
+    return Frontend-> ## _Function;                     \
+}                                                       \
+                                                        \
+_Type                                                   \
+FrontendGet ## _Function(                               \
+    IN  PXENVIF_FRONTEND    Frontend                    \
+    )                                                   \
+{                                                       \
+    return __FrontendGet ## _Function ## (Frontend);    \
 }
 
-PXENVIF_GRANTER
-FrontendGetGranter(
-    IN  PXENVIF_FRONTEND    Frontend
-    )
-{
-    return __FrontendGetGranter(Frontend);
-}
-
-static FORCEINLINE PXENVIF_NOTIFIER
-__FrontendGetNotifier(
-    IN  PXENVIF_FRONTEND    Frontend
-    )
-{
-    return Frontend->Notifier;
-}
-
-PXENVIF_NOTIFIER
-FrontendGetNotifier(
-    IN  PXENVIF_FRONTEND    Frontend
-    )
-{
-    return __FrontendGetNotifier(Frontend);
-}
-
-static FORCEINLINE PXENVIF_MAC
-__FrontendGetMac(
-    IN  PXENVIF_FRONTEND    Frontend
-    )
-{
-    return Frontend->Mac;
-}
-
-PXENVIF_MAC
-FrontendGetMac(
-    IN  PXENVIF_FRONTEND    Frontend
-    )
-{
-    return __FrontendGetMac(Frontend);
-}
-
-static FORCEINLINE PXENVIF_RECEIVER
-__FrontendGetReceiver(
-    IN  PXENVIF_FRONTEND    Frontend
-    )
-{
-    return Frontend->Receiver;
-}
-
-PXENVIF_RECEIVER
-FrontendGetReceiver(
-    IN  PXENVIF_FRONTEND    Frontend
-    )
-{
-    return __FrontendGetReceiver(Frontend);
-}
-
-static FORCEINLINE PXENVIF_TRANSMITTER
-__FrontendGetTransmitter(
-    IN  PXENVIF_FRONTEND    Frontend
-    )
-{
-    return Frontend->Transmitter;
-}
-
-PXENVIF_TRANSMITTER
-FrontendGetTransmitter(
-    IN  PXENVIF_FRONTEND    Frontend
-    )
-{
-    return __FrontendGetTransmitter(Frontend);
-}
-
-static FORCEINLINE PNET_LUID
-__FrontendGetNetLuid(
-    IN  PXENVIF_FRONTEND    Frontend
-    )
-{
-    return PdoGetNetLuid(__FrontendGetPdo(Frontend));
-}
-
-static FORCEINLINE PETHERNET_ADDRESS
-__FrontendGetPermanentMacAddress(
-    IN  PXENVIF_FRONTEND    Frontend
-    )
-{
-    return PdoGetPermanentMacAddress(__FrontendGetPdo(Frontend));
-}
-
-PETHERNET_ADDRESS
-FrontendGetPermanentMacAddress(
-    IN  PXENVIF_FRONTEND    Frontend
-    )
-{
-    return __FrontendGetPermanentMacAddress(Frontend);
-}
-
-static FORCEINLINE PETHERNET_ADDRESS
-__FrontendGetCurrentMacAddress(
-    IN  PXENVIF_FRONTEND    Frontend
-    )
-{
-    return PdoGetCurrentMacAddress(__FrontendGetPdo(Frontend));
-}
-
-PETHERNET_ADDRESS
-FrontendGetCurrentMacAddress(
-    IN  PXENVIF_FRONTEND    Frontend
-    )
-{
-    return __FrontendGetCurrentMacAddress(Frontend);
-}
+DEFINE_FRONTEND_GET_FUNCTION(Granter, PXENVIF_GRANTER)
+DEFINE_FRONTEND_GET_FUNCTION(Notifier, PXENVIF_NOTIFIER)
+DEFINE_FRONTEND_GET_FUNCTION(Mac, PXENVIF_MAC)
+DEFINE_FRONTEND_GET_FUNCTION(Transmitter, PXENVIF_TRANSMITTER)
+DEFINE_FRONTEND_GET_FUNCTION(Receiver, PXENVIF_RECEIVER)
 
 static DECLSPEC_NOINLINE NTSTATUS
 FrontendEject(
@@ -441,12 +258,11 @@ FrontendEject(
 
         KeAcquireSpinLock(&Frontend->Lock, &Irql);
 
+        // It is not safe to use interfaces before this point
         if (Frontend->State == FRONTEND_CLOSED) {
             KeReleaseSpinLock(&Frontend->Lock, Irql);
             continue;
         }
-
-        STORE(Acquire, Frontend->StoreInterface);
 
         Online = TRUE;
         State = XenbusStateUnknown;
@@ -460,56 +276,56 @@ FrontendEject(
             if (__FrontendGetBackendPath(Frontend) == NULL)
                 break;
 
-            status = STORE(TransactionStart,
-                           Frontend->StoreInterface,
-                           &Transaction);
+            status = XENBUS_STORE(TransactionStart,
+                                  &Frontend->StoreInterface,
+                                  &Transaction);
             if (!NT_SUCCESS(status))
                 break;
 
-            status = STORE(Read,
-                           Frontend->StoreInterface,
-                           Transaction,
-                           __FrontendGetBackendPath(Frontend),
-                           "online",
-                           &Buffer);
+            status = XENBUS_STORE(Read,
+                                  &Frontend->StoreInterface,
+                                  Transaction,
+                                  __FrontendGetBackendPath(Frontend),
+                                  "online",
+                                  &Buffer);
             if (!NT_SUCCESS(status))
                 goto abort;
 
             Online = (BOOLEAN)strtol(Buffer, NULL, 2);
 
-            STORE(Free,
-                  Frontend->StoreInterface,
-                  Buffer);
+            XENBUS_STORE(Free,
+                         &Frontend->StoreInterface,
+                         Buffer);
 
-            status = STORE(Read,
-                           Frontend->StoreInterface,
-                           Transaction,
-                           __FrontendGetBackendPath(Frontend),
-                           "state",
-                           &Buffer);
+            status = XENBUS_STORE(Read,
+                                  &Frontend->StoreInterface,
+                                  Transaction,
+                                  __FrontendGetBackendPath(Frontend),
+                                  "state",
+                                  &Buffer);
             if (!NT_SUCCESS(status))
                 goto abort;
 
             State = (XenbusState)strtol(Buffer, NULL, 10);
 
-            STORE(Free,
-                  Frontend->StoreInterface,
-                  Buffer);
+            XENBUS_STORE(Free,
+                         &Frontend->StoreInterface,
+                         Buffer);
 
-            status = STORE(TransactionEnd,
-                           Frontend->StoreInterface,
-                           Transaction,
-                           TRUE);
+            status = XENBUS_STORE(TransactionEnd,
+                                  &Frontend->StoreInterface,
+                                  Transaction,
+                                  TRUE);
             if (status != STATUS_RETRY || ++Attempt > 10)
                 break;
 
             continue;
 
 abort:
-            (VOID) STORE(TransactionEnd,
-                         Frontend->StoreInterface,
-                         Transaction,
-                         FALSE);
+            (VOID) XENBUS_STORE(TransactionEnd,
+                                &Frontend->StoreInterface,
+                                Transaction,
+                                FALSE);
             break;
         }
 
@@ -519,12 +335,11 @@ abort:
         }
 
         if (!Online && State == XenbusStateClosing) {
-            Info("%s: requesting device eject\n", __FrontendGetPath(Frontend));
+            Info("%s: requesting device eject\n",
+                 __FrontendGetPath(Frontend));
 
             PdoRequestEject(Frontend->Pdo);
         }
-
-        STORE(Release, Frontend->StoreInterface);
 
         KeReleaseSpinLock(&Frontend->Lock, Irql);
     }
@@ -532,6 +347,57 @@ abort:
     Trace("%s: <====\n", __FrontendGetPath(Frontend));
 
     return STATUS_SUCCESS;
+}
+
+VOID
+FrontendEjectFailed(
+    IN PXENVIF_FRONTEND Frontend
+    )
+{
+    KIRQL               Irql;
+    ULONG               Length;
+    PCHAR               Path;
+    NTSTATUS            status;
+
+    KeAcquireSpinLock(&Frontend->Lock, &Irql);
+
+    Info("%s: device eject failed\n", __FrontendGetPath(Frontend));
+
+    Length = sizeof ("error/") + (ULONG)strlen(__FrontendGetPath(Frontend));
+    Path = __FrontendAllocate(Length);
+
+    status = STATUS_NO_MEMORY;
+    if (Path == NULL)
+        goto fail1;
+
+    status = RtlStringCbPrintfA(Path, 
+                                Length,
+                                "error/%s", 
+                                __FrontendGetPath(Frontend));
+    if (!NT_SUCCESS(status))
+        goto fail2;
+
+    (VOID) XENBUS_STORE(Printf,
+                        &Frontend->StoreInterface,
+                        NULL,
+                        Path,
+                        "error",
+                        "UNPLUG FAILED: device is still in use");
+
+    __FrontendFree(Path);
+
+    KeReleaseSpinLock(&Frontend->Lock, Irql);
+    return;
+
+fail2:
+    Error("fail2\n");
+
+    __FrontendFree(Path);
+
+fail1:
+    Error("fail1 (%08x)\n", status);
+
+    KeReleaseSpinLock(&Frontend->Lock, Irql);
 }
 
 static FORCEINLINE NTSTATUS
@@ -589,68 +455,184 @@ fail1:
 }
 
 static FORCEINLINE NTSTATUS
-__FrontendGetAddressTable(
+__FrontendProcessAddressTable(
     IN  PXENVIF_FRONTEND            Frontend,
+    IN  PMIB_UNICASTIPADDRESS_TABLE MibTable,
     OUT PSOCKADDR_INET              *AddressTable,
     OUT PULONG                      AddressCount
     )
 {
-    PNET_LUID                       NetLuid;
+    PNET_LUID                       Luid;
     ULONG                           Index;
-    PMIB_UNICASTIPADDRESS_TABLE     Table;
-    KIRQL                           Irql;
     NTSTATUS                        status;
-
-    status = GetUnicastIpAddressTable(AF_UNSPEC, &Table);
-    if (!NT_SUCCESS(status))
-        goto fail1;
 
     *AddressTable = NULL;
     *AddressCount = 0;
 
-    KeAcquireSpinLock(&Frontend->Lock, &Irql);
+    Luid = PdoGetLuid(Frontend->Pdo);
 
-    // The NetLuid is not valid until we are in at least the connected state
-    if (Frontend->State != FRONTEND_CONNECTED &&
-        Frontend->State != FRONTEND_ENABLED)
-        goto done;
+    for (Index = 0; Index < MibTable->NumEntries; Index++) {
+        PMIB_UNICASTIPADDRESS_ROW   Row = &MibTable->Table[Index];
 
-    NetLuid = __FrontendGetNetLuid(Frontend);
-
-    for (Index = 0; Index < Table->NumEntries; Index++) {
-        PMIB_UNICASTIPADDRESS_ROW   Row = &Table->Table[Index];
-
-        if (Row->InterfaceLuid.Info.IfType != NetLuid->Info.IfType)
+        if (Row->InterfaceLuid.Info.IfType != Luid->Info.IfType)
             continue;
 
-        if (Row->InterfaceLuid.Info.NetLuidIndex != NetLuid->Info.NetLuidIndex)
+        if (Row->InterfaceLuid.Info.NetLuidIndex != Luid->Info.NetLuidIndex)
             continue;
 
         if (Row->Address.si_family != AF_INET &&
             Row->Address.si_family != AF_INET6)
             continue;
 
-        status = __FrontendInsertAddress(AddressTable, &Row->Address, AddressCount);
+        status = __FrontendInsertAddress(AddressTable,
+                                         &Row->Address,
+                                         AddressCount);
         if (!NT_SUCCESS(status))
-            goto fail2;
+            goto fail1;
     }
-
-done:
-    KeReleaseSpinLock(&Frontend->Lock, Irql);
-
-    (VOID) FreeMibTable(Table);
 
     return STATUS_SUCCESS;
 
-fail2:
-    Error("fail2\n");
+fail1:
+    Error("fail1 (%08x)\n", status);
 
     if (*AddressTable != NULL)
         __FrontendFree(*AddressTable);
 
-    KeReleaseSpinLock(&Frontend->Lock, Irql);
+    return status;
+}
 
-    (VOID) FreeMibTable(Table);
+static FORCEINLINE NTSTATUS
+__FrontendDumpAddressTable(
+    IN  PXENVIF_FRONTEND        Frontend,
+    IN  PSOCKADDR_INET          AddressTable,
+    IN  ULONG                   AddressCount
+    )
+{
+    PXENBUS_STORE_TRANSACTION   Transaction;
+    ULONG                       Index;
+    ULONG                       IpVersion4Count;
+    ULONG                       IpVersion6Count;
+    NTSTATUS                    status;
+
+    status = XENBUS_STORE(TransactionStart,
+                          &Frontend->StoreInterface,
+                          &Transaction);
+    if (!NT_SUCCESS(status))
+        goto fail1;
+
+    status = XENBUS_STORE(Remove,
+                          &Frontend->StoreInterface,
+                          Transaction,
+                          __FrontendGetPrefix(Frontend),
+                          "ipv4");
+    if (!NT_SUCCESS(status) &&
+        status != STATUS_OBJECT_NAME_NOT_FOUND)
+        goto fail2;
+
+    status = XENBUS_STORE(Remove,
+                          &Frontend->StoreInterface,
+                          Transaction,
+                          __FrontendGetPrefix(Frontend),
+                          "ipv6");
+    if (!NT_SUCCESS(status) &&
+        status != STATUS_OBJECT_NAME_NOT_FOUND)
+        goto fail3;
+
+    IpVersion4Count = 0;
+    IpVersion6Count = 0;
+
+    for (Index = 0; Index < AddressCount; Index++) {
+        switch (AddressTable[Index].si_family) {
+        case AF_INET: {
+            IPV4_ADDRESS    Address;
+            CHAR            Node[sizeof ("ipv4/XXXXXXXX/addr")];
+
+            RtlCopyMemory(Address.Byte,
+                          &AddressTable[Index].Ipv4.sin_addr.s_addr,
+                          IPV4_ADDRESS_LENGTH);
+
+            status = RtlStringCbPrintfA(Node,
+                                        sizeof (Node),
+                                        "ipv4/%u/addr",
+                                        IpVersion4Count);
+            ASSERT(NT_SUCCESS(status));
+
+            status = XENBUS_STORE(Printf,
+                                  &Frontend->StoreInterface,
+                                  Transaction,
+                                  __FrontendGetPrefix(Frontend),
+                                  Node,
+                                  "%u.%u.%u.%u",
+                                  Address.Byte[0],
+                                  Address.Byte[1],
+                                  Address.Byte[2],
+                                  Address.Byte[3]);
+            if (!NT_SUCCESS(status))
+                goto fail4;
+
+            IpVersion4Count++;
+            break;
+        }
+        case AF_INET6: {
+            IPV6_ADDRESS    Address;
+            CHAR            Node[sizeof ("ipv6/XXXXXXXX/addr")];
+
+            RtlCopyMemory(Address.Byte,
+                          &AddressTable[Index].Ipv6.sin6_addr.s6_addr,
+                          IPV6_ADDRESS_LENGTH);
+
+            status = RtlStringCbPrintfA(Node,
+                                        sizeof (Node),
+                                        "ipv6/%u/addr",
+                                        IpVersion6Count);
+            ASSERT(NT_SUCCESS(status));
+
+            status = XENBUS_STORE(Printf,
+                                  &Frontend->StoreInterface,
+                                  Transaction,
+                                  __FrontendGetPrefix(Frontend),
+                                  Node,
+                                  "%04x:%04x:%04x:%04x:%04x:%04x:%04x:%04x",
+                                  NTOHS(Address.Word[0]),
+                                  NTOHS(Address.Word[1]),
+                                  NTOHS(Address.Word[2]),
+                                  NTOHS(Address.Word[3]),
+                                  NTOHS(Address.Word[4]),
+                                  NTOHS(Address.Word[5]),
+                                  NTOHS(Address.Word[6]),
+                                  NTOHS(Address.Word[7]));
+            if (!NT_SUCCESS(status))
+                goto fail4;
+
+            IpVersion6Count++;
+            break;
+        }
+        default:
+            break;
+        }
+    }
+
+    status = XENBUS_STORE(TransactionEnd,
+                          &Frontend->StoreInterface,
+                          Transaction,
+                          TRUE);
+
+    return status;
+
+fail4:
+    Error("fail4\n");
+
+fail3:
+    Error("fail3\n");
+
+fail2:
+    Error("fail2\n");
+
+    (VOID) XENBUS_STORE(TransactionEnd,
+                        &Frontend->StoreInterface,
+                        Transaction,
+                        FALSE);
 
 fail1:
     Error("fail1 (%08x)\n", status);
@@ -661,22 +643,17 @@ fail1:
 static VOID
 FrontendIpAddressChange(
     IN  PVOID                       Context,
-    IN  PMIB_UNICASTIPADDRESS_ROW   _Row OPTIONAL,
+    IN  PMIB_UNICASTIPADDRESS_ROW   Row OPTIONAL,
     IN  MIB_NOTIFICATION_TYPE       NotificationType
     )
 {
     PXENVIF_FRONTEND                Frontend = Context;
 
-    UNREFERENCED_PARAMETER(_Row);
+    UNREFERENCED_PARAMETER(Row);
     UNREFERENCED_PARAMETER(NotificationType);
 
     ThreadWake(Frontend->MibThread);
 }
-
-#define TIME_US(_us)            ((_us) * 10)
-#define TIME_MS(_ms)            (TIME_US((_ms) * 1000))
-#define TIME_S(_s)              (TIME_MS((_s) * 1000))
-#define TIME_RELATIVE(_t)       (-(_t))
 
 static DECLSPEC_NOINLINE NTSTATUS
 FrontendMib(
@@ -686,48 +663,60 @@ FrontendMib(
 {
     PXENVIF_FRONTEND    Frontend = Context;
     PKEVENT             Event;
+    NTSTATUS            (*__NotifyUnicastIpAddressChange)(ADDRESS_FAMILY,
+                                                          PUNICAST_IPADDRESS_CHANGE_CALLBACK,
+                                                          PVOID,    
+                                                          BOOLEAN,
+                                                          HANDLE *);
+    NTSTATUS            (*__GetUnicastIpAddressTable)(ADDRESS_FAMILY,
+                                                      PMIB_UNICASTIPADDRESS_TABLE *);
+
+    VOID                (*__FreeMibTable)(PVOID);
+    NTSTATUS            (*__CancelMibChangeNotify2)(HANDLE);
     HANDLE              Handle;
     NTSTATUS            status;
 
     Trace("====>\n");
 
-    Event = ThreadGetEvent(Self);
-
-again:
-    if (ThreadIsAlerted(Self))
-        goto done;
-
-    status = NetioInitialize();
-    if (!NT_SUCCESS(status)) {
-        if (status == STATUS_RETRY) {
-            LARGE_INTEGER  Timeout;
-
-            // The IP helper has not shown up yet so sleep for a while and
-            // try again.
-            Warning("waiting for IP helper\n");
-
-            Timeout.QuadPart = TIME_RELATIVE(TIME_S(10));
-
-            KeDelayExecutionThread(KernelMode, 
-                                   FALSE,
-                                   &Timeout);
-            goto again;
-        }
-
+    status = LinkGetRoutineAddress("netio.sys",
+                                   "NotifyUnicastIpAddressChange",
+                                   (PVOID *)&__NotifyUnicastIpAddressChange);
+    if (!NT_SUCCESS(status))
         goto fail1;
-    }
 
-    status = NotifyUnicastIpAddressChange(AF_UNSPEC,
-                                          FrontendIpAddressChange,
-                                          Frontend,
-                                          TRUE,
-                                          &Handle);
+    status = LinkGetRoutineAddress("netio.sys",
+                                   "GetUnicastIpAddressTable",
+                                   (PVOID *)&__GetUnicastIpAddressTable);
     if (!NT_SUCCESS(status))
         goto fail2;
 
+    status = LinkGetRoutineAddress("netio.sys",
+                                   "FreeMibTable",
+                                   (PVOID *)&__FreeMibTable);
+    if (!NT_SUCCESS(status))
+        goto fail3;
+
+    status = LinkGetRoutineAddress("netio.sys",
+                                   "CancelMibChangeNotify2",
+                                   (PVOID *)&__CancelMibChangeNotify2);
+    if (!NT_SUCCESS(status))
+        goto fail4;
+
+    status = __NotifyUnicastIpAddressChange(AF_UNSPEC,
+                                            FrontendIpAddressChange,
+                                            Frontend,
+                                            TRUE,
+                                            &Handle);
+    if (!NT_SUCCESS(status))
+        goto fail5;
+
+    Event = ThreadGetEvent(Self);
+
     for (;;) { 
-        PSOCKADDR_INET  Table;
-        ULONG           Count;
+        PMIB_UNICASTIPADDRESS_TABLE MibTable;
+        KIRQL                       Irql;
+        PSOCKADDR_INET              AddressTable;
+        ULONG                       AddressCount;
 
         (VOID) KeWaitForSingleObject(Event,
                                      Executive,
@@ -739,34 +728,59 @@ again:
         if (ThreadIsAlerted(Self))
             break;
 
-        status = __FrontendGetAddressTable(Frontend,
-                                           &Table,
-                                           &Count);
+        status = __GetUnicastIpAddressTable(AF_UNSPEC, &MibTable);
         if (!NT_SUCCESS(status))
             continue;
 
-        TransmitterUpdateAddressTable(__FrontendGetTransmitter(Frontend),
-                                      Table,
-                                      Count);
+        KeAcquireSpinLock(&Frontend->Lock, &Irql);
 
-        if (Count != 0)
-            __FrontendFree(Table);
+        // It is not safe to use interfaces before this point
+        if (Frontend->State != FRONTEND_CONNECTED &&
+            Frontend->State != FRONTEND_ENABLED)
+            goto loop;
+
+        status = __FrontendProcessAddressTable(Frontend,
+                                               MibTable,
+                                               &AddressTable,
+                                               &AddressCount);
+        if (!NT_SUCCESS(status))
+            goto loop;
+
+        TransmitterUpdateAddressTable(__FrontendGetTransmitter(Frontend),
+                                      AddressTable,
+                                      AddressCount);
+
+        (VOID) __FrontendDumpAddressTable(Frontend,
+                                          AddressTable,
+                                          AddressCount);
+
+        if (AddressCount != 0)
+            __FrontendFree(AddressTable);
+
+loop:
+        KeReleaseSpinLock(&Frontend->Lock, Irql);
+
+        __FreeMibTable(MibTable);
     }
 
-    status = CancelMibChangeNotify2(Handle);
+    status = __CancelMibChangeNotify2(Handle);
     ASSERT(NT_SUCCESS(status));
 
-    NetioTeardown();
-
-done:
     Trace("<====\n");
 
     return STATUS_SUCCESS;
 
+fail5:
+    Error("fail5\n");
+
+fail4:
+    Error("fail4\n");
+
+fail3:
+    Error("fail3\n");
+
 fail2:
     Error("fail2\n");
-
-    NetioTeardown();
 
 fail1:
     Error("fail1 (%08x)\n", status);
@@ -793,12 +807,12 @@ __FrontendWaitForStateChange(
 
     KeInitializeEvent(&Event, NotificationEvent, FALSE);
 
-    status = STORE(Watch,
-                   Frontend->StoreInterface,
-                   Path,
-                   "state",
-                   &Event,
-                   &Watch);
+    status = XENBUS_STORE(WatchAdd,
+                          &Frontend->StoreInterface,
+                          Path,
+                          "state",
+                          &Event,
+                          &Watch);
     if (!NT_SUCCESS(status))
         goto fail1;
 
@@ -824,20 +838,20 @@ __FrontendWaitForStateChange(
 
             // We are waiting for a watch event at DISPATCH_LEVEL so
             // it is our responsibility to poll the store ring.
-            STORE(Poll,
-                  Frontend->StoreInterface);
+            XENBUS_STORE(Poll,
+                         &Frontend->StoreInterface);
 
             KeStallExecutionProcessor(1000);   // 1ms
         }
 
         KeClearEvent(&Event);
 
-        status = STORE(Read,
-                       Frontend->StoreInterface,
-                       NULL,
-                       Path,
-                       "state",
-                       &Buffer);
+        status = XENBUS_STORE(Read,
+                              &Frontend->StoreInterface,
+                              NULL,
+                              Path,
+                              "state",
+                              &Buffer);
         if (!NT_SUCCESS(status)) {
             if (status != STATUS_OBJECT_NAME_NOT_FOUND)
                 goto fail2;
@@ -846,9 +860,9 @@ __FrontendWaitForStateChange(
         } else {
             *State = (XenbusState)strtol(Buffer, NULL, 10);
 
-            STORE(Free,
-                  Frontend->StoreInterface,
-                  Buffer);
+            XENBUS_STORE(Free,
+                         &Frontend->StoreInterface,
+                         Buffer);
         }
 
         KeQuerySystemTime(&Now);
@@ -860,9 +874,9 @@ __FrontendWaitForStateChange(
     if (*State == Old)
         goto fail3;
 
-    (VOID) STORE(Unwatch,
-                 Frontend->StoreInterface,
-                 Watch);
+    (VOID) XENBUS_STORE(WatchRemove,
+                        &Frontend->StoreInterface,
+                        Watch);
 
     Trace("%s: <==== (%s)\n", Path, XenbusStateName(*State));
 
@@ -874,9 +888,9 @@ fail3:
 fail2:
     Error("fail2\n");
 
-    (VOID) STORE(Unwatch,
-                 Frontend->StoreInterface,
-                 Watch);
+    (VOID) XENBUS_STORE(WatchRemove,
+                        &Frontend->StoreInterface,
+                        Watch);
 
 fail1:
     Error("fail1 (%08x)\n", status);
@@ -886,7 +900,8 @@ fail1:
 
 static FORCEINLINE NTSTATUS
 __FrontendClose(
-    IN  PXENVIF_FRONTEND    Frontend
+    IN  PXENVIF_FRONTEND    Frontend,
+    IN  BOOLEAN             Force            
     )
 {
     PCHAR                   Path;
@@ -896,25 +911,28 @@ __FrontendClose(
     Trace("====>\n");
 
     ASSERT(Frontend->Watch != NULL);
-    (VOID) STORE(Unwatch,
-                 Frontend->StoreInterface,
-                 Frontend->Watch);
+    (VOID) XENBUS_STORE(WatchRemove,
+                        &Frontend->StoreInterface,
+                        Frontend->Watch);
     Frontend->Watch = NULL;
 
     // Release cached information about the backend
     ASSERT(Frontend->BackendPath != NULL);
-    STORE(Free,
-          Frontend->StoreInterface,
-          Frontend->BackendPath);
+    XENBUS_STORE(Free,
+                 &Frontend->StoreInterface,
+                 Frontend->BackendPath);
     Frontend->BackendPath = NULL;
 
     Frontend->BackendDomain = DOMID_INVALID;
 
-    status = STORE(Read,
-                   Frontend->StoreInterface,
-                   NULL,
-                   __FrontendGetPath(Frontend),
-                   "backend",
+    if (Force)
+        goto done;
+
+    status = XENBUS_STORE(Read,
+                          &Frontend->StoreInterface,
+                          NULL,
+                          __FrontendGetPath(Frontend),
+                          "backend",
                    &Path);
     if (!NT_SUCCESS(status))
         goto fail1;
@@ -927,13 +945,13 @@ __FrontendClose(
     while (State != XenbusStateClosing &&
            State != XenbusStateClosed &&
            State != XenbusStateUnknown) {
-        (VOID) STORE(Printf,
-                     Frontend->StoreInterface,
-                     NULL,
-                     __FrontendGetPath(Frontend),
-                     "state",
-                     "%u",
-                     XenbusStateClosing);
+        (VOID) XENBUS_STORE(Printf,
+                            &Frontend->StoreInterface,
+                            NULL,
+                            __FrontendGetPath(Frontend),
+                            "state",
+                            "%u",
+                            XenbusStateClosing);
         status = __FrontendWaitForStateChange(Frontend, Path, &State);
         if (!NT_SUCCESS(status))
             goto fail2;
@@ -941,24 +959,24 @@ __FrontendClose(
 
     while (State != XenbusStateClosed &&
            State != XenbusStateUnknown) {
-        (VOID) STORE(Printf,
-                     Frontend->StoreInterface,
-                     NULL,
-                     __FrontendGetPath(Frontend),
-                     "state",
-                     "%u",
-                     XenbusStateClosed);
+        (VOID) XENBUS_STORE(Printf,
+                            &Frontend->StoreInterface,
+                            NULL,
+                            __FrontendGetPath(Frontend),
+                            "state",
+                            "%u",
+                            XenbusStateClosed);
         status = __FrontendWaitForStateChange(Frontend, Path, &State);
         if (!NT_SUCCESS(status))
             goto fail3;
     }
 
-    STORE(Free,
-          Frontend->StoreInterface,
-          Path);
+    XENBUS_STORE(Free,
+                 &Frontend->StoreInterface,
+                 Path);
 
-    STORE(Release, Frontend->StoreInterface);
-    Frontend->StoreInterface = NULL;
+done:
+    XENBUS_STORE(Release, &Frontend->StoreInterface);
 
     Trace("<====\n");
     return STATUS_SUCCESS;
@@ -969,12 +987,14 @@ fail3:
 fail2:
     Error("fail2\n");
 
-    STORE(Free,
-          Frontend->StoreInterface,
-          Path);
+    XENBUS_STORE(Free,
+                 &Frontend->StoreInterface,
+                 Path);
 
 fail1:
     Error("fail1 (%08x)\n", status);
+
+    XENBUS_STORE(Release, &Frontend->StoreInterface);
 
     return status;
 }
@@ -991,88 +1011,91 @@ __FrontendPrepare(
 
     Trace("====>\n");
 
-    Frontend->StoreInterface = __FrontendGetStoreInterface(Frontend);
-
-    STORE(Acquire, Frontend->StoreInterface);
-
-    status = STORE(Read,
-                   Frontend->StoreInterface,
-                   NULL,
-                   __FrontendGetPath(Frontend),
-                   "backend",
-                   &Path);
+    status = XENBUS_STORE(Acquire, &Frontend->StoreInterface);
     if (!NT_SUCCESS(status))
         goto fail1;
+
+    status = XENBUS_STORE(Read,
+                          &Frontend->StoreInterface,
+                          NULL,
+                          __FrontendGetPath(Frontend),
+                          "backend",
+                          &Path);
+    if (!NT_SUCCESS(status))
+        goto fail2;
 
     State = XenbusStateUnknown;
     status = __FrontendWaitForStateChange(Frontend, Path, &State);
     if (!NT_SUCCESS(status))
-        goto fail2;
+        goto fail3;
 
     while (State != XenbusStateClosed &&
            State != XenbusStateInitialising &&
            State != XenbusStateInitWait) {
         status = __FrontendWaitForStateChange(Frontend, Path, &State);
         if (!NT_SUCCESS(status))
-            goto fail3;
+            goto fail4;
     }
 
-    status = STORE(Printf,
-                   Frontend->StoreInterface,
-                   NULL,
-                   __FrontendGetPath(Frontend),
-                   "state",
-                   "%u",
-                   XenbusStateInitialising);
+    status = XENBUS_STORE(Printf,
+                          &Frontend->StoreInterface,
+                          NULL,
+                          __FrontendGetPath(Frontend),
+                          "state",
+                          "%u",
+                          XenbusStateInitialising);
     if (!NT_SUCCESS(status))
-        goto fail4;
+        goto fail5;
 
     while (State == XenbusStateClosed ||
            State == XenbusStateInitialising) {
         status = __FrontendWaitForStateChange(Frontend, Path, &State);
         if (!NT_SUCCESS(status))
-            goto fail5;
+            goto fail6;
     }
 
     status = STATUS_UNSUCCESSFUL;
     if (State != XenbusStateInitWait)
-        goto fail6;
+        goto fail7;
 
     Frontend->BackendPath = Path;
 
-    status = STORE(Read,
-                   Frontend->StoreInterface,
-                   NULL,
-                   __FrontendGetPath(Frontend),
-                   "backend-id",
-                   &Buffer);
+    status = XENBUS_STORE(Read,
+                          &Frontend->StoreInterface,
+                          NULL,
+                          __FrontendGetPath(Frontend),
+                          "backend-id",
+                          &Buffer);
     if (!NT_SUCCESS(status)) {
         Frontend->BackendDomain = 0;
     } else {
         Frontend->BackendDomain = (USHORT)strtol(Buffer, NULL, 10);
 
-        STORE(Free,
-              Frontend->StoreInterface,
-              Buffer);
+        XENBUS_STORE(Free,
+                     &Frontend->StoreInterface,
+                     Buffer);
     }
 
-    status = STORE(Watch,
-                   Frontend->StoreInterface,
-                   __FrontendGetBackendPath(Frontend),
-                   "online",
-                   ThreadGetEvent(Frontend->EjectThread),
-                   &Frontend->Watch);
+    status = XENBUS_STORE(WatchAdd,
+                          &Frontend->StoreInterface,
+                          __FrontendGetBackendPath(Frontend),
+                          "online",
+                          ThreadGetEvent(Frontend->EjectThread),
+                          &Frontend->Watch);
     if (!NT_SUCCESS(status))
-        goto fail7;
+        goto fail8;
 
     Trace("<====\n");
     return STATUS_SUCCESS;
 
-fail7:
-    Error("fail7\n");
+fail8:
+    Error("fail8\n");
 
     Frontend->BackendDomain = DOMID_INVALID;
     Frontend->BackendPath = NULL;
+
+fail7:
+    Error("fail7\n");
 
 fail6:
     Error("fail6\n");
@@ -1086,38 +1109,132 @@ fail4:
 fail3:
     Error("fail3\n");
 
+    XENBUS_STORE(Free,
+                 &Frontend->StoreInterface,
+                 Path);
 fail2:
     Error("fail2\n");
 
-    STORE(Free,
-          Frontend->StoreInterface,
-          Path);
+    XENBUS_STORE(Release, &Frontend->StoreInterface);
 
 fail1:
     Error("fail1 (%08x)\n", status);
-
-    STORE(Release, Frontend->StoreInterface);
-    Frontend->StoreInterface = NULL;
 
     Trace("<====\n");
     return status;
 }
 
-static VOID
-FrontendDebugCallback(
-    IN  PVOID           Argument,
-    IN  BOOLEAN         Crashing
+static FORCEINLINE VOID
+__FrontendQueryStatistic(
+    IN  PXENVIF_FRONTEND        Frontend,
+    IN  XENVIF_VIF_STATISTIC    Index,
+    OUT PULONGLONG              Value
     )
 {
-    PXENVIF_FRONTEND    Frontend = Argument;
+    ULONG                       Cpu;
+
+    ASSERT(Index < XENVIF_VIF_STATISTIC_COUNT);
+
+    *Value = 0;
+    for (Cpu = 0; Cpu < MAXIMUM_PROCESSORS; Cpu++)
+        *Value += Frontend->Statistic[Index][Cpu];
+}
+
+VOID
+FrontendQueryStatistic(
+    IN  PXENVIF_FRONTEND        Frontend,
+    IN  XENVIF_VIF_STATISTIC    Index,
+    OUT PULONGLONG              Value
+    )
+{
+    __FrontendQueryStatistic(Frontend, Index, Value);
+}
+
+VOID
+FrontendIncrementStatistic(
+    IN  PXENVIF_FRONTEND        Frontend,
+    IN  XENVIF_VIF_STATISTIC    Index,
+    IN  ULONGLONG               Delta
+    )
+{
+    ULONG                       Cpu;
+
+    ASSERT(Index < XENVIF_VIF_STATISTIC_COUNT);
+
+    ASSERT3U(KeGetCurrentIrql(), ==, DISPATCH_LEVEL);
+
+    Cpu = KeGetCurrentProcessorNumber();
+    Frontend->Statistic[Index][Cpu] += Delta;
+}
+
+static FORCEINLINE const CHAR *
+__FrontendStatisticName(
+    IN  XENVIF_VIF_STATISTIC    Index
+    )
+{
+#define _FRONTEND_STATISTIC_NAME(_Index)    \
+    case XENVIF_ ## _Index:                 \
+        return #_Index;
+
+    switch (Index) {
+    _FRONTEND_STATISTIC_NAME(TRANSMITTER_PACKETS_DROPPED);
+    _FRONTEND_STATISTIC_NAME(TRANSMITTER_BACKEND_ERRORS);
+    _FRONTEND_STATISTIC_NAME(TRANSMITTER_FRONTEND_ERRORS);
+    _FRONTEND_STATISTIC_NAME(TRANSMITTER_UNICAST_PACKETS);
+    _FRONTEND_STATISTIC_NAME(TRANSMITTER_UNICAST_OCTETS);
+    _FRONTEND_STATISTIC_NAME(TRANSMITTER_MULTICAST_PACKETS);
+    _FRONTEND_STATISTIC_NAME(TRANSMITTER_MULTICAST_OCTETS);
+    _FRONTEND_STATISTIC_NAME(TRANSMITTER_BROADCAST_PACKETS);
+    _FRONTEND_STATISTIC_NAME(TRANSMITTER_BROADCAST_OCTETS);
+    _FRONTEND_STATISTIC_NAME(RECEIVER_PACKETS_DROPPED);
+    _FRONTEND_STATISTIC_NAME(RECEIVER_BACKEND_ERRORS);
+    _FRONTEND_STATISTIC_NAME(RECEIVER_FRONTEND_ERRORS);
+    _FRONTEND_STATISTIC_NAME(RECEIVER_UNICAST_PACKETS);
+    _FRONTEND_STATISTIC_NAME(RECEIVER_UNICAST_OCTETS);
+    _FRONTEND_STATISTIC_NAME(RECEIVER_MULTICAST_PACKETS);
+    _FRONTEND_STATISTIC_NAME(RECEIVER_MULTICAST_OCTETS);
+    _FRONTEND_STATISTIC_NAME(RECEIVER_BROADCAST_PACKETS);
+    _FRONTEND_STATISTIC_NAME(RECEIVER_BROADCAST_OCTETS);
+    default:
+        break;
+    }
+
+    return "UNKNOWN";
+
+#undef  _FRONTEND_STATISTIC_NAME
+}
+
+static VOID
+FrontendDebugCallback(
+    IN  PVOID               Argument,
+    IN  BOOLEAN             Crashing
+    )
+{
+    PXENVIF_FRONTEND        Frontend = Argument;
+    XENVIF_VIF_STATISTIC    Index;
 
     UNREFERENCED_PARAMETER(Crashing);
 
-    DEBUG(Printf,
-          Frontend->DebugInterface,
-          Frontend->DebugCallback,
-          "PATH: %s\n",
-          __FrontendGetPath(Frontend));
+    XENBUS_DEBUG(Printf,
+                 &Frontend->DebugInterface,
+                 "PATH: %s\n",
+                 __FrontendGetPath(Frontend));
+
+    XENBUS_DEBUG(Printf,
+                 &Frontend->DebugInterface,
+                 "STATISTICS:\n");
+
+    for (Index = 0; Index < XENVIF_VIF_STATISTIC_COUNT; Index++) {
+        ULONGLONG   Value;
+
+        __FrontendQueryStatistic(Frontend, Index, &Value);
+
+        XENBUS_DEBUG(Printf,
+                     &Frontend->DebugInterface,
+                     " - %40s %lu\n",
+                     __FrontendStatisticName(Index),
+                     Value);
+    }
 }
 
 static FORCEINLINE NTSTATUS
@@ -1132,46 +1249,46 @@ __FrontendConnect(
 
     Trace("====>\n");
 
-    Frontend->DebugInterface = __FrontendGetDebugInterface(Frontend);
-
-    DEBUG(Acquire, Frontend->DebugInterface);
-
-    status = DEBUG(Register,
-                   Frontend->DebugInterface,
-                   __MODULE__ "|FRONTEND",
-                   FrontendDebugCallback,
-                   Frontend,
-                   &Frontend->DebugCallback);
+    status = XENBUS_DEBUG(Acquire, &Frontend->DebugInterface);
     if (!NT_SUCCESS(status))
         goto fail1;
 
-    status = GranterConnect(__FrontendGetGranter(Frontend));
+    status = XENBUS_DEBUG(Register,
+                          &Frontend->DebugInterface,
+                          __MODULE__ "|FRONTEND",
+                          FrontendDebugCallback,
+                          Frontend,
+                          &Frontend->DebugCallback);
     if (!NT_SUCCESS(status))
         goto fail2;
 
-    status = MacConnect(__FrontendGetMac(Frontend));
+    status = GranterConnect(__FrontendGetGranter(Frontend));
     if (!NT_SUCCESS(status))
         goto fail3;
 
-    status = ReceiverConnect(__FrontendGetReceiver(Frontend));
+    status = MacConnect(__FrontendGetMac(Frontend));
     if (!NT_SUCCESS(status))
         goto fail4;
 
-    status = TransmitterConnect(__FrontendGetTransmitter(Frontend));
+    status = ReceiverConnect(__FrontendGetReceiver(Frontend));
     if (!NT_SUCCESS(status))
         goto fail5;
 
-    status = NotifierConnect(__FrontendGetNotifier(Frontend));
+    status = TransmitterConnect(__FrontendGetTransmitter(Frontend));
     if (!NT_SUCCESS(status))
         goto fail6;
+
+    status = NotifierConnect(__FrontendGetNotifier(Frontend));
+    if (!NT_SUCCESS(status))
+        goto fail7;
 
     Attempt = 0;
     do {
         PXENBUS_STORE_TRANSACTION   Transaction;
 
-        status = STORE(TransactionStart,
-                       Frontend->StoreInterface,
-                       &Transaction);
+        status = XENBUS_STORE(TransactionStart,
+                              &Frontend->StoreInterface,
+                              &Transaction);
         if (!NT_SUCCESS(status))
             break;
 
@@ -1190,49 +1307,52 @@ __FrontendConnect(
         if (!NT_SUCCESS(status))
             goto abort;
 
-        status = STORE(TransactionEnd,
-                       Frontend->StoreInterface,
-                       Transaction,
-                       TRUE);
+        status = XENBUS_STORE(TransactionEnd,
+                              &Frontend->StoreInterface,
+                              Transaction,
+                              TRUE);
         if (status != STATUS_RETRY || ++Attempt > 10)
             break;
 
         continue;
 
 abort:
-        (VOID) STORE(TransactionEnd,
-                     Frontend->StoreInterface,
-                     Transaction,
-                     FALSE);
+        (VOID) XENBUS_STORE(TransactionEnd,
+                            &Frontend->StoreInterface,
+                            Transaction,
+                            FALSE);
         break;
     } while (status == STATUS_RETRY);
 
     if (!NT_SUCCESS(status))
-        goto fail7;
-
-    status = STORE(Printf,
-                   Frontend->StoreInterface,
-                   NULL,
-                   __FrontendGetPath(Frontend),
-                   "state",
-                   "%u",
-                   XenbusStateConnected);
-    if (!NT_SUCCESS(status))
         goto fail8;
+
+    status = XENBUS_STORE(Printf,
+                          &Frontend->StoreInterface,
+                          NULL,
+                          __FrontendGetPath(Frontend),
+                          "state",
+                          "%u",
+                          XenbusStateConnected);
+    if (!NT_SUCCESS(status))
+        goto fail9;
 
     State = XenbusStateInitWait;
     status = __FrontendWaitForStateChange(Frontend, Path, &State);
     if (!NT_SUCCESS(status))
-        goto fail9;
+        goto fail10;
 
     status = STATUS_UNSUCCESSFUL;
     if (State != XenbusStateConnected)
-        goto fail10;
+        goto fail11;
 
     ThreadWake(Frontend->MibThread);
 
     Trace("<====\n");
     return STATUS_SUCCESS;
+
+fail11:
+    Error("fail11\n");
 
 fail10:
     Error("fail10\n");
@@ -1243,44 +1363,43 @@ fail9:
 fail8:
     Error("fail8\n");
 
+    NotifierDisconnect(__FrontendGetNotifier(Frontend));
+
 fail7:
     Error("fail7\n");
 
-    NotifierDisconnect(__FrontendGetNotifier(Frontend));
+    TransmitterDisconnect(__FrontendGetTransmitter(Frontend));
 
 fail6:
     Error("fail6\n");
 
-    TransmitterDisconnect(__FrontendGetTransmitter(Frontend));
+    ReceiverDisconnect(__FrontendGetReceiver(Frontend));
 
 fail5:
     Error("fail5\n");
 
-    ReceiverDisconnect(__FrontendGetReceiver(Frontend));
+    MacDisconnect(__FrontendGetMac(Frontend));
 
 fail4:
     Error("fail4\n");
 
-    MacDisconnect(__FrontendGetMac(Frontend));
+    GranterDisconnect(__FrontendGetGranter(Frontend));
 
 fail3:
     Error("fail3\n");
 
-    GranterDisconnect(__FrontendGetGranter(Frontend));
+    XENBUS_DEBUG(Deregister,
+                 &Frontend->DebugInterface,
+                 Frontend->DebugCallback);
+    Frontend->DebugCallback = NULL;
 
 fail2:
     Error("fail2\n");
 
-    DEBUG(Deregister,
-          Frontend->DebugInterface,
-          Frontend->DebugCallback);
-    Frontend->DebugCallback = NULL;
+    XENBUS_DEBUG(Release, &Frontend->DebugInterface);
 
 fail1:
     Error("fail1 (%08x)\n", status);
-
-    DEBUG(Release, Frontend->DebugInterface);
-    Frontend->DebugInterface = NULL;
 
     Trace("<====\n");
     return status;
@@ -1299,13 +1418,14 @@ __FrontendDisconnect(
     MacDisconnect(__FrontendGetMac(Frontend));
     GranterDisconnect(__FrontendGetGranter(Frontend));
 
-    DEBUG(Deregister,
-          Frontend->DebugInterface,
-          Frontend->DebugCallback);
+    XENBUS_DEBUG(Deregister,
+                 &Frontend->DebugInterface,
+                 Frontend->DebugCallback);
     Frontend->DebugCallback = NULL;
 
-    DEBUG(Release, Frontend->DebugInterface);
-    Frontend->DebugInterface = NULL;
+    XENBUS_DEBUG(Release, &Frontend->DebugInterface);
+
+    RtlZeroMemory(&Frontend->Statistic, sizeof (Frontend->Statistic));
 
     Trace("<====\n");
 }
@@ -1432,7 +1552,7 @@ FrontendSetState(
                 if (NT_SUCCESS(status)) {
                     Frontend->State = FRONTEND_CONNECTED;
                 } else {
-                    status = __FrontendClose(Frontend);
+                    status = __FrontendClose(Frontend, FALSE);
                     if (NT_SUCCESS(status))
                         Frontend->State = FRONTEND_CLOSED;
                     else
@@ -1443,7 +1563,7 @@ FrontendSetState(
                 break;
 
             case FRONTEND_CLOSED:
-                status = __FrontendClose(Frontend);
+                status = __FrontendClose(Frontend, FALSE);
                 if (NT_SUCCESS(status)) {
                     Frontend->State = FRONTEND_CLOSED;
                 } else {
@@ -1466,7 +1586,7 @@ FrontendSetState(
                 if (NT_SUCCESS(status)) {
                     Frontend->State = FRONTEND_ENABLED;
                 } else {
-                    status = __FrontendClose(Frontend);
+                    status = __FrontendClose(Frontend, FALSE);
                     if (NT_SUCCESS(status))
                         Frontend->State = FRONTEND_CLOSED;
                     else
@@ -1479,7 +1599,7 @@ FrontendSetState(
 
             case FRONTEND_PREPARED:
             case FRONTEND_CLOSED:
-                status = __FrontendClose(Frontend);
+                status = __FrontendClose(Frontend, FALSE);
                 if (NT_SUCCESS(status)) {
                     Frontend->State = FRONTEND_CLOSED;
                 } else {
@@ -1555,9 +1675,6 @@ __FrontendResume(
 fail2:
     Error("fail2\n");
 
-    STORE(Release, Frontend->StoreInterface);
-    Frontend->StoreInterface = NULL;
-
     Frontend->State = FRONTEND_CLOSED;
 
 fail1:
@@ -1601,41 +1718,44 @@ FrontendResume(
     Trace("====>\n");
 
     KeRaiseIrql(DISPATCH_LEVEL, &Irql);
-    status = __FrontendResume(Frontend);
-    KeLowerIrql(Irql);
 
+    status = XENBUS_SUSPEND(Acquire, &Frontend->SuspendInterface);
     if (!NT_SUCCESS(status))
         goto fail1;
 
-    Frontend->SuspendInterface = __FrontendGetSuspendInterface(Frontend);
-
-    SUSPEND(Acquire, Frontend->SuspendInterface);
-
-    status = SUSPEND(Register,
-                     Frontend->SuspendInterface,
-                     SUSPEND_CALLBACK_LATE,
-                     FrontendSuspendCallbackLate,
-                     Frontend,
-                     &Frontend->SuspendCallbackLate);
+    status = __FrontendResume(Frontend);
     if (!NT_SUCCESS(status))
         goto fail2;
+
+    status = XENBUS_SUSPEND(Register,
+                            &Frontend->SuspendInterface,
+                            SUSPEND_CALLBACK_LATE,
+                            FrontendSuspendCallbackLate,
+                            Frontend,
+                            &Frontend->SuspendCallbackLate);
+    if (!NT_SUCCESS(status))
+        goto fail3;
+
+    KeLowerIrql(Irql);
 
     Trace("<====\n");
 
     return STATUS_SUCCESS;
     
+fail3:
+    Error("fail3\n");
+
+    __FrontendSuspend(Frontend);
+
 fail2:
     Error("fail2\n");
 
-    SUSPEND(Release, Frontend->SuspendInterface);
-    Frontend->SuspendInterface = NULL;
-
-    KeRaiseIrql(DISPATCH_LEVEL, &Irql);
-    __FrontendSuspend(Frontend);
-    KeLowerIrql(Irql);
+    XENBUS_SUSPEND(Release, &Frontend->SuspendInterface);
 
 fail1:
     Error("fail1 (%08x)\n", status);
+
+    KeLowerIrql(Irql);
 
     return status;
 }
@@ -1649,25 +1769,19 @@ FrontendSuspend(
 
     Trace("====>\n");
 
-    ASSERT3U(KeGetCurrentIrql(), ==, PASSIVE_LEVEL);
+    KeRaiseIrql(DISPATCH_LEVEL, &Irql);
 
-    // FrontendResume() may have failed
-    if (Frontend->SuspendInterface == NULL)
-        goto done;
-
-    SUSPEND(Deregister,
-            Frontend->SuspendInterface,
-            Frontend->SuspendCallbackLate);
+    XENBUS_SUSPEND(Deregister,
+                   &Frontend->SuspendInterface,
+                   Frontend->SuspendCallbackLate);
     Frontend->SuspendCallbackLate = NULL;
 
-    SUSPEND(Release, Frontend->SuspendInterface);
-    Frontend->SuspendInterface = NULL;
-
-    KeRaiseIrql(DISPATCH_LEVEL, &Irql);
     __FrontendSuspend(Frontend);
+
+    XENBUS_SUSPEND(Release, &Frontend->SuspendInterface);
+
     KeLowerIrql(Irql);
 
-done:
     Trace("<====\n");
 }
 
@@ -1703,7 +1817,7 @@ FrontendInitialize(
     if (!NT_SUCCESS(status))
         goto fail2;
 
-    Length = sizeof ("attr/eth") + (ULONG)strlen(Name);
+    Length = sizeof ("data/vif/") + (ULONG)strlen(Name);
     Prefix = __FrontendAllocate(Length);
 
     status = STATUS_NO_MEMORY;
@@ -1712,7 +1826,7 @@ FrontendInitialize(
 
     status = RtlStringCbPrintfA(Prefix, 
                                 Length,
-                                "attr/eth%s", 
+                                "data/vif/%s", 
                                 Name);
     if (!NT_SUCCESS(status))
         goto fail4;
@@ -1732,27 +1846,31 @@ FrontendInitialize(
 
     (*Frontend)->State = FRONTEND_CLOSED;
 
-    status = ThreadCreate(FrontendEject, *Frontend, &(*Frontend)->EjectThread);
-    if (!NT_SUCCESS(status))
-        goto fail6;
+    FdoGetDebugInterface(PdoGetFdo(Pdo), &(*Frontend)->DebugInterface);
+    FdoGetSuspendInterface(PdoGetFdo(Pdo), &(*Frontend)->SuspendInterface);
+    FdoGetStoreInterface(PdoGetFdo(Pdo), &(*Frontend)->StoreInterface);
 
     status = GranterInitialize(*Frontend, &(*Frontend)->Granter);
     if (!NT_SUCCESS(status))
-        goto fail7;
+        goto fail6;
 
     status = NotifierInitialize(*Frontend, &(*Frontend)->Notifier);
     if (!NT_SUCCESS(status))
-        goto fail8;
+        goto fail7;
 
     status = MacInitialize(*Frontend, &(*Frontend)->Mac);
     if (!NT_SUCCESS(status))
-        goto fail9;
+        goto fail8;
 
     status = ReceiverInitialize(*Frontend, 1, &(*Frontend)->Receiver);
     if (!NT_SUCCESS(status))
-        goto fail10;
+        goto fail9;
 
     status = TransmitterInitialize(*Frontend, 1, &(*Frontend)->Transmitter);
+    if (!NT_SUCCESS(status))
+        goto fail10;
+
+    status = ThreadCreate(FrontendEject, *Frontend, &(*Frontend)->EjectThread);
     if (!NT_SUCCESS(status))
         goto fail11;
 
@@ -1767,39 +1885,48 @@ FrontendInitialize(
 fail12:
     Error("fail12\n");
 
-    TransmitterTeardown(__FrontendGetTransmitter(*Frontend));
-    (*Frontend)->Transmitter = NULL;
+    ThreadAlert((*Frontend)->EjectThread);
+    ThreadJoin((*Frontend)->EjectThread);
+    (*Frontend)->EjectThread = NULL;
 
 fail11:
     Error("fail11\n");
 
-    ReceiverTeardown(__FrontendGetReceiver(*Frontend));
-    (*Frontend)->Receiver = NULL;
+    TransmitterTeardown(__FrontendGetTransmitter(*Frontend));
+    (*Frontend)->Transmitter = NULL;
 
 fail10:
     Error("fail10\n");
 
-    MacTeardown(__FrontendGetMac(*Frontend));
-    (*Frontend)->Mac = NULL;
+    ReceiverTeardown(__FrontendGetReceiver(*Frontend));
+    (*Frontend)->Receiver = NULL;
 
 fail9:
     Error("fail9\n");
 
-    NotifierTeardown(__FrontendGetNotifier(*Frontend));
-    (*Frontend)->Notifier = NULL;
+    MacTeardown(__FrontendGetMac(*Frontend));
+    (*Frontend)->Mac = NULL;
 
 fail8:
     Error("fail8\n");
 
-    GranterTeardown(__FrontendGetGranter(*Frontend));
-    (*Frontend)->Granter = NULL;
+    NotifierTeardown(__FrontendGetNotifier(*Frontend));
+    (*Frontend)->Notifier = NULL;
 
 fail7:
     Error("fail7\n");
 
-    ThreadAlert((*Frontend)->EjectThread);
-    ThreadJoin((*Frontend)->EjectThread);
-    (*Frontend)->EjectThread = NULL;
+    GranterTeardown(__FrontendGetGranter(*Frontend));
+    (*Frontend)->Granter = NULL;
+
+    RtlZeroMemory(&(*Frontend)->StoreInterface,
+                  sizeof (XENBUS_STORE_INTERFACE));
+
+    RtlZeroMemory(&(*Frontend)->SuspendInterface,
+                  sizeof (XENBUS_SUSPEND_INTERFACE));
+
+    RtlZeroMemory(&(*Frontend)->DebugInterface,
+                  sizeof (XENBUS_DEBUG_INTERFACE));
 
 fail6:
     Error("fail6\n");
@@ -1852,30 +1979,20 @@ FrontendTeardown(
     ASSERT(Frontend->State != FRONTEND_CONNECTED);
 
     if (Frontend->State == FRONTEND_PREPARED) {
-
-        ASSERT(Frontend->Watch != NULL);
-        (VOID) STORE(Unwatch,
-                     Frontend->StoreInterface,
-                     Frontend->Watch);
-        Frontend->Watch = NULL;
-
-        // Release cached information about the backend
-        ASSERT(Frontend->BackendPath != NULL);
-        STORE(Free,
-              Frontend->StoreInterface,
-              Frontend->BackendPath);
-        Frontend->BackendPath = NULL;
-
-        Frontend->BackendDomain = DOMID_INVALID;
-
+        (VOID) __FrontendClose(Frontend, TRUE);
         Frontend->State = FRONTEND_CLOSED;
     }
 
-    ASSERT3U(Frontend->State, ==, FRONTEND_CLOSED);
+    ASSERT(Frontend->State == FRONTEND_CLOSED ||
+           Frontend->State == FRONTEND_STATE_INVALID);
 
     ThreadAlert(Frontend->MibThread);
     ThreadJoin(Frontend->MibThread);
     Frontend->MibThread = NULL;
+
+    ThreadAlert(Frontend->EjectThread);
+    ThreadJoin(Frontend->EjectThread);
+    Frontend->EjectThread = NULL;
 
     TransmitterTeardown(__FrontendGetTransmitter(Frontend));
     Frontend->Transmitter = NULL;
@@ -1892,9 +2009,14 @@ FrontendTeardown(
     GranterTeardown(__FrontendGetGranter(Frontend));
     Frontend->Granter = NULL;
 
-    ThreadAlert(Frontend->EjectThread);
-    ThreadJoin(Frontend->EjectThread);
-    Frontend->EjectThread = NULL;
+    RtlZeroMemory(&Frontend->StoreInterface,
+                  sizeof (XENBUS_STORE_INTERFACE));
+
+    RtlZeroMemory(&Frontend->SuspendInterface,
+                  sizeof (XENBUS_SUSPEND_INTERFACE));
+
+    RtlZeroMemory(&Frontend->DebugInterface,
+                  sizeof (XENBUS_DEBUG_INTERFACE));
 
     Frontend->State = FRONTEND_STATE_INVALID;
     RtlZeroMemory(&Frontend->Lock, sizeof (KSPIN_LOCK));
@@ -1914,55 +2036,4 @@ FrontendTeardown(
     __FrontendFree(Frontend);
 
     Trace("<====\n");
-}
-
-VOID
-FrontendEjectFailed(
-    IN PXENVIF_FRONTEND Frontend
-    )
-{
-    KIRQL               Irql;
-    ULONG               Length;
-    PCHAR               Path;
-    NTSTATUS            status;
-
-    KeAcquireSpinLock(&Frontend->Lock, &Irql);
-
-    Info("%s: device eject failed\n", __FrontendGetPath(Frontend));
-
-    Length = sizeof ("error/") + (ULONG)strlen(__FrontendGetPath(Frontend));
-    Path = __FrontendAllocate(Length);
-
-    status = STATUS_NO_MEMORY;
-    if (Path == NULL)
-        goto fail1;
-
-    status = RtlStringCbPrintfA(Path, 
-                                Length,
-                                "error/%s", 
-                                __FrontendGetPath(Frontend));
-    if (!NT_SUCCESS(status))
-        goto fail2;
-
-    (VOID) STORE(Printf,
-                 Frontend->StoreInterface,
-                 NULL,
-                 Path,
-                 "error",
-                 "UNPLUG FAILED: device is still in use");
-
-    __FrontendFree(Path);
-
-    KeReleaseSpinLock(&Frontend->Lock, Irql);
-    return;
-
-fail2:
-    Error("fail2\n");
-
-    __FrontendFree(Path);
-
-fail1:
-    Error("fail1 (%08x)\n", status);
-
-    KeReleaseSpinLock(&Frontend->Lock, Irql);
 }

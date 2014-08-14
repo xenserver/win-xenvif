@@ -29,110 +29,170 @@
  * SUCH DAMAGE.
  */
 
+/*! \file gnttab_interface.h
+    \brief XENBUS GNTTAB Interface
+
+    This interface provides access to the hypervisor grant table
+*/
+
 #ifndef _XENBUS_GNTTAB_INTERFACE_H
 #define _XENBUS_GNTTAB_INTERFACE_H
 
-typedef struct _XENBUS_GNTTAB_CACHE         XENBUS_GNTTAB_CACHE, *PXENBUS_GNTTAB_CACHE;
-typedef struct _XENBUS_GNTTAB_DESCRIPTOR    XENBUS_GNTTAB_DESCRIPTOR, *PXENBUS_GNTTAB_DESCRIPTOR;
+#include <cache_interface.h>
 
-#define DEFINE_GNTTAB_OPERATIONS                                                \
-        GNTTAB_OPERATION(VOID,                                                  \
-                         Acquire,                                               \
-                         (                                                      \
-                         IN  PXENBUS_GNTTAB_CONTEXT     Context                 \
-                         )                                                      \
-                         )                                                      \
-        GNTTAB_OPERATION(VOID,                                                  \
-                         Release,                                               \
-                         (                                                      \
-                         IN  PXENBUS_GNTTAB_CONTEXT     Context                 \
-                         )                                                      \
-                         )                                                      \
-        GNTTAB_OPERATION(NTSTATUS,                                              \
-                         CreateCache,                                           \
-                         (                                                      \
-                         IN  PXENBUS_GNTTAB_CONTEXT     Context,                \
-                         IN  const CHAR                 *Name,                  \
-                         IN  ULONG                      Reservation,            \
-                         IN  VOID                       (*AcquireLock)(PVOID),  \
-                         IN  VOID                       (*ReleaseLock)(PVOID),  \
-                         IN  PVOID                      Argument,               \
-                         OUT PXENBUS_GNTTAB_CACHE       *Cache                  \
-                         )                                                      \
-                         )                                                      \
-        GNTTAB_OPERATION(VOID,                                                  \
-                         DestroyCache,                                          \
-                         (                                                      \
-                         IN  PXENBUS_GNTTAB_CONTEXT     Context,                \
-                         IN  PXENBUS_GNTTAB_CACHE       Cache                   \
-                         )                                                      \
-                         )                                                      \
-        GNTTAB_OPERATION(NTSTATUS,                                              \
-                         PermitForeignAccess,                                   \
-                         (                                                      \
-                         IN  PXENBUS_GNTTAB_CONTEXT     Context,                \
-                         IN  PXENBUS_GNTTAB_CACHE       Cache,                  \
-                         IN  BOOLEAN                    Locked,                 \
-                         IN  USHORT                     Domain,                 \
-                         IN  PFN_NUMBER                 Pfn,                    \
-                         IN  BOOLEAN                    ReadOnly,               \
-                         OUT PXENBUS_GNTTAB_DESCRIPTOR  *Descriptor             \
-                         )                                                      \
-                         )                                                      \
-        GNTTAB_OPERATION(NTSTATUS,                                              \
-                         RevokeForeignAccess,                                   \
-                         (                                                      \
-                         IN  PXENBUS_GNTTAB_CONTEXT     Context,                \
-                         IN  PXENBUS_GNTTAB_CACHE       Cache,                  \
-                         IN  BOOLEAN                    Locked,                 \
-                         IN  PXENBUS_GNTTAB_DESCRIPTOR  Descriptor              \
-                         )                                                      \
-                         )                                                      \
-        GNTTAB_OPERATION(ULONG,                                                 \
-                         Reference,                                             \
-                         (                                                      \
-                         IN  PXENBUS_GNTTAB_CONTEXT     Context,                \
-                         IN  PXENBUS_GNTTAB_DESCRIPTOR  Descriptor              \
-                         )                                                      \
-                         )
+#ifndef _WINDLL
 
-typedef struct _XENBUS_GNTTAB_CONTEXT   XENBUS_GNTTAB_CONTEXT, *PXENBUS_GNTTAB_CONTEXT;
+/*! \typedef XENBUS_GNTTAB_ENTRY
+    \brief Grant table entry handle
+*/
+typedef struct _XENBUS_GNTTAB_ENTRY XENBUS_GNTTAB_ENTRY, *PXENBUS_GNTTAB_ENTRY;
 
-#define GNTTAB_OPERATION(_Type, _Name, _Arguments) \
-        _Type (*GNTTAB_ ## _Name) _Arguments;
+/*! \typedef XENBUS_GNTTAB_CACHE
+    \brief Grant table cache handle
+*/
+typedef struct _XENBUS_GNTTAB_CACHE XENBUS_GNTTAB_CACHE, *PXENBUS_GNTTAB_CACHE;
 
-typedef struct _XENBUS_GNTTAB_OPERATIONS {
-    DEFINE_GNTTAB_OPERATIONS
-} XENBUS_GNTTAB_OPERATIONS, *PXENBUS_GNTTAB_OPERATIONS;
+/*! \typedef XENBUS_GNTTAB_ACQUIRE
+    \brief Acquire a reference to the GNTTAB interface
 
-#undef GNTTAB_OPERATION
+    \param Interface The interface header
+*/  
+typedef NTSTATUS
+(*XENBUS_GNTTAB_ACQUIRE)(
+    IN  PINTERFACE  Interface
+    );
 
-typedef struct _XENBUS_GNTTAB_INTERFACE  XENBUS_GNTTAB_INTERFACE, *PXENBUS_GNTTAB_INTERFACE;
+/*! \typedef XENBUS_GNTTAB_RELEASE
+    \brief Release a reference to the GNTTAB interface
 
-// {CC32D7DF-88BE-4248-9A53-1F178BE9D60E}
-DEFINE_GUID(GUID_GNTTAB_INTERFACE, 
-            0xcc32d7df,
-            0x88be,
-            0x4248,
-            0x9a,
-            0x53,
-            0x1f,
-            0x17,
-            0x8b,
-            0xe9,
-            0xd6,
-            0xe);
+    \param Interface The interface header
+*/  
+typedef VOID
+(*XENBUS_GNTTAB_RELEASE)(
+    IN  PINTERFACE  Interface
+    );
 
-#define GNTTAB_INTERFACE_VERSION    5
+/*! \typedef XENBUS_GNTTAB_CREATE_CACHE
+    \brief Create a cache of grant table entries
 
-#define GNTTAB_OPERATIONS(_Interface) \
-        (PXENBUS_GNTTAB_OPERATIONS *)((ULONG_PTR)(_Interface))
+    \param Interface The interface header
+    \param Name A name for the cache which will be used in debug output
+    \param Reservation The target minimum population of the cache
+    \param AcquireLock A callback invoked to acquire a spinlock
+    \param ReleaseLock A callback invoked to release the spinlock
+    \param Argument An optional context argument passed to the callbacks
+    \param Cache A pointer to a grant table cache handle to be initialized
+*/  
+typedef NTSTATUS
+(*XENBUS_GNTTAB_CREATE_CACHE)(
+    IN  PINTERFACE                  Interface,
+    IN  const CHAR                  *Name,
+    IN  ULONG                       Reservation,
+    IN  XENBUS_CACHE_ACQUIRE_LOCK   AcquireLock,
+    IN  XENBUS_CACHE_RELEASE_LOCK   ReleaseLock,
+    IN  PVOID                       Argument OPTIONAL,
+    OUT PXENBUS_GNTTAB_CACHE        *Cache
+    );
 
-#define GNTTAB_CONTEXT(_Interface) \
-        (PXENBUS_GNTTAB_CONTEXT *)((ULONG_PTR)(_Interface) + sizeof (PVOID))
+/*! \typedef XENBUS_GNTTAB_PERMIT_FOREIGN_ACCESS
+    \brief Get a table entry from the \a Cache permitting access to a given \a Pfn
 
-#define GNTTAB(_Operation, _Interface, ...) \
-        (*GNTTAB_OPERATIONS(_Interface))->GNTTAB_ ## _Operation((*GNTTAB_CONTEXT(_Interface)), __VA_ARGS__)
+    \param Interface The interface header
+    \param Cache The grant table cache handle
+    \param Locked If mutually exclusive access to the cache is already
+    guaranteed then set this to TRUE
+    \param Domain The domid of the domain being granted access
+    \param Pfn The frame number of the page that we are granting access to
+    \param ReadOnly Set to TRUE if the foreign domain is only being granted
+    read access
+    \param Entry A pointer to a grant table entry handle to be initialized
+*/
+typedef NTSTATUS
+(*XENBUS_GNTTAB_PERMIT_FOREIGN_ACCESS)(
+    IN  PINTERFACE                  Interface,
+    IN  PXENBUS_GNTTAB_CACHE        Cache,
+    IN  BOOLEAN                     Locked,
+    IN  USHORT                      Domain,
+    IN  PFN_NUMBER                  Pfn,
+    IN  BOOLEAN                     ReadOnly,
+    OUT PXENBUS_GNTTAB_ENTRY        *Entry
+    );
+
+/*! \typedef XENBUS_GNTTAB_REVOKE_FOREIGN_ACCESS
+    \brief Revoke foreign access and return the \a Entry to the \a Cache
+
+    \param Interface The interface header
+    \param Cache The grant table cache handle
+    \param Locked If mutually exclusive access to the cache is already
+    guaranteed then set this to TRUE
+    \param Entry The grant table entry handle
+*/
+typedef NTSTATUS
+(*XENBUS_GNTTAB_REVOKE_FOREIGN_ACCESS)(
+    IN  PINTERFACE                  Interface,
+    IN  PXENBUS_GNTTAB_CACHE        Cache,
+    IN  BOOLEAN                     Locked,
+    IN  PXENBUS_GNTTAB_ENTRY        Entry
+    );
+
+/*! \typedef XENBUS_GNTTAB_GET_REFERENCE
+    \brief Get the reference number of the entry
+
+    \param Interface The interface header
+    \param Entry The grant table entry handle
+    \return The reference number
+*/  
+typedef ULONG
+(*XENBUS_GNTTAB_GET_REFERENCE)(
+    IN  PINTERFACE                  Interface,
+    IN  PXENBUS_GNTTAB_ENTRY        Entry
+    );
+
+/*! \typedef XENBUS_GNTTAB_DESTROY_CACHE
+    \brief Destroy a cache of grant table entries
+
+    \param Interface The interface header
+    \param Cache The grant table cache handle
+
+    All grant table entries must have been revoked prior to destruction
+    of the cache 
+*/  
+typedef VOID
+(*XENBUS_GNTTAB_DESTROY_CACHE)(
+    IN  PINTERFACE              Interface,
+    IN  PXENBUS_GNTTAB_CACHE    Cache
+    );
+
+// {763679C5-E5C2-4A6D-8B88-6BB02EC42D8E}
+DEFINE_GUID(GUID_XENBUS_GNTTAB_INTERFACE, 
+0x763679c5, 0xe5c2, 0x4a6d, 0x8b, 0x88, 0x6b, 0xb0, 0x2e, 0xc4, 0x2d, 0x8e);
+
+/*! \struct _XENBUS_GNTTAB_INTERFACE_V1
+    \brief GNTTAB interface version 1
+*/
+struct _XENBUS_GNTTAB_INTERFACE_V1 {
+    INTERFACE                           Interface;
+    XENBUS_GNTTAB_ACQUIRE               GnttabAcquire;
+    XENBUS_GNTTAB_RELEASE               GnttabRelease;
+    XENBUS_GNTTAB_CREATE_CACHE          GnttabCreateCache;
+    XENBUS_GNTTAB_PERMIT_FOREIGN_ACCESS GnttabPermitForeignAccess;
+    XENBUS_GNTTAB_REVOKE_FOREIGN_ACCESS GnttabRevokeForeignAccess;
+    XENBUS_GNTTAB_GET_REFERENCE         GnttabGetReference;
+    XENBUS_GNTTAB_DESTROY_CACHE         GnttabDestroyCache;
+};
+
+typedef struct _XENBUS_GNTTAB_INTERFACE_V1 XENBUS_GNTTAB_INTERFACE, *PXENBUS_GNTTAB_INTERFACE;
+
+/*! \def XENBUS_GNTTAB
+    \brief Macro at assist in method invocation
+*/
+#define XENBUS_GNTTAB(_Method, _Interface, ...)    \
+    (_Interface)->Gnttab ## _Method((PINTERFACE)(_Interface), __VA_ARGS__)
+
+#endif  // _WINDLL
+
+#define XENBUS_GNTTAB_INTERFACE_VERSION_MIN 1
+#define XENBUS_GNTTAB_INTERFACE_VERSION_MAX 1
 
 #endif  // _XENBUS_GNTTAB_INTERFACE_H
 

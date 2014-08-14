@@ -36,6 +36,8 @@
 #include <devguid.h>
 #include <ntstrsafe.h>
 #include <stdlib.h>
+#include <netioapi.h>
+#include <bcrypt.h>
 #include <util.h>
 #include <xen.h>
 #include <store_interface.h>
@@ -50,6 +52,7 @@
 #include "driver.h"
 #include "registry.h"
 #include "thread.h"
+#include "link.h"
 #include "dbg_print.h"
 #include "assert.h"
 
@@ -69,18 +72,24 @@ struct _XENVIF_PDO {
     BOOLEAN                     EjectRequested;
     KSPIN_LOCK                  EjectLock;
 
-    ETHERNET_ADDRESS            PermanentMacAddress;
-    NET_LUID                    NetLuid;
-    ETHERNET_ADDRESS            CurrentMacAddress;
+    UNICODE_STRING              ContainerID;
+
+    PULONG                      Revision;
+    ULONG                       Count;
+
+    NET_LUID                    Luid;
+    ETHERNET_ADDRESS            PermanentAddress;
+    ETHERNET_ADDRESS            CurrentAddress;
 
     BUS_INTERFACE_STANDARD      BusInterface;
 
-    PXENVIF_FRONTEND            Frontend;
-    XENVIF_VIF_INTERFACE        VifInterface;
-
-    PXENBUS_SUSPEND_INTERFACE   SuspendInterface;
-
+    XENBUS_SUSPEND_INTERFACE    SuspendInterface;
     PXENBUS_SUSPEND_CALLBACK    SuspendCallbackLate;
+
+    PXENVIF_FRONTEND            Frontend;
+
+    PXENVIF_VIF_CONTEXT         VifContext;
+    XENVIF_VIF_INTERFACE        VifInterface;
 };
 
 static FORCEINLINE PVOID
@@ -283,17 +292,17 @@ PdoIsEjectRequested(
 
 static FORCEINLINE VOID
 __PdoSetName(
-    IN  PXENVIF_PDO     Pdo,
-    IN  PANSI_STRING    Ansi
+    IN  PXENVIF_PDO Pdo,
+    IN  ULONG       Number
     )
 {
-    PXENVIF_DX          Dx = Pdo->Dx;
-    NTSTATUS            status;
+    PXENVIF_DX      Dx = Pdo->Dx;
+    NTSTATUS        status;
 
     status = RtlStringCbPrintfA(Dx->Name, 
                                 MAX_DEVICE_ID_LEN, 
-                                "%Z", 
-                                Ansi);
+                                "%u", 
+                                Number);
     ASSERT(NT_SUCCESS(status));
 }
 
@@ -315,14 +324,265 @@ PdoGetName(
     return __PdoGetName(Pdo);
 }
 
-static FORCEINLINE ULONG
-__PdoGetRevision(
+// {2A597D5E-8864-4428-A110-F568F316D4E4}
+DEFINE_GUID(GUID_CONTAINER_ID_NAME_SPACE,
+0x2a597d5e, 0x8864, 0x4428, 0xa1, 0x10, 0xf5, 0x68, 0xf3, 0x16, 0xd4, 0xe4);
+
+static NTSTATUS
+__PdoSetContainerID(
+    IN  PXENVIF_PDO     Pdo
+    )
+{
+    BCRYPT_ALG_HANDLE   Algorithm;
+    ULONG               Length;
+    ULONG               Size;
+    PUCHAR              Object;
+    BCRYPT_HASH_HANDLE  Hash;
+    PUCHAR              Result;
+    GUID                ContainerID;
+    NTSTATUS            status;
+
+    // Create a Name-Based GUID according to the algorithm presented
+    // in section 4.3 of RFC 4122.
+
+    // Choose a SHA1 hash
+    status = BCryptOpenAlgorithmProvider(&Algorithm,
+                                         BCRYPT_SHA1_ALGORITHM,
+                                         MS_PRIMITIVE_PROVIDER,
+                                         BCRYPT_PROV_DISPATCH);
+
+    if (!NT_SUCCESS(status))
+        goto fail1;
+
+    status = BCryptGetProperty(Algorithm,
+                               BCRYPT_OBJECT_LENGTH,
+                               (PUCHAR)&Length,
+                               sizeof (ULONG),
+                               &Size,
+                               0);
+    if (!NT_SUCCESS(status))
+        goto fail2;
+
+    status = STATUS_INVALID_BUFFER_SIZE;
+    if (Size != sizeof (ULONG))
+        goto fail3;
+
+    Object = __PdoAllocate(Length);
+
+    status = STATUS_NO_MEMORY;
+    if (Object == NULL)
+        goto fail4;
+
+    status = BCryptCreateHash(Algorithm,
+                              &Hash,
+                              Object,
+                              Length,
+                              NULL,
+                              0,
+                              0);
+    if (!NT_SUCCESS(status))
+        goto fail5;
+
+    // Hash in the name space
+    status = BCryptHashData(Hash,
+                            (PUCHAR)&GUID_CONTAINER_ID_NAME_SPACE,
+                            sizeof (GUID),
+                            0);
+    if (!NT_SUCCESS(status))
+        goto fail6;
+
+    // Hash in the permanent address
+    status = BCryptHashData(Hash,
+                            Pdo->PermanentAddress.Byte,
+                            sizeof (ETHERNET_ADDRESS),
+                            0);
+    if (!NT_SUCCESS(status))
+        goto fail7;
+
+    // Get the result
+    status = BCryptGetProperty(Algorithm,
+                               BCRYPT_HASH_LENGTH,
+                               (PUCHAR)&Length,
+                               sizeof (ULONG),
+                               &Size,
+                               0);
+    if (!NT_SUCCESS(status))
+        goto fail8;
+
+    status = STATUS_INVALID_BUFFER_SIZE;
+    if (Size != sizeof (ULONG))
+        goto fail9;
+
+    status = STATUS_INVALID_PARAMETER;
+    if (Length < sizeof (GUID))
+        goto fail10;
+
+    Result = __PdoAllocate(Length);
+
+    status = STATUS_NO_MEMORY;
+    if (Result == NULL)
+        goto fail11;
+
+    status = BCryptFinishHash(Hash,
+                              (PUCHAR)Result,
+                              Length,
+                              0);
+    if (!NT_SUCCESS(status))
+        goto fail12;
+
+    RtlCopyMemory(&ContainerID,
+                  Result,
+                  sizeof (GUID));
+
+    ContainerID.Data3 &= 0x0FFF;     // Clear the version number
+    ContainerID.Data3 |= (5 << 12);  // Set version = (name-based SHA1) = 5
+    ContainerID.Data4[0] &= 0x3F;    // Clear the variant bits
+    ContainerID.Data4[0] |= 0x80;           
+
+    status = RtlStringFromGUID(&ContainerID, &Pdo->ContainerID);
+    if (!NT_SUCCESS(status))
+        goto fail13;
+
+    Info("%s %wZ\n",
+         __PdoGetName(Pdo),
+         &Pdo->ContainerID);
+
+    __PdoFree(Result);
+
+    BCryptDestroyHash(Hash);
+
+    __PdoFree(Object);
+
+    BCryptCloseAlgorithmProvider(Algorithm, 0);
+
+    return STATUS_SUCCESS;
+
+fail13:
+    Error("fail13\n");
+
+fail12:
+    Error("fail12\n");
+
+    __PdoFree(Result);
+
+fail11:
+    Error("fail11\n");
+
+fail10:
+    Error("fail10\n");
+
+fail9:
+    Error("fail9\n");
+
+fail8:
+    Error("fail8\n");
+
+fail7:
+    Error("fail7\n");
+
+fail6:
+    Error("fail6\n");
+
+    BCryptDestroyHash(Hash);
+
+fail5:
+    Error("fail5\n");
+
+    __PdoFree(Object);
+
+fail4:
+    Error("fail4\n");
+
+fail3:
+    Error("fail3\n");
+
+fail2:
+    Error("fail2\n");
+
+    BCryptCloseAlgorithmProvider(Algorithm, 0);
+
+fail1:
+    Error("fail1 (%08x)\n", status);
+
+    return status;
+}
+
+static FORCEINLINE NTSTATUS
+__PdoAddRevision(
+    IN  PXENVIF_PDO Pdo,
+    IN  ULONG       Number
+    )
+{
+    PULONG          Revision;
+    ULONG           Count;
+    NTSTATUS        status;
+
+    Trace("%d\n", Number);
+
+    Count = Pdo->Count + 1;
+    Revision = __PdoAllocate(sizeof (ULONG) * Count);
+
+    status = STATUS_NO_MEMORY;
+    if (Revision == NULL)
+        goto fail1;
+
+    if (Pdo->Revision != NULL) {
+        RtlCopyMemory(Revision, Pdo->Revision, sizeof (ULONG) * Count);
+        __PdoFree(Pdo->Revision);
+    }
+
+    Revision[Pdo->Count++] = Number;
+    Pdo->Revision = Revision;
+
+    return STATUS_SUCCESS;
+
+fail1:
+    Error("fail1 (%08x)\n", status);
+
+    return status;
+}
+
+static FORCEINLINE NTSTATUS
+__PdoSetRevisions(
     IN  PXENVIF_PDO Pdo
     )
 {
-    UNREFERENCED_PARAMETER(Pdo);
+    ULONG           Vif;
+    ULONG           Revision;
+    NTSTATUS        status;
 
-    return 0;
+    Revision = 0;
+
+    // Enumerate all possible combinations of exported interface versions since v1
+    // and add a PDO revsion for each combination that's currently supported.
+    // We must enumerate from v1 to ensure that revision numbers don't change
+    // even when a particular combination of interface versions becomes
+    // unsupported. (See README.md for API versioning policy).
+
+    for (Vif = 1; Vif <= XENVIF_VIF_INTERFACE_VERSION_MAX; Vif++) {
+        Revision++;
+
+        if (Vif >= XENVIF_VIF_INTERFACE_VERSION_MIN) {
+            status = __PdoAddRevision(Pdo, Revision);
+            if (!NT_SUCCESS(status))
+                goto fail1;
+        }
+    }                             
+
+    ASSERT(Pdo->Count > 0);
+    return STATUS_SUCCESS;
+
+fail1:
+    Error("fail1 (%08x)\n", status);
+
+    if (Pdo->Revision != NULL) {
+        __PdoFree(Pdo->Revision);
+        Pdo->Revision = NULL;
+    }
+
+    Pdo->Count = 0;
+
+    return status;
 }
 
 static FORCEINLINE PDEVICE_OBJECT
@@ -351,6 +611,14 @@ __PdoGetFdo(
     return Pdo->Fdo;
 }
 
+PXENVIF_FDO
+PdoGetFdo(
+    IN  PXENVIF_PDO Pdo
+    )
+{
+    return __PdoGetFdo(Pdo);
+}
+
 static FORCEINLINE PCHAR
 __PdoGetVendorName(
     IN  PXENVIF_PDO Pdo
@@ -375,120 +643,24 @@ PdoGetFrontend(
     return __PdoGetFrontend(Pdo);
 }
 
-static FORCEINLINE PXENBUS_EVTCHN_INTERFACE
-__PdoGetEvtchnInterface(
+static FORCEINLINE PXENVIF_VIF_CONTEXT
+__PdoGetVifContext(
     IN  PXENVIF_PDO Pdo
     )
 {
-    return FdoGetEvtchnInterface(__PdoGetFdo(Pdo));
+    return Pdo->VifContext;
 }
 
-PXENBUS_EVTCHN_INTERFACE
-PdoGetEvtchnInterface(
+PXENVIF_VIF_CONTEXT
+PdoGetVifContext(
     IN  PXENVIF_PDO Pdo
     )
 {
-    return __PdoGetEvtchnInterface(Pdo);
-}
-
-static FORCEINLINE PXENBUS_DEBUG_INTERFACE
-__PdoGetDebugInterface(
-    IN  PXENVIF_PDO Pdo
-    )
-{
-    return FdoGetDebugInterface(__PdoGetFdo(Pdo));
-}
-
-PXENBUS_DEBUG_INTERFACE
-PdoGetDebugInterface(
-    IN  PXENVIF_PDO Pdo
-    )
-{
-    return __PdoGetDebugInterface(Pdo);
-}
-
-static FORCEINLINE PXENBUS_GNTTAB_INTERFACE
-__PdoGetGnttabInterface(
-    IN  PXENVIF_PDO Pdo
-    )
-{
-    return FdoGetGnttabInterface(__PdoGetFdo(Pdo));
-}
-
-PXENBUS_GNTTAB_INTERFACE
-PdoGetGnttabInterface(
-    IN  PXENVIF_PDO Pdo
-    )
-{
-    return __PdoGetGnttabInterface(Pdo);
-}
-
-static FORCEINLINE PXENBUS_SUSPEND_INTERFACE
-__PdoGetSuspendInterface(
-    IN  PXENVIF_PDO Pdo
-    )
-{
-    return FdoGetSuspendInterface(__PdoGetFdo(Pdo));
-}
-
-PXENBUS_SUSPEND_INTERFACE
-PdoGetSuspendInterface(
-    IN  PXENVIF_PDO Pdo
-    )
-{
-    return __PdoGetSuspendInterface(Pdo);
-}
-
-static FORCEINLINE PXENBUS_STORE_INTERFACE
-__PdoGetStoreInterface(
-    IN  PXENVIF_PDO Pdo
-    )
-{
-    return FdoGetStoreInterface(__PdoGetFdo(Pdo));
-}
-
-PXENBUS_STORE_INTERFACE
-PdoGetStoreInterface(
-    IN  PXENVIF_PDO Pdo
-    )
-{
-    return __PdoGetStoreInterface(Pdo);
-}
-
-static FORCEINLINE PXENFILT_EMULATED_INTERFACE
-__PdoGetEmulatedInterface(
-    IN  PXENVIF_PDO Pdo
-    )
-{
-    return FdoGetEmulatedInterface(__PdoGetFdo(Pdo));
-}
-
-PXENFILT_EMULATED_INTERFACE
-PdoGetEmulatedInterface(
-    IN  PXENVIF_PDO Pdo
-    )
-{
-    return __PdoGetEmulatedInterface(Pdo);
-}
-
-static FORCEINLINE PXENVIF_VIF_INTERFACE
-__PdoGetVifInterface(
-    IN  PXENVIF_PDO Pdo
-    )
-{
-    return &Pdo->VifInterface;
-}
-
-PXENVIF_VIF_INTERFACE
-PdoGetVifInterface(
-    IN  PXENVIF_PDO Pdo
-    )
-{
-    return __PdoGetVifInterface(Pdo);
+    return __PdoGetVifContext(Pdo);
 }
 
 static FORCEINLINE NTSTATUS
-__PdoSetNetLuid(
+__PdoSetLuid(
     IN  PXENVIF_PDO Pdo
     )
 {
@@ -511,8 +683,8 @@ __PdoSetNetLuid(
     if (!NT_SUCCESS(status))
         goto fail3;
 
-    Pdo->NetLuid.Info.IfType = IfType;
-    Pdo->NetLuid.Info.NetLuidIndex = NetLuidIndex;
+    Pdo->Luid.Info.IfType = IfType;
+    Pdo->Luid.Info.NetLuidIndex = NetLuidIndex;
 
     RegistryCloseKey(Key);
 
@@ -533,23 +705,23 @@ fail1:
 }
 
 static FORCEINLINE PNET_LUID
-__PdoGetNetLuid(
+__PdoGetLuid(
     IN  PXENVIF_PDO Pdo
     )
 {
-    return &Pdo->NetLuid;
+    return &Pdo->Luid;
 }
 
 PNET_LUID
-PdoGetNetLuid(
+PdoGetLuid(
     IN  PXENVIF_PDO Pdo
     )
 {
-    return __PdoGetNetLuid(Pdo);
+    return __PdoGetLuid(Pdo);
 }
 
 static FORCEINLINE NTSTATUS
-__PdoParseMacAddress(
+__PdoParseAddress(
     IN  PCHAR               Buffer,
     OUT PETHERNET_ADDRESS   Address
     )
@@ -610,100 +782,57 @@ fail1:
 }
 
 static FORCEINLINE NTSTATUS
-__PdoSetPermanentMacAddress(
-    IN  PXENVIF_PDO             Pdo,
-    IN  PXENBUS_STORE_INTERFACE StoreInterface
+__PdoSetPermanentAddress(
+    IN  PXENVIF_PDO Pdo,
+    IN  PCHAR       Buffer
     )
 {
-    PCHAR                       Buffer;
-    HANDLE                      AddressesKey;
-    ANSI_STRING                 Ansi;
-    ULONG                       Index;
-    NTSTATUS                    status;
+    HANDLE          AddressesKey;
+    ANSI_STRING     Ansi;
+    ULONG           Index;
+    NTSTATUS        status;
 
-    STORE(Acquire, StoreInterface);
-
-    status = STORE(Read,
-                   StoreInterface,
-                   NULL,
-                   FrontendGetPath(__PdoGetFrontend(Pdo)),
-                   "mac",
-                   &Buffer);
+    status = __PdoParseAddress(Buffer, &Pdo->PermanentAddress);
     if (!NT_SUCCESS(status))
         goto fail1;
 
-    status = __PdoParseMacAddress(Buffer, &Pdo->PermanentMacAddress);
-    if (!NT_SUCCESS(status))
-        goto fail2;
-
-    status = STATUS_INVALID_PARAMETER;
-    if (Pdo->PermanentMacAddress.Byte[0] & 0x01)
-        goto fail3;
-
     AddressesKey = DriverGetAddressesKey();
-    ASSERT(AddressesKey != NULL);
 
     RtlInitAnsiString(&Ansi, Buffer);
+
     for (Index = 0; Index < Ansi.Length; Index++)
-        if (Ansi.Buffer[Index] == ':')
-            Ansi.Buffer[Index] = '-';
-    
+        Ansi.Buffer[Index] = (CHAR)toupper(Ansi.Buffer[Index]);
+
+    Info("%s %Z\n", __PdoGetName(Pdo), &Ansi);
+
     status = RegistryUpdateSzValue(AddressesKey,
                                    __PdoGetName(Pdo),
                                    REG_SZ,
                                    &Ansi);
     if (!NT_SUCCESS(status))
-        goto fail4;
-
-    STORE(Free,
-          StoreInterface,
-          Buffer);
-
-    STORE(Release, StoreInterface);
+        goto fail2;
 
     return STATUS_SUCCESS;
-
-fail4:
-    Error("fail4\n");
-
-    RtlZeroMemory(&Pdo->PermanentMacAddress, sizeof (ETHERNET_ADDRESS));
-
-fail3:
-    Error("fail3\n");
 
 fail2:
     Error("fail2\n");
 
-    STORE(Free,
-          StoreInterface,
-          Buffer);
-
 fail1:
     Error("fail1 (%08x)\n", status);
-
-    STORE(Release, StoreInterface);
 
     return status;
 }
 
-static FORCEINLINE PETHERNET_ADDRESS
-__PdoGetPermanentMacAddress(
-    IN  PXENVIF_PDO Pdo
-    )
-{
-    return &Pdo->PermanentMacAddress;
-}
-
 PETHERNET_ADDRESS
-PdoGetPermanentMacAddress(
+PdoGetPermanentAddress(
     IN  PXENVIF_PDO Pdo
     )
 {
-    return __PdoGetPermanentMacAddress(Pdo);
+    return &Pdo->PermanentAddress;
 }
 
 static FORCEINLINE NTSTATUS
-__PdoSetCurrentMacAddress(
+__PdoSetCurrentAddress(
     IN  PXENVIF_PDO Pdo
     )
 {
@@ -717,15 +846,15 @@ __PdoSetCurrentMacAddress(
     if (!NT_SUCCESS(status))
         goto fail1;
 
-    status = RegistryQuerySzValue(SoftwareKey, "NetworkAddress", &Ansi);
-    if (!NT_SUCCESS(status)) {
-        RtlCopyMemory(&Pdo->CurrentMacAddress,
-                      &Pdo->PermanentMacAddress,
-                      sizeof (ETHERNET_ADDRESS));
-        goto done;
-    }
+    RtlFillMemory(Pdo->CurrentAddress.Byte, ETHERNET_ADDRESS_LENGTH, 0xFF);
 
-    status = __PdoParseMacAddress(Ansi->Buffer, &Pdo->CurrentMacAddress);
+    status = RegistryQuerySzValue(SoftwareKey,
+                                  "NetworkAddress",
+                                  &Ansi);
+    if (!NT_SUCCESS(status))
+        goto done;
+
+    status = __PdoParseAddress(Ansi[0].Buffer, &Pdo->CurrentAddress);
     if (!NT_SUCCESS(status))
         goto fail2;
 
@@ -749,20 +878,12 @@ fail1:
     return status;
 }
 
-static FORCEINLINE PETHERNET_ADDRESS
-__PdoGetCurrentMacAddress(
-    IN  PXENVIF_PDO Pdo
-    )
-{
-    return &Pdo->CurrentMacAddress;
-}
-
 PETHERNET_ADDRESS
-PdoGetCurrentMacAddress(
+PdoGetCurrentAddress(
     IN  PXENVIF_PDO Pdo
     )
 {
-    return __PdoGetCurrentMacAddress(Pdo);
+    return &Pdo->CurrentAddress;
 }
 
 PDMA_ADAPTER
@@ -914,6 +1035,7 @@ PdoSuspendCallbackLate(
     ASSERT(NT_SUCCESS(status));
 }
 
+// This function must not touch pageable code or data
 static DECLSPEC_NOINLINE NTSTATUS
 PdoD3ToD0(
     IN  PXENVIF_PDO Pdo
@@ -925,43 +1047,47 @@ PdoD3ToD0(
     ASSERT3U(KeGetCurrentIrql(), ==, PASSIVE_LEVEL);
 
     KeRaiseIrql(DISPATCH_LEVEL, &Irql);
-    status = __PdoD3ToD0(Pdo);
-    KeLowerIrql(Irql);
 
+    status = XENBUS_SUSPEND(Acquire, &Pdo->SuspendInterface);
     if (!NT_SUCCESS(status))
         goto fail1;
 
-    Pdo->SuspendInterface = __PdoGetSuspendInterface(Pdo);
-
-    SUSPEND(Acquire, Pdo->SuspendInterface);
-
-    status = SUSPEND(Register,
-                     Pdo->SuspendInterface,
-                     SUSPEND_CALLBACK_LATE,
-                     PdoSuspendCallbackLate,
-                     Pdo,
-                     &Pdo->SuspendCallbackLate);
+    status = __PdoD3ToD0(Pdo);
     if (!NT_SUCCESS(status))
         goto fail2;
 
+    status = XENBUS_SUSPEND(Register,
+                            &Pdo->SuspendInterface,
+                            SUSPEND_CALLBACK_LATE,
+                            PdoSuspendCallbackLate,
+                            Pdo,
+                            &Pdo->SuspendCallbackLate);
+    if (!NT_SUCCESS(status))
+        goto fail3;
+
+    KeLowerIrql(Irql);
+
     return STATUS_SUCCESS;
+
+fail3:
+    Error("fail3\n");
+
+    __PdoD0ToD3(Pdo);
 
 fail2:
     Error("fail2\n");
 
-    SUSPEND(Release, Pdo->SuspendInterface);
-    Pdo->SuspendInterface = NULL;
-
-    KeRaiseIrql(DISPATCH_LEVEL, &Irql);
-    __PdoD0ToD3(Pdo);
-    KeLowerIrql(Irql);
+    XENBUS_SUSPEND(Release, &Pdo->SuspendInterface);
 
 fail1:
     Error("fail1 (%08x)\n", status);
 
+    KeLowerIrql(Irql);
+
     return status;
 }
 
+// This function must not touch pageable code or data
 static DECLSPEC_NOINLINE VOID
 PdoD0ToD3(
     IN  PXENVIF_PDO Pdo
@@ -971,19 +1097,21 @@ PdoD0ToD3(
 
     ASSERT3U(KeGetCurrentIrql(), ==, PASSIVE_LEVEL);
 
-    SUSPEND(Deregister,
-            Pdo->SuspendInterface,
-            Pdo->SuspendCallbackLate);
+    KeRaiseIrql(DISPATCH_LEVEL, &Irql);
+
+    XENBUS_SUSPEND(Deregister,
+                   &Pdo->SuspendInterface,
+                   Pdo->SuspendCallbackLate);
     Pdo->SuspendCallbackLate = NULL;
 
-    SUSPEND(Release, Pdo->SuspendInterface);
-    Pdo->SuspendInterface = NULL;
-
-    KeRaiseIrql(DISPATCH_LEVEL, &Irql);
     __PdoD0ToD3(Pdo);
+
+    XENBUS_SUSPEND(Release, &Pdo->SuspendInterface);
+
     KeLowerIrql(Irql);
 }
 
+// This function must not touch pageable code or data
 static DECLSPEC_NOINLINE VOID
 PdoS4ToS3(
     IN  PXENVIF_PDO Pdo
@@ -999,6 +1127,7 @@ PdoS4ToS3(
     Trace("(%s) <====\n", __PdoGetName(Pdo));
 }
 
+// This function must not touch pageable code or data
 static DECLSPEC_NOINLINE VOID
 PdoS3ToS4(
     IN  PXENVIF_PDO Pdo
@@ -1014,165 +1143,98 @@ PdoS3ToS4(
     Trace("(%s) <====\n", __PdoGetName(Pdo));
 }
 
-static FORCEINLINE VOID
-__PdoNotifyInstaller(
-    IN  PXENVIF_PDO Pdo
-    )
-{
-    HANDLE          ServiceKey;
-
-    UNREFERENCED_PARAMETER(Pdo);
-
-    ServiceKey = DriverGetServiceKey();
-
-    (VOID) RegistryUpdateDwordValue(ServiceKey, "NeedReboot", 1);
-}
-
-static FORCEINLINE NTSTATUS
-__PdoCheckForAlias(
-    IN  PXENVIF_PDO             Pdo
-    )
-{
-    HANDLE                      AliasesKey;
-    PANSI_STRING                Alias;
-    PCHAR                       DeviceID;
-    PCHAR                       InstanceID;
-    PXENFILT_EMULATED_INTERFACE EmulatedInterface;
-    NTSTATUS                    status;
-
-    EmulatedInterface = __PdoGetEmulatedInterface(Pdo);
-
-    status = STATUS_NOT_SUPPORTED;
-    if (EmulatedInterface == NULL) {
-        __PdoNotifyInstaller(Pdo);
-        goto fail1;
-    }
-
-    AliasesKey = DriverGetAliasesKey();
-    ASSERT(AliasesKey != NULL);
-
-    Alias = NULL;
-
-    status = RegistryQuerySzValue(AliasesKey,
-                                  __PdoGetName(Pdo),
-                                  &Alias);
-    if (!NT_SUCCESS(status)) {
-        if (status == STATUS_OBJECT_NAME_NOT_FOUND)
-            goto done;
-
-        goto fail2;
-    }
-
-    if (Alias->Length == 0)   // No alias
-        goto done;
-
-    DeviceID = strstr(Alias->Buffer, "Enum\\");
-    if (DeviceID == NULL)
-        goto fail3;
-
-    DeviceID += 5;
-
-    InstanceID = strrchr(DeviceID, '\\');
-    if (InstanceID == NULL)
-        goto fail4;
-
-    *(InstanceID++) = '\0';
-
-    Trace("DeviceID: %s\n", DeviceID);
-    Trace("InstanceID: %s\n", InstanceID);
-
-    EMULATED(Acquire, EmulatedInterface);
-
-    status = STATUS_OBJECTID_EXISTS;
-    if (EMULATED(IsDevicePresent,
-                 EmulatedInterface,
-                 DeviceID,
-                 InstanceID)) {
-        __PdoNotifyInstaller(Pdo);
-        goto fail5;
-    }
-
-    EMULATED(Release, EmulatedInterface);
-    
-done:
-    if (Alias != NULL)
-        RegistryFreeSzValue(Alias);
-
-    return STATUS_SUCCESS;
-
-fail5:
-    Error("fail5\n");
-
-    EMULATED(Release, EmulatedInterface);
-
-fail4:
-    Error("fail4\n");
-
-fail3:
-    Error("fail3\n");
-
-    RegistryFreeSzValue(Alias);
-
-fail2:
-    Error("fail2\n");
-
-fail1:
-    Error("fail1 (%08x)\n", status);
-
-    return status;
-}
-
 static DECLSPEC_NOINLINE NTSTATUS
 PdoStartDevice(
     IN  PXENVIF_PDO     Pdo,
     IN  PIRP            Irp
     )
 {
+    NTSTATUS            (*__GetIfTable2)(PMIB_IF_TABLE2 *);
+    VOID                (*__FreeMibTable)(PVOID);
+    PMIB_IF_TABLE2      Table;
+    ULONG               Index;
     PIO_STACK_LOCATION  StackLocation;
     NTSTATUS            status;
 
-    status = __PdoCheckForAlias(Pdo);
+    status = LinkGetRoutineAddress("netio.sys",
+                                   "GetIfTable2",
+                                   (PVOID *)&__GetIfTable2);
     if (!NT_SUCCESS(status))
         goto fail1;
 
-    status = __PdoSetCurrentMacAddress(Pdo);
+    status = LinkGetRoutineAddress("netio.sys",
+                                   "FreeMibTable",
+                                   (PVOID *)&__FreeMibTable);
     if (!NT_SUCCESS(status))
         goto fail2;
 
-    status = __PdoSetNetLuid(Pdo);
+    status = __GetIfTable2(&Table);
     if (!NT_SUCCESS(status))
         goto fail3;
 
-    StackLocation = IoGetCurrentIrpStackLocation(Irp);
+    for (Index = 0; Index < Table->NumEntries; Index++) {
+        PMIB_IF_ROW2    Row = &Table->Table[Index];
 
-    __PdoSetSystemPowerState(Pdo, PowerSystemHibernate);
-    PdoS4ToS3(Pdo);
-    __PdoSetSystemPowerState(Pdo, PowerSystemWorking);
+        if (!(Row->InterfaceAndOperStatusFlags.HardwareInterface) ||
+            !(Row->InterfaceAndOperStatusFlags.ConnectorPresent))
+            continue;
+
+        if (Row->OperStatus != IfOperStatusUp)
+            continue;
+
+        if (Row->PhysicalAddressLength != sizeof (ETHERNET_ADDRESS))
+            continue;
+
+        status = STATUS_UNSUCCESSFUL;
+        if (memcmp(Row->PhysicalAddress,
+                   &Pdo->PermanentAddress,
+                   sizeof (ETHERNET_ADDRESS)) == 0)
+            goto fail4;
+    }
+
+    status = __PdoSetCurrentAddress(Pdo);
+    if (!NT_SUCCESS(status))
+        goto fail5;
+
+    status = __PdoSetLuid(Pdo);
+    if (!NT_SUCCESS(status))
+        goto fail6;
+
+    StackLocation = IoGetCurrentIrpStackLocation(Irp);
 
     status = PdoD3ToD0(Pdo);
     if (!NT_SUCCESS(status))
-        goto fail4;
+        goto fail7;
 
     __PdoSetDevicePnpState(Pdo, Started);
 
     Irp->IoStatus.Status = STATUS_SUCCESS;
     IoCompleteRequest(Irp, IO_NO_INCREMENT);
 
+    __FreeMibTable(Table);
+
     return STATUS_SUCCESS;
+
+fail7:
+    Error("fail7\n");
+
+    RtlZeroMemory(&Pdo->Luid, sizeof (NET_LUID));
+
+fail6:
+    Error("fail6\n");
+
+    RtlZeroMemory(&Pdo->CurrentAddress, sizeof (ETHERNET_ADDRESS));
+
+fail5:
+    Error("fail5\n");
 
 fail4:
     Error("fail4\n");
 
-    __PdoSetSystemPowerState(Pdo, PowerSystemSleeping3);
-    PdoS3ToS4(Pdo);
-    __PdoSetSystemPowerState(Pdo, PowerSystemShutdown);
-
-    RtlZeroMemory(&Pdo->NetLuid, sizeof (NET_LUID));
+    __FreeMibTable(Table);
 
 fail3:
     Error("fail3\n");
-
-    RtlZeroMemory(&Pdo->CurrentMacAddress, sizeof (ETHERNET_ADDRESS));
 
 fail2:
     Error("fail2\n");
@@ -1231,13 +1293,9 @@ PdoStopDevice(
 
     PdoD0ToD3(Pdo);
 
-    __PdoSetSystemPowerState(Pdo, PowerSystemSleeping3);
-    PdoS3ToS4(Pdo);
-    __PdoSetSystemPowerState(Pdo, PowerSystemShutdown);
+    RtlZeroMemory(&Pdo->Luid, sizeof (NET_LUID));
 
-    RtlZeroMemory(&Pdo->NetLuid, sizeof (NET_LUID));
-
-    RtlZeroMemory(&Pdo->CurrentMacAddress, sizeof (ETHERNET_ADDRESS));
+    RtlZeroMemory(&Pdo->CurrentAddress, sizeof (ETHERNET_ADDRESS));
 
     __PdoSetDevicePnpState(Pdo, Stopped);
     status = STATUS_SUCCESS;
@@ -1320,14 +1378,10 @@ PdoRemoveDevice(
 
     PdoD0ToD3(Pdo);
 
-    __PdoSetSystemPowerState(Pdo, PowerSystemSleeping3);
-    PdoS3ToS4(Pdo);
-    __PdoSetSystemPowerState(Pdo, PowerSystemShutdown);
-
 done:
-    RtlZeroMemory(&Pdo->NetLuid, sizeof (NET_LUID));
+    RtlZeroMemory(&Pdo->Luid, sizeof (NET_LUID));
 
-    RtlZeroMemory(&Pdo->CurrentMacAddress, sizeof (ETHERNET_ADDRESS));
+    RtlZeroMemory(&Pdo->CurrentAddress, sizeof (ETHERNET_ADDRESS));
 
     NeedInvalidate = FALSE;
 
@@ -1409,6 +1463,42 @@ __PdoDelegateIrp(
 }
 
 static NTSTATUS
+PdoQueryBusInterface(
+    IN  PXENVIF_PDO         Pdo,
+    IN  PIRP                Irp
+    )
+{
+    PIO_STACK_LOCATION      StackLocation;
+    USHORT                  Size;
+    USHORT                  Version;
+    PBUS_INTERFACE_STANDARD BusInterface;
+    NTSTATUS                status;
+
+    status = Irp->IoStatus.Status;        
+
+    StackLocation = IoGetCurrentIrpStackLocation(Irp);
+    Size = StackLocation->Parameters.QueryInterface.Size;
+    Version = StackLocation->Parameters.QueryInterface.Version;
+    BusInterface = (PBUS_INTERFACE_STANDARD)StackLocation->Parameters.QueryInterface.Interface;
+
+    if (Version != 1)
+        goto done;
+
+    status = STATUS_BUFFER_TOO_SMALL;        
+    if (Size < sizeof (BUS_INTERFACE_STANDARD))
+        goto done;
+
+    *BusInterface = Pdo->BusInterface;
+    BusInterface->InterfaceReference(BusInterface->Context);
+
+    Irp->IoStatus.Information = 0;
+    status = STATUS_SUCCESS;
+
+done:
+    return status;
+}
+
+static NTSTATUS
 PdoQueryVifInterface(
     IN  PXENVIF_PDO         Pdo,
     IN  PIRP                Irp
@@ -1418,6 +1508,7 @@ PdoQueryVifInterface(
     USHORT                  Size;
     USHORT                  Version;
     PINTERFACE              Interface;
+    PVOID                   Context;
     NTSTATUS                status;
 
     status = Irp->IoStatus.Status;        
@@ -1427,18 +1518,14 @@ PdoQueryVifInterface(
     Version = StackLocation->Parameters.QueryInterface.Version;
     Interface = StackLocation->Parameters.QueryInterface.Interface;
 
-    if (StackLocation->Parameters.QueryInterface.Version != VIF_INTERFACE_VERSION)
-        goto done;
+    Context = __PdoGetVifContext(Pdo);
 
-    status = STATUS_BUFFER_TOO_SMALL;        
-    if (StackLocation->Parameters.QueryInterface.Size < sizeof (INTERFACE))
+    status = VifGetInterface(Context,
+                             Version,
+                             Interface,
+                             Size);
+    if (!NT_SUCCESS(status))
         goto done;
-
-    Interface->Size = sizeof (INTERFACE);
-    Interface->Version = VIF_INTERFACE_VERSION;
-    Interface->Context = __PdoGetVifInterface(Pdo);
-    Interface->InterfaceReference = NULL;
-    Interface->InterfaceDereference = NULL;
 
     Irp->IoStatus.Information = 0;
     status = STATUS_SUCCESS;
@@ -1450,14 +1537,12 @@ done:
 struct _INTERFACE_ENTRY {
     const GUID  *Guid;
     const CHAR  *Name;
-    NTSTATUS    (*Handler)(PXENVIF_PDO, PIRP);
+    NTSTATUS    (*Query)(PXENVIF_PDO, PIRP);
 };
 
-#define DEFINE_HANDLER(_Guid, _Function)    \
-        { &GUID_ ## _Guid, #_Guid, (_Function) }
-
 struct _INTERFACE_ENTRY PdoInterfaceTable[] = {
-    DEFINE_HANDLER(VIF_INTERFACE, PdoQueryVifInterface),
+    { &GUID_BUS_INTERFACE_STANDARD, "BUS_INTERFACE", PdoQueryBusInterface },
+    { &GUID_XENVIF_VIF_INTERFACE, "VIF_INTERFACE", PdoQueryVifInterface },
     { NULL, NULL, NULL }
 };
 
@@ -1470,6 +1555,7 @@ PdoQueryInterface(
     PIO_STACK_LOCATION      StackLocation;
     const GUID              *InterfaceType;
     struct _INTERFACE_ENTRY *Entry;
+    USHORT                  Version;
     NTSTATUS                status;
 
     status = Irp->IoStatus.Status;        
@@ -1479,13 +1565,15 @@ PdoQueryInterface(
 
     StackLocation = IoGetCurrentIrpStackLocation(Irp);
     InterfaceType = StackLocation->Parameters.QueryInterface.InterfaceType;
+    Version = StackLocation->Parameters.QueryInterface.Version;
 
     for (Entry = PdoInterfaceTable; Entry->Guid != NULL; Entry++) {
         if (IsEqualGUID(InterfaceType, Entry->Guid)) {
-            Trace("%s: %s\n",
-                  __PdoGetName(Pdo),
-                  Entry->Name);
-            status = Entry->Handler(Pdo, Irp);
+            Info("%s: %s (VERSION %d)\n",
+                 __PdoGetName(Pdo),
+                 Entry->Name,
+                 Version);
+            status = Entry->Query(Pdo, Irp);
             goto done;
         }
     }
@@ -1699,22 +1787,29 @@ PdoQueryId(
     switch (StackLocation->Parameters.QueryId.IdType) {
     case BusQueryInstanceID:
         Trace("BusQueryInstanceID\n");
+        Id.MaximumLength = (USHORT)(strlen(__PdoGetName(Pdo)) + 1) * sizeof (WCHAR);
         break;
 
     case BusQueryDeviceID:
         Trace("BusQueryDeviceID\n");
+        Id.MaximumLength = (MAX_DEVICE_ID_LEN - 2) * sizeof (WCHAR);
         break;
 
     case BusQueryHardwareIDs:
         Trace("BusQueryHardwareIDs\n");
+        Id.MaximumLength = (USHORT)(MAX_DEVICE_ID_LEN * Pdo->Count) * sizeof (WCHAR);
         break;
 
     case BusQueryCompatibleIDs:
         Trace("BusQueryCompatibleIDs\n");
+        Id.MaximumLength = (USHORT)(MAX_DEVICE_ID_LEN * Pdo->Count) * sizeof (WCHAR);
+        break;
+
         break;
 
     case BusQueryContainerID:
         Trace("BusQueryContainerID\n");
+        Id.MaximumLength = MAX_GUID_STRING_LEN * sizeof (WCHAR);
         break;
 
     default:
@@ -1723,25 +1818,23 @@ PdoQueryId(
         goto done;
     }
 
-    Buffer = ExAllocatePoolWithTag(PagedPool, MAX_DEVICE_ID_LEN, 'FIV');
+    Buffer = ExAllocatePoolWithTag(PagedPool, Id.MaximumLength, 'FIV');
 
     status = STATUS_NO_MEMORY;
     if (Buffer == NULL)
         goto done;
 
-    RtlZeroMemory(Buffer, MAX_DEVICE_ID_LEN);
+    RtlZeroMemory(Buffer, Id.MaximumLength);
 
     Id.Buffer = Buffer;
-    Id.MaximumLength = MAX_DEVICE_ID_LEN - 1;
     Id.Length = 0;
 
     switch (StackLocation->Parameters.QueryId.IdType) {
     case BusQueryInstanceID:
-    case BusQueryContainerID:
         Type = REG_SZ;
 
         status = RtlStringCbPrintfW(Buffer,
-                                    MAX_DEVICE_ID_LEN - 1,
+                                    Id.MaximumLength,
                                     L"%hs",
                                     __PdoGetName(Pdo));
         ASSERT(NT_SUCCESS(status));
@@ -1750,38 +1843,56 @@ PdoQueryId(
 
         break;
 
-    case BusQueryDeviceID:
+    case BusQueryContainerID:
         Type = REG_SZ;
 
-        status = RtlStringCbPrintfW(Buffer,
-                                    MAX_DEVICE_ID_LEN,
-                                    L"XENVIF\\VEN_%hs&DEV_NET&REV_%08X",
-                                    __PdoGetVendorName(Pdo),
-                                    __PdoGetRevision(Pdo));
+        status = RtlAppendUnicodeStringToString(&Id, &Pdo->ContainerID);
         ASSERT(NT_SUCCESS(status));
 
         Buffer += wcslen(Buffer);
 
         break;
 
-    case BusQueryHardwareIDs:
-    case BusQueryCompatibleIDs: {
-        ULONG   Length;
+    case BusQueryDeviceID: {
+        ULONG   Index;
 
-        Type = REG_MULTI_SZ;
+        Type = REG_SZ;
+        Index = Pdo->Count - 1;
 
-        Length = MAX_DEVICE_ID_LEN;
         status = RtlStringCbPrintfW(Buffer,
-                                    MAX_DEVICE_ID_LEN,
+                                    Id.MaximumLength,
                                     L"XENVIF\\VEN_%hs&DEV_NET&REV_%08X",
                                     __PdoGetVendorName(Pdo),
-                                    __PdoGetRevision(Pdo));
+                                    Pdo->Revision[Index]);
         ASSERT(NT_SUCCESS(status));
 
         Buffer += wcslen(Buffer);
-        Buffer++;
 
-        Length = MAX_DEVICE_ID_LEN - (ULONG)((ULONG_PTR)Buffer - (ULONG_PTR)Id.Buffer); 
+        break;
+    }
+    case BusQueryHardwareIDs:
+    case BusQueryCompatibleIDs: {
+        ULONG   Index;
+        ULONG   Length;
+
+        Type = REG_MULTI_SZ;
+        Length = Id.MaximumLength;
+
+        for (Index = 0; Index < Pdo->Count; Index++) {
+            status = RtlStringCbPrintfW(Buffer,
+                                        Length,
+                                        L"XENVIF\\VEN_%hs&DEV_NET&REV_%08X",
+                                        __PdoGetVendorName(Pdo),
+                                        Pdo->Revision[Index]);
+            ASSERT(NT_SUCCESS(status));
+
+            Buffer += wcslen(Buffer);
+            Length -= (ULONG)(wcslen(Buffer) * sizeof (WCHAR));
+
+            Buffer++;
+            Length -= sizeof (WCHAR);
+        }
+
         status = RtlStringCbPrintfW(Buffer,
                                     Length,
                                     L"XENDEVICE");
@@ -2375,12 +2486,14 @@ PdoSuspend(
 NTSTATUS
 PdoCreate(
     IN  PXENVIF_FDO     Fdo,
-    IN  PANSI_STRING    Name
+    IN  ULONG           Number,
+    IN  PCHAR           Address
     )
 {
     PDEVICE_OBJECT      PhysicalDeviceObject;
     PXENVIF_DX          Dx;
     PXENVIF_PDO         Pdo;
+    ULONG               Index;
     NTSTATUS            status;
 
 #pragma prefast(suppress:28197) // Possibly leaking memory 'PhysicalDeviceObject'
@@ -2400,7 +2513,7 @@ PdoCreate(
     Dx->Type = PHYSICAL_DEVICE_OBJECT;
     Dx->DeviceObject = PhysicalDeviceObject;
     Dx->DevicePnpState = Present;
-    Dx->SystemPowerState = PowerSystemShutdown;
+    Dx->SystemPowerState = PowerSystemWorking;
     Dx->DevicePowerState = PowerDeviceD3;
 
     Pdo = __PdoAllocate(sizeof (XENVIF_PDO));
@@ -2409,8 +2522,8 @@ PdoCreate(
     if (Pdo == NULL)
         goto fail2;
 
-    Pdo->Fdo = Fdo;
     Pdo->Dx = Dx;
+    Pdo->Fdo = Fdo;
 
     status = ThreadCreate(PdoSystemPower, Pdo, &Pdo->SystemPowerThread);
     if (!NT_SUCCESS(status))
@@ -2420,27 +2533,40 @@ PdoCreate(
     if (!NT_SUCCESS(status))
         goto fail4;
 
-    __PdoSetName(Pdo, Name);
+    __PdoSetName(Pdo, Number);
 
-    status = BusInitialize(Pdo, &Pdo->BusInterface);
+    status = __PdoSetPermanentAddress(Pdo, Address);
     if (!NT_SUCCESS(status))
         goto fail5;
 
-    status = FrontendInitialize(Pdo, &Pdo->Frontend);
+    status = __PdoSetContainerID(Pdo);
     if (!NT_SUCCESS(status))
         goto fail6;
 
-    status = __PdoSetPermanentMacAddress(Pdo, FdoGetStoreInterface(Fdo));
+    status = __PdoSetRevisions(Pdo);
     if (!NT_SUCCESS(status))
         goto fail7;
 
-    status = VifInitialize(Pdo, &Pdo->VifInterface);
+    status = BusInitialize(Pdo, &Pdo->BusInterface);
     if (!NT_SUCCESS(status))
         goto fail8;
 
-    Info("%p (%s)\n",
-         PhysicalDeviceObject,
-         __PdoGetName(Pdo));
+    status = VifInitialize(Pdo, &Pdo->VifContext);
+    if (!NT_SUCCESS(status))
+        goto fail9;
+
+    status = FrontendInitialize(Pdo, &Pdo->Frontend);
+    if (!NT_SUCCESS(status))
+        goto fail10;
+
+    FdoGetSuspendInterface(Fdo,&Pdo->SuspendInterface);
+
+    for (Index = 0; Index < Pdo->Count; Index++) {
+        Info("%p (%s %08X)\n",
+             PhysicalDeviceObject,
+             __PdoGetName(Pdo),
+             Pdo->Revision[Index]);
+    }
 
     Dx->Pdo = Pdo;
     PhysicalDeviceObject->Flags &= ~DO_DEVICE_INITIALIZING;
@@ -2451,22 +2577,34 @@ PdoCreate(
 
     return STATUS_SUCCESS;
 
+fail10:
+    Error("fail10\n");
+
+    VifTeardown(Pdo->VifContext);
+    Pdo->VifContext = NULL;    
+
+fail9:
+    Error("fail9\n");
+
+    BusTeardown(&Pdo->BusInterface);
+
 fail8:
     Error("fail8\n");
 
-    RtlZeroMemory(&Pdo->PermanentMacAddress, sizeof (ETHERNET_ADDRESS));
+    __PdoFree(Pdo->Revision);
+    Pdo->Revision = NULL;
+    Pdo->Count = 0;
 
 fail7:
     Error("fail7\n");
 
-    FrontendTeardown(Pdo->Frontend);
-    Pdo->Frontend = NULL;    
-
+    RtlFreeUnicodeString(&Pdo->ContainerID);
+    RtlZeroMemory(&Pdo->ContainerID, sizeof (UNICODE_STRING));
 
 fail6:
     Error("fail6\n");
 
-    BusTeardown(&Pdo->BusInterface);
+    RtlZeroMemory(&Pdo->PermanentAddress, sizeof (ETHERNET_ADDRESS));
 
 fail5:
     Error("fail5\n");
@@ -2485,8 +2623,8 @@ fail4:
 fail3:
     Error("fail3\n");
 
-    Pdo->Dx = NULL;
     Pdo->Fdo = NULL;
+    Pdo->Dx = NULL;
 
     ASSERT(IsZeroMemory(Pdo, sizeof (XENVIF_PDO)));
     __PdoFree(Pdo);
@@ -2507,9 +2645,9 @@ PdoDestroy(
     IN  PXENVIF_PDO Pdo
     )
 {
-    PXENVIF_FDO     Fdo = Pdo->Fdo;
     PXENVIF_DX      Dx = Pdo->Dx;
     PDEVICE_OBJECT  PhysicalDeviceObject = Dx->DeviceObject;
+    PXENVIF_FDO     Fdo = __PdoGetFdo(Pdo);
 
     ASSERT3U(__PdoGetDevicePnpState(Pdo), ==, Deleted);
 
@@ -2527,14 +2665,25 @@ PdoDestroy(
 
     Dx->Pdo = NULL;
 
-    VifTeardown(__PdoGetVifInterface(Pdo));
+    RtlZeroMemory(&Pdo->SuspendInterface,
+                  sizeof (XENBUS_SUSPEND_INTERFACE));
 
-    RtlZeroMemory(&Pdo->PermanentMacAddress, sizeof (ETHERNET_ADDRESS));
-
+    VifTeardown(Pdo->VifContext);
+    Pdo->VifContext = NULL;
+    
     FrontendTeardown(__PdoGetFrontend(Pdo));
     Pdo->Frontend = NULL;    
 
     BusTeardown(&Pdo->BusInterface);
+
+    __PdoFree(Pdo->Revision);
+    Pdo->Revision = NULL;
+    Pdo->Count = 0;
+
+    RtlFreeUnicodeString(&Pdo->ContainerID);
+    RtlZeroMemory(&Pdo->ContainerID, sizeof (UNICODE_STRING));
+
+    RtlZeroMemory(&Pdo->PermanentAddress, sizeof (ETHERNET_ADDRESS));
 
     ThreadAlert(Pdo->DevicePowerThread);
     ThreadJoin(Pdo->DevicePowerThread);
@@ -2544,13 +2693,11 @@ PdoDestroy(
     ThreadJoin(Pdo->SystemPowerThread);
     Pdo->SystemPowerThread = NULL;
 
-    Pdo->Dx = NULL;
     Pdo->Fdo = NULL;
+    Pdo->Dx = NULL;
 
     ASSERT(IsZeroMemory(Pdo, sizeof (XENVIF_PDO)));
     __PdoFree(Pdo);
 
     IoDeleteDevice(PhysicalDeviceObject);
 }
-
-

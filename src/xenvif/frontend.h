@@ -33,9 +33,12 @@
 #define _XENVIF_FRONTEND_H
 
 #include <ntddk.h>
-#include <evtchn_interface.h>
 #include <debug_interface.h>
+#include <suspend_interface.h>
+#include <evtchn_interface.h>
 #include <store_interface.h>
+#include <range_set_interface.h>
+#include <cache_interface.h>
 #include <gnttab_interface.h>
 #include <vif_interface.h>
 
@@ -84,13 +87,8 @@ FrontendSuspend(
     IN  PXENVIF_FRONTEND    Frontend
     );
 
-extern PETHERNET_ADDRESS
-FrontendGetPermanentMacAddress(
-    IN  PXENVIF_FRONTEND    Frontend
-    );
-
-extern PETHERNET_ADDRESS
-FrontendGetCurrentMacAddress(
+extern PXENVIF_PDO
+FrontendGetPdo(
     IN  PXENVIF_FRONTEND    Frontend
     );
 
@@ -149,39 +147,18 @@ FrontendGetTransmitter(
     IN  PXENVIF_FRONTEND    Frontend
     );
 
-extern PXENBUS_EVTCHN_INTERFACE
-FrontendGetEvtchnInterface(
-    IN  PXENVIF_FRONTEND    Frontend
+extern VOID
+FrontendQueryStatistic(
+    IN  PXENVIF_FRONTEND        Frontend,
+    IN  XENVIF_VIF_STATISTIC    Index,
+    OUT PULONGLONG              Value
     );
 
-extern PXENBUS_DEBUG_INTERFACE
-FrontendGetDebugInterface(
-    IN  PXENVIF_FRONTEND    Frontend
-    );
-
-extern PXENBUS_SUSPEND_INTERFACE
-FrontendGetSuspendInterface(
-    IN  PXENVIF_FRONTEND    Frontend
-    );
-
-extern PXENBUS_STORE_INTERFACE
-FrontendGetStoreInterface(
-    IN  PXENVIF_FRONTEND    Frontend
-    );
-
-extern PXENBUS_GNTTAB_INTERFACE
-FrontendGetGnttabInterface(
-    IN  PXENVIF_FRONTEND    Frontend
-    );
-
-extern PXENVIF_VIF_INTERFACE
-FrontendGetVifInterface(
-    IN  PXENVIF_FRONTEND    Frontend
-    );
-
-extern PCHAR
-FrontendGetAddress(
-    IN  PXENVIF_FRONTEND    Frontend
+extern VOID
+FrontendIncrementStatistic(
+    IN  PXENVIF_FRONTEND        Frontend,
+    IN  XENVIF_VIF_STATISTIC    Index,
+    IN  ULONGLONG               Delta
     );
 
 #endif  // _XENVIF_FRONTEND_H

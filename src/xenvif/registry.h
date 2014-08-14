@@ -45,6 +45,14 @@ RegistryTeardown(
     );
 
 extern NTSTATUS
+RegistryOpenKey(
+    IN  HANDLE          Parent,
+    IN  PUNICODE_STRING Path,
+    IN  ACCESS_MASK     DesiredAccess,
+    OUT PHANDLE         Key
+    );
+
+extern NTSTATUS
 RegistryOpenServiceKey(
     IN  ACCESS_MASK DesiredAccess,
     OUT PHANDLE     Key
@@ -94,16 +102,16 @@ RegistryEnumerateSubKeys(
     );
 
 extern NTSTATUS
-RegistryDeleteValue(
-    IN  HANDLE      Key,
-    IN  PCHAR       Name
-    );
-
-extern NTSTATUS
 RegistryEnumerateValues(
     IN  HANDLE      Key,
     IN  NTSTATUS    (*Callback)(PVOID, HANDLE, PCHAR),
     IN  PVOID       Context
+    );
+
+extern NTSTATUS
+RegistryDeleteValue(
+    IN  HANDLE      Key,
+    IN  PCHAR       Name
     );
 
 extern NTSTATUS
@@ -125,6 +133,12 @@ RegistryQuerySzValue(
     IN  HANDLE          Key,
     IN  PCHAR           Name,
     OUT PANSI_STRING    *Array
+    );
+
+extern NTSTATUS
+RegistryQueryKeyName(
+    IN  HANDLE              Key,
+    OUT PANSI_STRING        *Array
     );
 
 extern NTSTATUS

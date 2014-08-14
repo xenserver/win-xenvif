@@ -42,32 +42,28 @@
 #include "dbg_print.h"
 #include "assert.h"
 
-#define VIF_POOL   ' FIV'
-
-typedef struct _VIF_CALLBACK {
-    VOID    (*Function)(PVOID, XENVIF_CALLBACK_TYPE, ...);
-    PVOID   Argument;
-} VIF_CALLBACK, *PVIF_CALLBACK;
-
 struct _XENVIF_VIF_CONTEXT {
-    LONG                        References;
-    XENVIF_MRSW_LOCK            Lock;
     PXENVIF_PDO                 Pdo;
-    BOOLEAN                     Enabled;
-    PXENVIF_THREAD              MonitorThread;
-    KEVENT                      MonitorEvent;
-    VIF_CALLBACK                Callback;
-
-    PXENBUS_SUSPEND_INTERFACE   SuspendInterface;
+    XENVIF_MRSW_LOCK            Lock;
+    LONG                        References;
+    PXENVIF_FRONTEND            Frontend;
+    BOOLEAN                     Enabled;    
+    XENVIF_VIF_CALLBACK         Callback;
+    PVOID                       Argument;
+    PXENVIF_THREAD              MacThread;
+    KEVENT                      MacEvent;
+    XENBUS_SUSPEND_INTERFACE    SuspendInterface;
     PXENBUS_SUSPEND_CALLBACK    SuspendCallbackLate;
 };
+
+#define XENVIF_VIF_TAG  'FIV'
 
 static FORCEINLINE PVOID
 __VifAllocate(
     IN  ULONG   Length
     )
 {
-    return __AllocateNonPagedPoolWithTag(Length, VIF_POOL);
+    return __AllocateNonPagedPoolWithTag(Length, XENVIF_VIF_TAG);
 }
 
 static FORCEINLINE VOID
@@ -75,151 +71,58 @@ __VifFree(
     IN  PVOID   Buffer
     )
 {
-    __FreePoolWithTag(Buffer, VIF_POOL);
+    __FreePoolWithTag(Buffer, XENVIF_VIF_TAG);
 }
-
-VOID
-VifCompletePackets(
-    IN  PXENVIF_VIF_INTERFACE       Interface,
-    IN  PXENVIF_TRANSMITTER_PACKET  HeadPacket
-    )
-{
-    PXENVIF_VIF_CONTEXT             Context = Interface->Context;
-    PVIF_CALLBACK                   Callback = &Context->Callback;
-
-    ASSERT(Callback != NULL);
-
-    Callback->Function(Callback->Argument,
-                       XENVIF_CALLBACK_COMPLETE_PACKETS,
-                       HeadPacket);
-}
-
-VOID
-VifReceivePackets(
-    IN  PXENVIF_VIF_INTERFACE   Interface,
-    IN  PLIST_ENTRY             List
-    )
-{
-    PXENVIF_VIF_CONTEXT         Context = Interface->Context;
-    PVIF_CALLBACK               Callback = &Context->Callback;
-
-    ASSERT(Callback != NULL);
-
-    Callback->Function(Callback->Argument,
-                       XENVIF_CALLBACK_RECEIVE_PACKETS,
-                       List);
-}
-
-enum {
-    THREAD_EVENT = 0,
-    MAC_EVENT,
-    EVENT_COUNT
-};
-
-C_ASSERT(EVENT_COUNT <= THREAD_WAIT_OBJECTS);
-
-#define STATUS_MASK ((1 << 6) - 1)
 
 static NTSTATUS
-VifMonitor(
+VifMac(
     IN  PXENVIF_THREAD  Self,
     IN  PVOID           _Context
     )
 {
     PXENVIF_VIF_CONTEXT Context = _Context;
-    PXENVIF_FRONTEND    Frontend = PdoGetFrontend(Context->Pdo);
-    PKEVENT             Event[EVENT_COUNT];
+    PKEVENT             Event;
 
     Trace("====>\n");
 
-    Event[THREAD_EVENT] = ThreadGetEvent(Self);
-    Event[MAC_EVENT] = MacGetEvent(FrontendGetMac(Frontend));
+    Event = ThreadGetEvent(Self);
 
     for (;;) {
-        NTSTATUS    status;
-
         Trace("waiting...\n");
 
-        status = KeWaitForMultipleObjects(EVENT_COUNT,
-                                          Event,
-                                          WaitAny,
-                                          Executive,
-                                          KernelMode,
-                                          FALSE,
-                                          NULL,
-                                          NULL);
+        (VOID) KeWaitForSingleObject(Event,
+                                     Executive,
+                                     KernelMode,
+                                     FALSE,
+                                     NULL);
+        KeClearEvent(Event);
 
         Trace("awake\n");
 
-        if (status >= STATUS_WAIT_0 &&
-            status < STATUS_WAIT_0 + EVENT_COUNT) {
-            switch (status & STATUS_MASK) {
-            case MAC_EVENT: {
-                KeClearEvent(Event[MAC_EVENT]);
+        if (ThreadIsAlerted(Self))
+            break;
+        
+        if (Context->Enabled)
+            Context->Callback(Context->Argument,
+                              XENVIF_MAC_STATE_CHANGE);
 
-                Trace("MAC_EVENT\n");
-
-                if (Context->Enabled) {
-                    PVIF_CALLBACK   Callback = &Context->Callback;
-
-                    Callback->Function(Callback->Argument,
-                                       XENVIF_CALLBACK_MEDIA_STATE_CHANGE);
-                }
-
-                break;
-            }
-            case THREAD_EVENT:
-                KeClearEvent(Event[THREAD_EVENT]);
-
-                Trace("THREAD_EVENT\n");
-
-                if (ThreadIsAlerted(Self))
-                    goto done;
-
-                KeSetEvent(&Context->MonitorEvent, IO_NO_INCREMENT, FALSE);
-                break;
-
-            default:
-                ASSERT(FALSE);
-                break;
-            }
-        }
+        KeSetEvent(&Context->MacEvent, IO_NO_INCREMENT, FALSE);
     }
-
-done:
-    KeSetEvent(&Context->MonitorEvent, IO_NO_INCREMENT, FALSE);
 
     Trace("<====\n");
 
     return STATUS_SUCCESS;
 }
 
-static DECLSPEC_NOINLINE VOID
-VifSuspendCallbackLate(
-    IN  PVOID           Argument
-    )
-{
-    PXENVIF_VIF_CONTEXT Context = Argument;
-    PXENVIF_FRONTEND    Frontend = PdoGetFrontend(Context->Pdo);
-    NTSTATUS            status;
-
-    status = FrontendSetState(Frontend, FRONTEND_ENABLED);
-    ASSERT(NT_SUCCESS(status));
-
-    TransmitterAdvertizeAddresses(FrontendGetTransmitter(Frontend));
-}
-
 static NTSTATUS
 VifEnable(
-    IN  PXENVIF_VIF_CONTEXT Context,
-    IN  VOID                (*Function)(PVOID, XENVIF_CALLBACK_TYPE, ...),
+    IN  PINTERFACE          Interface,
+    IN  XENVIF_VIF_CALLBACK Callback,
     IN  PVOID               Argument
     )
 {
-    PXENVIF_FRONTEND        Frontend = PdoGetFrontend(Context->Pdo);
+    PXENVIF_VIF_CONTEXT     Context = Interface->Context;
     KIRQL                   Irql;
-    PVIF_CALLBACK           Callback;
-    PKEVENT                 Event;
     NTSTATUS                status;
 
     Trace("====>\n");
@@ -229,31 +132,16 @@ VifEnable(
     if (Context->Enabled)
         goto done;
 
-    Callback = &Context->Callback;
-    Callback->Function = Function;
-    Callback->Argument = Argument;
-
-    status = FrontendSetState(Frontend, FRONTEND_ENABLED);
-    if (!NT_SUCCESS(status))
-        goto fail1;
-
-    Context->SuspendInterface = FrontendGetSuspendInterface(Frontend);
-
-    SUSPEND(Acquire, Context->SuspendInterface);
-
-    status = SUSPEND(Register,
-                     Context->SuspendInterface,
-                     SUSPEND_CALLBACK_LATE,
-                     VifSuspendCallbackLate,
-                     Context,
-                     &Context->SuspendCallbackLate);
-    if (!NT_SUCCESS(status))
-        goto fail2;
+    Context->Callback = Callback;
+    Context->Argument = Argument;
 
     Context->Enabled = TRUE;
 
-    Event = MacGetEvent(FrontendGetMac(Frontend));
-    KeSetEvent(Event, IO_NO_INCREMENT, FALSE);
+    KeMemoryBarrier();
+
+    status = FrontendSetState(Context->Frontend, FRONTEND_ENABLED);
+    if (!NT_SUCCESS(status))
+        goto fail1;
 
 done:
     ReleaseMrswLockExclusive(&Context->Lock, Irql, FALSE);
@@ -262,16 +150,11 @@ done:
 
     return STATUS_SUCCESS;
 
-fail2:
-    Error("fail2\n");
-
-    SUSPEND(Release, Context->SuspendInterface);
-    Context->SuspendInterface = NULL;
-
 fail1:
     Error("fail1 (%08x)\n", status);
 
-    RtlZeroMemory(&Context->Callback, sizeof (VIF_CALLBACK));
+    Context->Argument = NULL;
+    Context->Callback = NULL;
 
     ReleaseMrswLockExclusive(&Context->Lock, Irql, FALSE);
 
@@ -280,12 +163,11 @@ fail1:
 
 static VOID
 VifDisable(
-    IN  PXENVIF_VIF_CONTEXT Context
+    IN  PINTERFACE      Interface
     )
 {
-    PXENVIF_FRONTEND        Frontend = PdoGetFrontend(Context->Pdo);
-    KIRQL                   Irql;
-    PKEVENT                 Event;
+    PXENVIF_VIF_CONTEXT Context = Interface->Context;
+    KIRQL               Irql;
 
     Trace("====>\n");
 
@@ -298,36 +180,30 @@ VifDisable(
 
     Context->Enabled = FALSE;
 
-    Event = MacGetEvent(FrontendGetMac(Frontend));
-    KeSetEvent(Event, IO_NO_INCREMENT, FALSE);
+    KeMemoryBarrier();
 
-    SUSPEND(Deregister,
-            Context->SuspendInterface,
-            Context->SuspendCallbackLate);
-    Context->SuspendCallbackLate = NULL;
-
-    SUSPEND(Release, Context->SuspendInterface);
-    Context->SuspendInterface = NULL;
-
-    (VOID) FrontendSetState(Frontend, FRONTEND_CONNECTED);
+    (VOID) FrontendSetState(Context->Frontend, FRONTEND_CONNECTED);
 
     ReleaseMrswLockExclusive(&Context->Lock, Irql, TRUE);
 
-    ReceiverWaitForPackets(FrontendGetReceiver(Frontend));
-    TransmitterAbortPackets(FrontendGetTransmitter(Frontend));
+    ReceiverWaitForPackets(FrontendGetReceiver(Context->Frontend));
+    TransmitterAbortPackets(FrontendGetTransmitter(Context->Frontend));
 
-    KeClearEvent(&Context->MonitorEvent);
-    ThreadWake(Context->MonitorThread);
+    Trace("waiting for mac thread..\n");
 
-    Trace("waiting for monitor thread\n");
+    KeClearEvent(&Context->MacEvent);
+    ThreadWake(Context->MacThread);
 
-    (VOID) KeWaitForSingleObject(&Context->MonitorEvent,
+    (VOID) KeWaitForSingleObject(&Context->MacEvent,
                                  Executive,
                                  KernelMode,
                                  FALSE,
                                  NULL);
 
-    RtlZeroMemory(&Context->Callback, sizeof (VIF_CALLBACK));
+    Trace("done\n");
+
+    Context->Argument = NULL;
+    Context->Callback = NULL;
 
     ReleaseMrswLockShared(&Context->Lock);
 
@@ -335,76 +211,86 @@ done:
     Trace("<====\n");
 }
 
-static VOID
-VifQueryPacketStatistics(
-    IN  PXENVIF_VIF_CONTEXT         Context,
-    OUT PXENVIF_PACKET_STATISTICS   Statistics
+static NTSTATUS
+VifQueryStatistic(
+    IN  PINTERFACE              Interface,
+    IN  XENVIF_VIF_STATISTIC    Index,
+    OUT PULONGLONG              Value
     )
 {
-    PXENVIF_FRONTEND                Frontend = PdoGetFrontend(Context->Pdo);
+    PXENVIF_VIF_CONTEXT         Context = Interface->Context;
+    NTSTATUS                    status;
 
+    status = STATUS_INVALID_PARAMETER;
+    if (Index >= XENVIF_VIF_STATISTIC_COUNT)
+        goto done;
+        
     AcquireMrswLockShared(&Context->Lock);
 
-    ReceiverGetPacketStatistics(FrontendGetReceiver(Frontend),
-                                &Statistics->Receiver);
-    TransmitterGetPacketStatistics(FrontendGetTransmitter(Frontend),
-                                   &Statistics->Transmitter);
+    FrontendQueryStatistic(Context->Frontend, Index, Value);
 
     ReleaseMrswLockShared(&Context->Lock);
-}
+    status = STATUS_SUCCESS;
 
-static VOID
-VifUpdatePacketMetadata(
-    IN  PXENVIF_VIF_CONTEXT                 Context,
-    IN  PXENVIF_TRANSMITTER_PACKET_METADATA Metadata
-    )
-{
-    PXENVIF_FRONTEND                        Frontend = PdoGetFrontend(Context->Pdo);
-
-    AcquireMrswLockShared(&Context->Lock);
-
-    TransmitterSetPacketMetadata(FrontendGetTransmitter(Frontend),
-                                 *Metadata);
-    
-    ReleaseMrswLockShared(&Context->Lock);
-}
-
-static VOID
-VifReturnPacket(
-    IN  PXENVIF_VIF_CONTEXT     Context,
-    IN  PXENVIF_RECEIVER_PACKET Packet
-    )
-{
-    PXENVIF_FRONTEND            Frontend = PdoGetFrontend(Context->Pdo);
-
-    AcquireMrswLockShared(&Context->Lock);
-
-    ReceiverReturnPacket(FrontendGetReceiver(Frontend),
-                         Packet);
-
-    ReleaseMrswLockShared(&Context->Lock);
+done:
+    return status;
 }
 
 static NTSTATUS
-VifQueuePackets(
-    IN  PXENVIF_VIF_CONTEXT         Context,
-    IN  PXENVIF_TRANSMITTER_PACKET  HeadPacket
+VifTransmitterSetPacketOffset(
+    IN  PINTERFACE                          Interface,
+    IN  XENVIF_TRANSMITTER_PACKET_OFFSET    Type,
+    IN  LONG_PTR                            Value
     )
 {
-    PXENVIF_FRONTEND                Frontend = PdoGetFrontend(Context->Pdo);
+    PXENVIF_VIF_CONTEXT                     Context = Interface->Context;
+    NTSTATUS                                status;
+
+    AcquireMrswLockShared(&Context->Lock);
+
+    status = TransmitterSetPacketOffset(FrontendGetTransmitter(Context->Frontend),
+                                        Type,
+                                        Value);
+    
+    ReleaseMrswLockShared(&Context->Lock);
+
+    return status;
+}
+
+static VOID
+VifReceiverReturnPackets( 
+    IN  PINTERFACE      Interface,
+    IN  PLIST_ENTRY     List
+    )
+{
+    PXENVIF_VIF_CONTEXT Context = Interface->Context;
+
+    AcquireMrswLockShared(&Context->Lock);
+
+    ReceiverReturnPackets(FrontendGetReceiver(Context->Frontend),
+                          List);
+
+    ReleaseMrswLockShared(&Context->Lock);
+}
+
+
+static NTSTATUS
+VifTransmitterQueuePackets(
+    IN  PINTERFACE                  Interface,
+    IN  PXENVIF_TRANSMITTER_PACKET  Head
+    )
+{
+    PXENVIF_VIF_CONTEXT             Context = Interface->Context;
     NTSTATUS                        status;
 
     AcquireMrswLockShared(&Context->Lock);
 
     status = STATUS_UNSUCCESSFUL;
-    if (Context->Enabled == FALSE) {
-        Trace("NOT ENABLED\n");
-
+    if (Context->Enabled == FALSE)
         goto fail1;
-    }
 
-    TransmitterQueuePackets(FrontendGetTransmitter(Frontend),
-                            HeadPacket);            
+    TransmitterQueuePackets(FrontendGetTransmitter(Context->Frontend),
+                            Head);            
 
     ReleaseMrswLockShared(&Context->Lock);
 
@@ -417,148 +303,135 @@ fail1:
 }
 
 static VOID
-VifQueryOffloadOptions(
-    IN  PXENVIF_VIF_CONTEXT     Context,
-    OUT PXENVIF_OFFLOAD_OPTIONS Options
+VifTransmitterQueryOffloadOptions(
+    IN  PINTERFACE                  Interface,
+    OUT PXENVIF_VIF_OFFLOAD_OPTIONS Options
     )
 {
-    PXENVIF_FRONTEND            Frontend = PdoGetFrontend(Context->Pdo);
+    PXENVIF_VIF_CONTEXT             Context = Interface->Context;
 
     AcquireMrswLockShared(&Context->Lock);
 
-    TransmitterGetOffloadOptions(FrontendGetTransmitter(Frontend),
-                                 Options);
-
-    ReleaseMrswLockShared(&Context->Lock);
-}
-
-static NTSTATUS
-VifUpdateOffloadOptions(
-    IN  PXENVIF_VIF_CONTEXT     Context,
-    IN  XENVIF_OFFLOAD_OPTIONS  Options
-    )
-{
-    PXENVIF_FRONTEND            Frontend = PdoGetFrontend(Context->Pdo);
-    NTSTATUS                    status;
-
-    AcquireMrswLockShared(&Context->Lock);
-
-    status = ReceiverSetOffloadOptions(FrontendGetReceiver(Frontend),
-                                       Options);
-
-    ReleaseMrswLockShared(&Context->Lock);
-
-    return status;
-}
-
-static VOID
-VifQueryLargePacketSize(
-    IN  PXENVIF_VIF_CONTEXT Context,
-    IN  UCHAR               Version,
-    OUT PULONG              Size
-    )
-{
-    PXENVIF_FRONTEND        Frontend = PdoGetFrontend(Context->Pdo);
-
-    AcquireMrswLockShared(&Context->Lock);
-
-    *Size = TransmitterGetLargePacketSize(FrontendGetTransmitter(Frontend), Version);
+    TransmitterQueryOffloadOptions(FrontendGetTransmitter(Context->Frontend),
+                                   Options);
 
     ReleaseMrswLockShared(&Context->Lock);
 }
 
 static VOID
-VifQueryMediaState(
-    IN  PXENVIF_VIF_CONTEXT         Context,
+VifTransmitterQueryLargePacketSize(
+    IN  PINTERFACE      Interface,
+    IN  UCHAR           Version,
+    OUT PULONG          Size
+    )
+{
+    PXENVIF_VIF_CONTEXT Context = Interface->Context;
+
+    AcquireMrswLockShared(&Context->Lock);
+
+    TransmitterQueryLargePacketSize(FrontendGetTransmitter(Context->Frontend),
+                                    Version,
+                                    Size);
+
+    ReleaseMrswLockShared(&Context->Lock);
+}
+
+static VOID
+VifReceiverSetOffloadOptions(
+    IN  PINTERFACE                  Interface,
+    IN  XENVIF_VIF_OFFLOAD_OPTIONS  Options
+    )
+{
+    PXENVIF_VIF_CONTEXT             Context = Interface->Context;
+
+    AcquireMrswLockShared(&Context->Lock);
+
+    ReceiverSetOffloadOptions(FrontendGetReceiver(Context->Frontend),
+                              Options);
+
+    ReleaseMrswLockShared(&Context->Lock);
+}
+
+static VOID
+VifMacQueryState(
+    IN  PINTERFACE                  Interface,
     OUT PNET_IF_MEDIA_CONNECT_STATE MediaConnectState OPTIONAL,
     OUT PULONG64                    LinkSpeed OPTIONAL,
     OUT PNET_IF_MEDIA_DUPLEX_STATE  MediaDuplexState OPTIONAL
     )
 {
-    PXENVIF_FRONTEND                Frontend = PdoGetFrontend(Context->Pdo);
+    PXENVIF_VIF_CONTEXT             Context = Interface->Context;
 
     AcquireMrswLockShared(&Context->Lock);
 
-    if (Context->Enabled && MacGetLinkState(FrontendGetMac(Frontend))) {
-        if (MediaConnectState != NULL)
-            *MediaConnectState = MediaConnectStateConnected;
-
-        if (LinkSpeed != NULL)
-            *LinkSpeed = (ULONGLONG)MacGetLinkSpeed(FrontendGetMac(Frontend)) * 1000000000ull;
-
-        if (MediaDuplexState != NULL)
-            *MediaDuplexState = MediaDuplexStateFull;
-    } else {
-        if (MediaConnectState != NULL)
-            *MediaConnectState = MediaConnectStateDisconnected;
-
-        if (LinkSpeed != NULL)
-            *LinkSpeed = 0;
-
-        if (MediaDuplexState != NULL)
-            *MediaDuplexState = MediaDuplexStateUnknown;
-    }
+    MacQueryState(FrontendGetMac(Context->Frontend),
+                  MediaConnectState,
+                  LinkSpeed,
+                  MediaDuplexState);
 
     ReleaseMrswLockShared(&Context->Lock);
 }
 
 static VOID
-VifQueryMaximumFrameSize(
-    IN  PXENVIF_VIF_CONTEXT Context,
-    OUT PULONG              Size
+VifMacQueryMaximumFrameSize(
+    IN  PINTERFACE      Interface,
+    OUT PULONG          Size
     )
 {
-    PXENVIF_FRONTEND        Frontend = PdoGetFrontend(Context->Pdo);
+    PXENVIF_VIF_CONTEXT Context = Interface->Context;
 
     AcquireMrswLockShared(&Context->Lock);
 
-    *Size = MacGetMaximumFrameSize(FrontendGetMac(Frontend));
+    MacQueryMaximumFrameSize(FrontendGetMac(Context->Frontend), Size);
 
     ReleaseMrswLockShared(&Context->Lock);
 }
 
 static VOID
-VifQueryPermanentAddress(
-    IN  PXENVIF_VIF_CONTEXT Context,
+VifMacQueryPermanentAddress(
+    IN  PINTERFACE          Interface,
     OUT PETHERNET_ADDRESS   Address
     )
 {
-    PXENVIF_FRONTEND        Frontend = PdoGetFrontend(Context->Pdo);
+    PXENVIF_VIF_CONTEXT     Context = Interface->Context;
 
     AcquireMrswLockShared(&Context->Lock);
 
-    *Address = *MacGetPermanentAddress(FrontendGetMac(Frontend));
+    MacQueryPermanentAddress(FrontendGetMac(Context->Frontend), Address);
 
     ReleaseMrswLockShared(&Context->Lock);
 }
 
 static VOID
-VifQueryCurrentAddress(
-    IN  PXENVIF_VIF_CONTEXT Context,
+VifMacQueryCurrentAddress(
+    IN  PINTERFACE          Interface,
     OUT PETHERNET_ADDRESS   Address
     )
 {
-    PXENVIF_FRONTEND        Frontend = PdoGetFrontend(Context->Pdo);
+    PXENVIF_VIF_CONTEXT     Context = Interface->Context;
 
     AcquireMrswLockShared(&Context->Lock);
 
-    *Address = *MacGetCurrentAddress(FrontendGetMac(Frontend));
+    MacQueryCurrentAddress(FrontendGetMac(Context->Frontend), Address);
 
     ReleaseMrswLockShared(&Context->Lock);
 }
 
 static NTSTATUS
-VifUpdateCurrentAddress(
-    IN  PXENVIF_VIF_CONTEXT Context,
-    OUT PETHERNET_ADDRESS   Address
+VifMacQueryMulticastAddresses(
+    IN      PINTERFACE          Interface,
+    OUT     PETHERNET_ADDRESS   Address OPTIONAL,
+    IN OUT  PULONG              Count
     )
 {
-    PXENVIF_FRONTEND        Frontend = PdoGetFrontend(Context->Pdo);
-    NTSTATUS                status;
+    PXENVIF_VIF_CONTEXT         Context = Interface->Context;
+    NTSTATUS                    status;
 
     AcquireMrswLockShared(&Context->Lock);
 
-    status = MacSetCurrentAddress(FrontendGetMac(Frontend), Address);
+    status = MacQueryMulticastAddresses(FrontendGetMac(Context->Frontend),
+                                        Address,
+                                        Count);
 
     ReleaseMrswLockShared(&Context->Lock);
 
@@ -566,54 +439,18 @@ VifUpdateCurrentAddress(
 }
 
 static NTSTATUS
-VifQueryMulticastAddresses(
-    IN  PXENVIF_VIF_CONTEXT Context,
-    OUT ETHERNET_ADDRESS    Address[] OPTIONAL,
-    OUT PULONG              Count
-    )
-{
-    PXENVIF_FRONTEND        Frontend = PdoGetFrontend(Context->Pdo);
-    ULONG                   Size;
-    NTSTATUS                status;
-
-    AcquireMrswLockShared(&Context->Lock);
-
-    Size = sizeof (ETHERNET_ADDRESS) * *Count;
-
-    (VOID) MacGetMulticastAddresses(FrontendGetMac(Frontend),
-                                    Count);
-
-    status = STATUS_BUFFER_TOO_SMALL;
-    if (Size < sizeof (ETHERNET_ADDRESS) * *Count)
-        goto fail1;
-
-    RtlCopyMemory(Address,
-                  MacGetMulticastAddresses(FrontendGetMac(Frontend), Count),
-                  Size);
-
-    ReleaseMrswLockShared(&Context->Lock);
-
-    return STATUS_SUCCESS;
-
-fail1:
-    ReleaseMrswLockShared(&Context->Lock);
-
-    return status;
-}
-
-static NTSTATUS
-VifUpdateMulticastAddresses(
-    IN  PXENVIF_VIF_CONTEXT Context,
-    IN  ETHERNET_ADDRESS    Address[],
+VifMacSetMulticastAddresses(
+    IN  PINTERFACE          Interface,
+    IN  PETHERNET_ADDRESS   Address,
     IN  ULONG               Count
     )
 {
-    PXENVIF_FRONTEND        Frontend = PdoGetFrontend(Context->Pdo);
+    PXENVIF_VIF_CONTEXT     Context = Interface->Context;
     NTSTATUS                status;
 
     AcquireMrswLockShared(&Context->Lock);
 
-    status = MacSetMulticastAddresses(FrontendGetMac(Frontend),
+    status = MacSetMulticastAddresses(FrontendGetMac(Context->Frontend),
                                       Address,
                                       Count);
 
@@ -622,38 +459,40 @@ VifUpdateMulticastAddresses(
     return status;
 }
 
-static VOID
-VifQueryFilterLevel(
-    IN  PXENVIF_VIF_CONTEXT         Context,
+static NTSTATUS
+VifMacQueryFilterLevel(
+    IN  PINTERFACE                  Interface,
     IN  ETHERNET_ADDRESS_TYPE       Type,
     OUT PXENVIF_MAC_FILTER_LEVEL    Level
     )
 {
-    PXENVIF_FRONTEND                Frontend = PdoGetFrontend(Context->Pdo);
+    PXENVIF_VIF_CONTEXT             Context = Interface->Context;
+    NTSTATUS                status;
 
     AcquireMrswLockShared(&Context->Lock);
 
-    *Level = MacGetFilterLevel(FrontendGetMac(Frontend),
-                               Type);
+    status = MacQueryFilterLevel(FrontendGetMac(Context->Frontend),
+                                 Type,
+                                 Level);
 
     ReleaseMrswLockShared(&Context->Lock);
+
+    return status;
 }
 
 static NTSTATUS
-VifUpdateFilterLevel(
-    IN  PXENVIF_VIF_CONTEXT     Context,
-    IN  ETHERNET_ADDRESS_TYPE   Type,
-    IN  XENVIF_MAC_FILTER_LEVEL Level
+VifMacSetFilterLevel(
+    IN  PINTERFACE                  Interface,
+    IN  ETHERNET_ADDRESS_TYPE       Type,
+    IN  XENVIF_MAC_FILTER_LEVEL     Level
     )
 {
-    PXENVIF_FRONTEND            Frontend = PdoGetFrontend(Context->Pdo);
-    NTSTATUS                    status;
+    PXENVIF_VIF_CONTEXT             Context = Interface->Context;
+    NTSTATUS                        status;
 
     AcquireMrswLockShared(&Context->Lock);
 
-    status = MacSetFilterLevel(FrontendGetMac(Frontend),
-                               Type,
-                               Level);
+    status = MacSetFilterLevel(FrontendGetMac(Context->Frontend), Type, Level);
 
     ReleaseMrswLockShared(&Context->Lock);
 
@@ -661,101 +500,208 @@ VifUpdateFilterLevel(
 }
 
 static VOID
-VifQueryReceiverRingSize(
-    IN  PXENVIF_VIF_CONTEXT Context,
+VifReceiverQueryRingSize(
+    IN  PINTERFACE          Interface,
     OUT PULONG              Size
     )
 {
-    PXENVIF_FRONTEND        Frontend = PdoGetFrontend(Context->Pdo);
+    PXENVIF_VIF_CONTEXT     Context = Interface->Context;
 
     AcquireMrswLockShared(&Context->Lock);
 
-    *Size = ReceiverGetRingSize(FrontendGetReceiver(Frontend));
+    ReceiverQueryRingSize(FrontendGetReceiver(Context->Frontend), Size);
 
     ReleaseMrswLockShared(&Context->Lock);
 }
 
 static VOID
-VifQueryTransmitterRingSize(
-    IN  PXENVIF_VIF_CONTEXT Context,
+VifTransmitterQueryRingSize(
+    IN  PINTERFACE          Interface,
     OUT PULONG              Size
     )
 {
-    PXENVIF_FRONTEND        Frontend = PdoGetFrontend(Context->Pdo);
+    PXENVIF_VIF_CONTEXT     Context = Interface->Context;
 
     AcquireMrswLockShared(&Context->Lock);
 
-    *Size = TransmitterGetRingSize(FrontendGetTransmitter(Frontend));
+    TransmitterQueryRingSize(FrontendGetTransmitter(Context->Frontend), Size);
 
     ReleaseMrswLockShared(&Context->Lock);
 }
 
-static VOID
+static DECLSPEC_NOINLINE VOID
+VifSuspendCallbackLate(
+    IN  PVOID           Argument
+    )
+{
+    PXENVIF_VIF_CONTEXT Context = Argument;
+    NTSTATUS            status;
+
+    if (!Context->Enabled)
+        return;
+
+    status = FrontendSetState(Context->Frontend, FRONTEND_ENABLED);
+    ASSERT(NT_SUCCESS(status));
+
+    TransmitterAdvertiseAddresses(FrontendGetTransmitter(Context->Frontend));
+}
+
+static NTSTATUS
 VifAcquire(
-    IN  PXENVIF_VIF_CONTEXT Context
+    PINTERFACE              Interface
     )
 {
-    InterlockedIncrement(&Context->References);
-}
+    PXENVIF_VIF_CONTEXT     Context = Interface->Context;
+    KIRQL                   Irql;
+    NTSTATUS                status;
 
-static VOID
-VifRelease(
-    IN  PXENVIF_VIF_CONTEXT Context
-    )
-{
-    ASSERT(Context->References != 0);
-    InterlockedDecrement(&Context->References);
-}
+    AcquireMrswLockExclusive(&Context->Lock, &Irql);
 
-#define VIF_OPERATION(_Type, _Name, _Arguments) \
-        Vif ## _Name,
+    if (Context->References++ != 0)
+        goto done;
 
-static XENVIF_VIF_OPERATIONS  Operations = {
-    DEFINE_VIF_OPERATIONS
-};
+    Trace("====>\n");
 
-#undef VIF_OPERATION
+    status = XENBUS_SUSPEND(Acquire, &Context->SuspendInterface);
+    if (!NT_SUCCESS(status))
+        goto fail1;   
 
-NTSTATUS
-VifInitialize(
-    IN  PXENVIF_PDO             Pdo,
-    OUT PXENVIF_VIF_INTERFACE   Interface
-    )
-{
-    PXENVIF_VIF_CONTEXT         Context;
-    NTSTATUS                    status;
-
-    Context = __VifAllocate(sizeof (XENVIF_VIF_CONTEXT));
-
-    status = STATUS_NO_MEMORY;
-    if (Context == NULL)
-        goto fail1;
-
-    InitializeMrswLock(&Context->Lock);
-
-    Context->Pdo = Pdo;
-
-    KeInitializeEvent(&Context->MonitorEvent, NotificationEvent, FALSE);
-
-    status = ThreadCreate(VifMonitor, Context, &Context->MonitorThread);
+    status = XENBUS_SUSPEND(Register,
+                            &Context->SuspendInterface,
+                            SUSPEND_CALLBACK_LATE,
+                            VifSuspendCallbackLate,
+                            Context,
+                            &Context->SuspendCallbackLate);
     if (!NT_SUCCESS(status))
         goto fail2;
 
-    Interface->Context = Context;
-    Interface->Operations = &Operations;
+    Context->Frontend = PdoGetFrontend(Context->Pdo);
+
+    Trace("<====\n");
+
+done:
+    ReleaseMrswLockExclusive(&Context->Lock, Irql, FALSE);
 
     return STATUS_SUCCESS;
 
 fail2:
     Error("fail2\n");
 
-    RtlZeroMemory(&Context->MonitorEvent, sizeof (KEVENT));
+    XENBUS_SUSPEND(Release, &Context->SuspendInterface);
 
-    Context->Pdo = NULL;
-    RtlZeroMemory(&Context->Lock, sizeof (XENVIF_MRSW_LOCK));
+fail1:
+    Error("fail1 (%08x)\n", status);
 
-    ASSERT(IsZeroMemory(Context, sizeof (XENVIF_VIF_CONTEXT)));
-    __VifFree(Context);
+    --Context->References;
+    ASSERT3U(Context->References, ==, 0);
+    ReleaseMrswLockExclusive(&Context->Lock, Irql, FALSE);
+
+    return status;
+}
+
+VOID
+VifRelease(
+    IN  PINTERFACE          Interface
+    )
+{
+    PXENVIF_VIF_CONTEXT     Context = Interface->Context;
+    KIRQL                   Irql;
+
+    AcquireMrswLockExclusive(&Context->Lock, &Irql);
+
+    if (--Context->References > 0)
+        goto done;
+
+    Trace("====>\n");
+
+    ASSERT(!Context->Enabled);
+
+    Context->Frontend = NULL;
+
+    XENBUS_SUSPEND(Deregister,
+                   &Context->SuspendInterface,
+                   Context->SuspendCallbackLate);
+    Context->SuspendCallbackLate = NULL;
+
+    XENBUS_SUSPEND(Release, &Context->SuspendInterface);
+
+    Trace("<====\n");
+
+done:
+    ReleaseMrswLockExclusive(&Context->Lock, Irql, FALSE);
+}
+
+static struct _XENVIF_VIF_INTERFACE_V1 VifInterfaceVersion1 = {
+    { sizeof (struct _XENVIF_VIF_INTERFACE_V1), 1, NULL, NULL, NULL },
+    VifAcquire,
+    VifRelease,
+    VifEnable,
+    VifDisable,
+    VifQueryStatistic,
+    VifReceiverReturnPackets,
+    VifReceiverSetOffloadOptions,
+    VifReceiverQueryRingSize,
+    VifTransmitterSetPacketOffset,
+    VifTransmitterQueuePackets,
+    VifTransmitterQueryOffloadOptions,
+    VifTransmitterQueryLargePacketSize,
+    VifTransmitterQueryRingSize,
+    VifMacQueryState,
+    VifMacQueryMaximumFrameSize,
+    VifMacQueryPermanentAddress,
+    VifMacQueryCurrentAddress,
+    VifMacQueryMulticastAddresses,
+    VifMacSetMulticastAddresses,
+    VifMacSetFilterLevel,
+    VifMacQueryFilterLevel
+};
+
+NTSTATUS
+VifInitialize(
+    IN  PXENVIF_PDO         Pdo,
+    OUT PXENVIF_VIF_CONTEXT *Context
+    )
+{
+    NTSTATUS                status;
+
+    Trace("====>\n");
+
+    *Context = __VifAllocate(sizeof (XENVIF_VIF_CONTEXT));
+
+    status = STATUS_NO_MEMORY;
+    if (*Context == NULL)
+        goto fail1;
+
+    InitializeMrswLock(&(*Context)->Lock);
+
+    FdoGetSuspendInterface(PdoGetFdo(Pdo),&(*Context)->SuspendInterface);
+
+    KeInitializeEvent(&(*Context)->MacEvent, NotificationEvent, FALSE);
+
+    status = ThreadCreate(VifMac,
+                          *Context,
+                          &(*Context)->MacThread);
+    if (!NT_SUCCESS(status))
+        goto fail2;
+
+    (*Context)->Pdo = Pdo;
+
+    Trace("<====\n");
+
+    return STATUS_SUCCESS;
+
+fail2:
+    Error("fail3\n");
+
+    RtlZeroMemory(&(*Context)->MacEvent, sizeof (KEVENT));
+
+    RtlZeroMemory(&(*Context)->SuspendInterface,
+                  sizeof (XENBUS_SUSPEND_INTERFACE));
+
+    RtlZeroMemory(&(*Context)->Lock, sizeof (XENVIF_MRSW_LOCK));
+
+    ASSERT(IsZeroMemory(*Context, sizeof (XENVIF_VIF_CONTEXT)));
+    __VifFree(*Context);
 
 fail1:
     Error("fail1 (%08x)\n", status);
@@ -763,25 +709,94 @@ fail1:
     return status;
 }
 
-VOID
-VifTeardown(
-    IN OUT  PXENVIF_VIF_INTERFACE   Interface
+NTSTATUS
+VifGetInterface(
+    IN      PXENVIF_VIF_CONTEXT Context,
+    IN      ULONG               Version,
+    IN OUT  PINTERFACE          Interface,
+    IN      ULONG               Size
     )
 {
-    PXENVIF_VIF_CONTEXT             Context = Interface->Context;
+    NTSTATUS                    status;
 
-    ThreadAlert(Context->MonitorThread);
-    ThreadJoin(Context->MonitorThread);
-    Context->MonitorThread = NULL;
+    switch (Version) {
+    case 1: {
+        struct _XENVIF_VIF_INTERFACE_V1 *VifInterface;
 
-    RtlZeroMemory(&Context->MonitorEvent, sizeof (KEVENT));
+        VifInterface = (struct _XENVIF_VIF_INTERFACE_V1 *)Interface;
+
+        status = STATUS_BUFFER_OVERFLOW;
+        if (Size < sizeof (struct _XENVIF_VIF_INTERFACE_V1))
+            break;
+
+        *VifInterface = VifInterfaceVersion1;
+
+        ASSERT3U(Interface->Version, ==, Version);
+        Interface->Context = Context;
+
+        status = STATUS_SUCCESS;
+        break;
+    }
+    default:
+        status = STATUS_NOT_SUPPORTED;
+        break;
+    }
+
+    return status;
+}   
+
+VOID
+VifTeardown(
+    IN  PXENVIF_VIF_CONTEXT Context
+    )
+{
+    Trace("====>\n");
 
     Context->Pdo = NULL;
+
+    ThreadAlert(Context->MacThread);
+    ThreadJoin(Context->MacThread);
+    Context->MacThread = NULL;
+
+    RtlZeroMemory(&Context->MacEvent, sizeof (KEVENT));
+
+    RtlZeroMemory(&Context->SuspendInterface,
+                  sizeof (XENBUS_SUSPEND_INTERFACE));
+
     RtlZeroMemory(&Context->Lock, sizeof (XENVIF_MRSW_LOCK));
 
     ASSERT(IsZeroMemory(Context, sizeof (XENVIF_VIF_CONTEXT)));
     __VifFree(Context);
 
-    RtlZeroMemory(Interface, sizeof (XENVIF_VIF_INTERFACE));
+    Trace("<====\n");
 }
 
+VOID
+VifReceiverQueuePackets(
+    IN  PXENVIF_VIF_CONTEXT Context,
+    IN  PLIST_ENTRY         List
+    )
+{
+    Context->Callback(Context->Argument,
+                      XENVIF_RECEIVER_QUEUE_PACKETS,
+                      List);
+}
+
+VOID
+VifTransmitterReturnPackets(
+    IN  PXENVIF_VIF_CONTEXT         Context,
+    IN  PXENVIF_TRANSMITTER_PACKET  Head
+    )
+{
+    Context->Callback(Context->Argument,
+                      XENVIF_TRANSMITTER_RETURN_PACKETS,
+                      Head);
+}
+
+extern PXENVIF_THREAD
+VifGetMacThread(
+    IN  PXENVIF_VIF_CONTEXT Context
+    )
+{
+    return Context->MacThread;
+}

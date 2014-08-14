@@ -36,6 +36,7 @@
 #include <xen.h>
 #include <debug_interface.h>
 #include <store_interface.h>
+#include <cache_interface.h>
 
 // This should be in public/io/netif.h
 #define _NETRXF_gso_prefix     (4)
@@ -46,7 +47,6 @@
 #include "pdo.h"
 #include "registry.h"
 #include "frontend.h"
-#include "pool.h"
 #include "checksum.h"
 #include "parse.h"
 #include "granter.h"
@@ -59,107 +59,68 @@
 #include "dbg_print.h"
 #include "assert.h"
 
-#define RECEIVER_POOL    'ECER'
+#define MAXNAMELEN  128
 
-typedef struct _RECEIVER_TAG {
+typedef struct _XENVIF_RECEIVER_FRAGMENT {
     LIST_ENTRY              ListEntry;
     ULONG                   Next;
     PVOID                   Context;
     XENVIF_GRANTER_HANDLE   Handle;
-} RECEIVER_TAG, *PRECEIVER_TAG;
+} XENVIF_RECEIVER_FRAGMENT, *PXENVIF_RECEIVER_FRAGMENT;
 
-typedef struct _RECEIVER_OFFLOAD_STATISTICS {
-    ULONGLONG   IpVersion4LargePacket;
-    ULONGLONG   IpVersion6LargePacket;
-    ULONGLONG   IpVersion4LargePacketSegment;
-    ULONGLONG   IpVersion6LargePacketSegment;
-    ULONGLONG   IpVersion4HeaderChecksumCalculated;
-    ULONGLONG   IpVersion4HeaderChecksumSucceeded;
-    ULONGLONG   IpVersion4HeaderChecksumFailed;
-    ULONGLONG   IpVersion4HeaderChecksumPresent;
-    ULONGLONG   IpVersion4TcpChecksumCalculated;
-    ULONGLONG   IpVersion4TcpChecksumSucceeded;
-    ULONGLONG   IpVersion4TcpChecksumFailed;
-    ULONGLONG   IpVersion4TcpChecksumPresent;
-    ULONGLONG   IpVersion6TcpChecksumCalculated;
-    ULONGLONG   IpVersion6TcpChecksumSucceeded;
-    ULONGLONG   IpVersion6TcpChecksumFailed;
-    ULONGLONG   IpVersion6TcpChecksumPresent;
-    ULONGLONG   IpVersion4UdpChecksumCalculated;
-    ULONGLONG   IpVersion4UdpChecksumSucceeded;
-    ULONGLONG   IpVersion4UdpChecksumFailed;
-    ULONGLONG   IpVersion4UdpChecksumPresent;
-    ULONGLONG   IpVersion6UdpChecksumCalculated;
-    ULONGLONG   IpVersion6UdpChecksumSucceeded;
-    ULONGLONG   IpVersion6UdpChecksumFailed;
-    ULONGLONG   IpVersion6UdpChecksumPresent;
-    ULONGLONG   TagRemoved;
-} RECEIVER_OFFLOAD_STATISTICS, *PRECEIVER_OFFLOAD_STATISTICS;
+#define XENVIF_RECEIVER_RING_SIZE   (__CONST_RING_SIZE(netif_rx, PAGE_SIZE))
 
-#define RECEIVER_RING_SIZE  (__CONST_RING_SIZE(netif_rx, PAGE_SIZE))
-#define MAXIMUM_TAG_COUNT   (RECEIVER_RING_SIZE * 2)
+#define XENVIF_RECEIVER_MAXIMUM_FRAGMENT_ID (XENVIF_RECEIVER_RING_SIZE - 1)
 
-#define TAG_INDEX_INVALID       0xFFFFFFFF
-
-#pragma warning(push)
-#pragma warning(disable:4201)   // nonstandard extension used : nameless struct/union
-
-typedef struct _RECEIVER_RING {
-    PXENVIF_RECEIVER                    Receiver;
-    LIST_ENTRY                          ListEntry;
-    KSPIN_LOCK                          Lock;
-    PXENVIF_POOL                        PacketPool;
-    PMDL                                Mdl;
-    netif_rx_front_ring_t               Front;
-    netif_rx_sring_t                    *Shared;
-    XENVIF_GRANTER_HANDLE               Handle;
-    ULONG                               HeadFreeTag;
-    RECEIVER_TAG                        Tag[MAXIMUM_TAG_COUNT];
-    netif_rx_request_t                  Pending[MAXIMUM_TAG_COUNT];
-    ULONG                               RequestsPosted;
-    ULONG                               RequestsPushed;
-    ULONG                               ResponsesProcessed;
-    BOOLEAN                             Enabled;
-    BOOLEAN                             Stopped;
-    XENVIF_OFFLOAD_OPTIONS              OffloadOptions;
-    PXENVIF_THREAD                      Thread;
-    XENVIF_RECEIVER_PACKET_STATISTICS   PacketStatistics;
-    XENVIF_HEADER_STATISTICS            HeaderStatistics;
-    RECEIVER_OFFLOAD_STATISTICS         OffloadStatistics;
-    LIST_ENTRY                          PacketList;
-} RECEIVER_RING, *PRECEIVER_RING;
-
-#pragma warning(pop)
+typedef struct _XENVIF_RECEIVER_RING {
+    PXENVIF_RECEIVER            Receiver;
+    LIST_ENTRY                  ListEntry;
+    ULONG                       Index;
+    KSPIN_LOCK                  Lock;
+    PXENBUS_CACHE               PacketCache;
+    PXENBUS_CACHE               FragmentCache;
+    PMDL                        Mdl;
+    netif_rx_front_ring_t       Front;
+    netif_rx_sring_t            *Shared;
+    XENVIF_GRANTER_HANDLE       Handle;
+    PXENVIF_RECEIVER_FRAGMENT   Pending[XENVIF_RECEIVER_MAXIMUM_FRAGMENT_ID + 1];
+    ULONG                       RequestsPosted;
+    ULONG                       RequestsPushed;
+    ULONG                       ResponsesProcessed;
+    BOOLEAN                     Enabled;
+    BOOLEAN                     Stopped;
+    XENVIF_VIF_OFFLOAD_OPTIONS  OffloadOptions;
+    PXENBUS_DEBUG_CALLBACK      DebugCallback;
+    PXENVIF_THREAD              WatchdogThread;
+    LIST_ENTRY                  PacketList;
+} XENVIF_RECEIVER_RING, *PXENVIF_RECEIVER_RING;
 
 struct _XENVIF_RECEIVER {
-    PXENVIF_FRONTEND            Frontend;
-    LIST_ENTRY                  List;
-    LONG                        Loaned;
-    LONG                        Returned;
-    KEVENT                      Event;
-
-    ULONG                       CalculateChecksums;
-    ULONG                       AllowGsoPackets;
-    ULONG                       DisableIpVersion4Gso;
-    ULONG                       DisableIpVersion6Gso;
-    ULONG                       IpAlignOffset;
-    ULONG                       AlwaysPullup;
-
-    PXENBUS_DEBUG_INTERFACE     DebugInterface;
-    PXENBUS_STORE_INTERFACE     StoreInterface;
-    PXENVIF_VIF_INTERFACE       VifInterface;
-
-    PXENBUS_DEBUG_CALLBACK      DebugCallback;
+    PXENVIF_FRONTEND        Frontend;
+    XENBUS_CACHE_INTERFACE  CacheInterface;
+    LIST_ENTRY              List;
+    LONG                    Loaned;
+    LONG                    Returned;
+    KEVENT                  Event;
+    ULONG                   CalculateChecksums;
+    ULONG                   AllowGsoPackets;
+    ULONG                   DisableIpVersion4Gso;
+    ULONG                   DisableIpVersion6Gso;
+    ULONG                   IpAlignOffset;
+    ULONG                   AlwaysPullup;
+    XENBUS_STORE_INTERFACE  StoreInterface;
+    XENBUS_DEBUG_INTERFACE  DebugInterface;
+    PXENBUS_DEBUG_CALLBACK  DebugCallback;
 };
 
-#define REQ_ID_INTEGRITY_CHECK  0xF000
+#define XENVIF_RECEIVER_TAG 'ECER'
 
 static FORCEINLINE PVOID
 __ReceiverAllocate(
     IN  ULONG   Length
     )
 {
-    return __AllocateNonPagedPoolWithTag(Length, RECEIVER_POOL);
+    return __AllocateNonPagedPoolWithTag(Length, XENVIF_RECEIVER_TAG);
 }
 
 static FORCEINLINE VOID
@@ -167,7 +128,7 @@ __ReceiverFree(
     IN  PVOID   Buffer
     )
 {
-    __FreePoolWithTag(Buffer, RECEIVER_POOL);
+    __FreePoolWithTag(Buffer, XENVIF_RECEIVER_TAG);
 }
 
 static NTSTATUS
@@ -177,6 +138,7 @@ ReceiverPacketCtor(
     )
 {
     PXENVIF_RECEIVER_PACKET Packet = Object;
+    PXENVIF_PACKET_INFO     Info;
     PMDL		            Mdl;
     PUCHAR  		        StartVa;
     NTSTATUS		        status;
@@ -185,11 +147,19 @@ ReceiverPacketCtor(
 
     ASSERT(IsZeroMemory(Packet, sizeof (XENVIF_RECEIVER_PACKET)));
 
+    Info = __ReceiverAllocate(sizeof (XENVIF_PACKET_INFO));
+
+    status = STATUS_NO_MEMORY;
+    if (Info == NULL)
+        goto fail1;
+
+    Packet->Info = Info;
+
     Mdl = __AllocatePage();
 
     status = STATUS_NO_MEMORY;
     if (Mdl == NULL)
-	goto fail1;
+        goto fail2;
 
     StartVa = MmGetSystemAddressForMdlSafe(Mdl, NormalPagePriority);
     ASSERT(StartVa != NULL);
@@ -205,6 +175,12 @@ ReceiverPacketCtor(
     ExFreePool(Mdl);
 
     return STATUS_SUCCESS;
+
+fail2:
+    Error("fail2\n");
+
+    __ReceiverFree(Info);
+    Packet->Info = NULL;
 
 fail1:
     Error("fail1 (%08x)\n", status);
@@ -222,6 +198,7 @@ ReceiverPacketDtor(
 {
     PXENVIF_RECEIVER_PACKET Packet = Object;
     PMDL                    Mdl;
+    PXENVIF_PACKET_INFO     Info;
 
     UNREFERENCED_PARAMETER(Argument);
 
@@ -233,52 +210,77 @@ ReceiverPacketDtor(
 
     RtlZeroMemory(Mdl, sizeof (MDL) + sizeof (PFN_NUMBER));
 
+    Info = Packet->Info;
+
+    __ReceiverFree(Info);
+    Packet->Info = NULL;
+
     ASSERT(IsZeroMemory(Packet, sizeof (XENVIF_RECEIVER_PACKET)));
 }
 
 static FORCEINLINE PXENVIF_RECEIVER_PACKET
-__RingGetPacket(
-    IN  PRECEIVER_RING      Ring,
-    IN  BOOLEAN             Locked
+__ReceiverRingGetPacket(
+    IN  PXENVIF_RECEIVER_RING   Ring,
+    IN  BOOLEAN                 Locked
     )
 {
-    PXENVIF_RECEIVER_PACKET Packet;
+    PXENVIF_RECEIVER            Receiver;
+    PXENVIF_FRONTEND            Frontend;
 
-    Packet = PoolGet(Ring->PacketPool, Locked);
+    Receiver = Ring->Receiver;
+    Frontend = Receiver->Frontend;
 
-    ASSERT(Packet == NULL || IsZeroMemory(Packet, FIELD_OFFSET(XENVIF_RECEIVER_PACKET, Mdl)));
-
-    return Packet;
+    return XENBUS_CACHE(Get,
+                        &Receiver->CacheInterface,
+                        Ring->PacketCache,
+                        Locked);
 }
 
 static FORCEINLINE VOID
-__RingPutPacket(
-    IN  PRECEIVER_RING          Ring,
+__ReceiverRingPutPacket(
+    IN  PXENVIF_RECEIVER_RING   Ring,
     IN  PXENVIF_RECEIVER_PACKET Packet,
     IN  BOOLEAN                 Locked
     )
 {
+    PXENVIF_RECEIVER            Receiver;
+    PXENVIF_FRONTEND            Frontend;
     PMDL                        Mdl = &Packet->Mdl;
 
-    RtlZeroMemory(Packet, FIELD_OFFSET(XENVIF_RECEIVER_PACKET, Mdl));
+    Receiver = Ring->Receiver;
+    Frontend = Receiver->Frontend;
+
+    ASSERT(IsZeroMemory(&Packet->ListEntry, sizeof (LIST_ENTRY)));
+
+    Packet->Offset = 0;
+    Packet->Length = 0;
+    Packet->Flags.Value = 0;
+    Packet->MaximumSegmentSize = 0;
+    Packet->Cookie = NULL;
+
+    RtlZeroMemory(Packet->Info, sizeof (XENVIF_PACKET_INFO));
 
     Mdl->MappedSystemVa = Mdl->StartVa;
     Mdl->ByteOffset = 0;
     Mdl->ByteCount = 0;
     ASSERT3P(Mdl->Next, ==, NULL);
 
-    PoolPut(Ring->PacketPool, Packet, Locked);
+    XENBUS_CACHE(Put,
+                 &Receiver->CacheInterface,
+                 Ring->PacketCache,
+                 Packet,
+                 Locked);
 }
 
 static FORCEINLINE PMDL
-__RingGetMdl(
-    IN  PRECEIVER_RING      Ring,
-    IN  BOOLEAN             Locked
+__ReceiverRingGetMdl(
+    IN  PXENVIF_RECEIVER_RING   Ring,
+    IN  BOOLEAN                 Locked
     )
 {
-    PXENVIF_RECEIVER_PACKET Packet;
+    PXENVIF_RECEIVER_PACKET     Packet;
 
-    Packet = __RingGetPacket(Ring, Locked);
+    Packet = __ReceiverRingGetPacket(Ring, Locked);
     if (Packet == NULL)
         return NULL;
 
@@ -286,21 +288,87 @@ __RingGetMdl(
 }
 
 static FORCEINLINE VOID
-__RingPutMdl(
-    IN  PRECEIVER_RING      Ring,
-    IN  PMDL                Mdl,
-    IN  BOOLEAN             Locked
+__ReceiverRingPutMdl(
+    IN  PXENVIF_RECEIVER_RING   Ring,
+    IN  PMDL                    Mdl,
+    IN  BOOLEAN                 Locked
     )
 {
-    PXENVIF_RECEIVER_PACKET Packet;
+    PXENVIF_RECEIVER_PACKET     Packet;
 
     Packet = CONTAINING_RECORD(Mdl, XENVIF_RECEIVER_PACKET, Mdl);
-    __RingPutPacket(Ring, Packet, Locked);
+    __ReceiverRingPutPacket(Ring, Packet, Locked);
+}
+
+static NTSTATUS
+ReceiverFragmentCtor(
+    IN  PVOID                   Argument,
+    IN  PVOID                   Object
+    )
+{
+    PXENVIF_RECEIVER_FRAGMENT   Fragment = Object;
+
+    UNREFERENCED_PARAMETER(Argument);
+
+    ASSERT(IsZeroMemory(Fragment, sizeof (XENVIF_RECEIVER_FRAGMENT)));
+
+    return STATUS_SUCCESS;
+}
+
+static VOID
+ReceiverFragmentDtor(
+    IN  PVOID                   Argument,
+    IN  PVOID                   Object
+    )
+{
+    PXENVIF_RECEIVER_FRAGMENT   Fragment = Object;
+
+    UNREFERENCED_PARAMETER(Argument);
+
+    ASSERT(IsZeroMemory(Fragment, sizeof (XENVIF_RECEIVER_FRAGMENT)));
+}
+
+static FORCEINLINE PXENVIF_RECEIVER_FRAGMENT
+__ReceiverRingGetFragment(
+    IN  PXENVIF_RECEIVER_RING   Ring
+    )
+{
+    PXENVIF_RECEIVER            Receiver;
+    PXENVIF_FRONTEND            Frontend;
+
+    Receiver = Ring->Receiver;
+    Frontend = Receiver->Frontend;
+
+    return XENBUS_CACHE(Get,
+                        &Receiver->CacheInterface,
+                        Ring->FragmentCache,
+                        TRUE);
+}
+
+static FORCEINLINE
+__ReceiverRingPutFragment(
+    IN  PXENVIF_RECEIVER_RING       Ring,
+    IN  PXENVIF_RECEIVER_FRAGMENT   Fragment
+    )
+{
+    PXENVIF_RECEIVER                Receiver;
+    PXENVIF_FRONTEND                Frontend;
+
+    Receiver = Ring->Receiver;
+    Frontend = Receiver->Frontend;
+
+    ASSERT3P(Fragment->Context, ==, NULL);
+
+    XENBUS_CACHE(Put,
+                 &Receiver->CacheInterface,
+                 Ring->FragmentCache,
+                 Fragment,
+                 TRUE);
 }
 
 static DECLSPEC_NOINLINE VOID
-RingProcessTag(
-    IN  PRECEIVER_RING           Ring,
+ReceiverRingProcessTag(
+    IN  PXENVIF_RECEIVER_RING    Ring,
     IN  PXENVIF_RECEIVER_PACKET  Packet
     )
 {
@@ -310,7 +378,7 @@ RingProcessTag(
     PETHERNET_HEADER             EthernetHeader;
     ULONG                        Offset;
 
-    Info = &Packet->Info;
+    Info = Packet->Info;
 
     PayloadLength = Packet->Length - Info->Length;
 
@@ -325,7 +393,7 @@ RingProcessTag(
         Ring->OffloadOptions.OffloadTagManipulation == 0)
         return;
 
-    Packet->TagControlInformation = NTOHS(EthernetHeader->Tagged.Tag.ControlInformation);
+    Info->TagControlInformation = NTOHS(EthernetHeader->Tagged.Tag.ControlInformation);
 
     Offset = FIELD_OFFSET(ETHERNET_TAGGED_HEADER, Tag);
     RtlMoveMemory((PUCHAR)EthernetHeader + sizeof (ETHERNET_TAG),
@@ -362,13 +430,11 @@ RingProcessTag(
     EthernetHeader = (PETHERNET_HEADER)(StartVa + Info->EthernetHeader.Offset);
 
     ASSERT3U(PayloadLength, ==, Packet->Length - Info->Length);
-
-    Ring->OffloadStatistics.TagRemoved++;
 }
 
 static DECLSPEC_NOINLINE VOID
-RingProcessChecksum(
-    IN  PRECEIVER_RING          Ring,
+ReceiverRingProcessChecksum(
+    IN  PXENVIF_RECEIVER_RING   Ring,
     IN  PXENVIF_RECEIVER_PACKET Packet
     )
 {
@@ -381,7 +447,7 @@ RingProcessChecksum(
 
     Receiver = Ring->Receiver;
 
-    Info = &Packet->Info;
+    Info = Packet->Info;
 
     Payload.Mdl = &Packet->Mdl;
     Payload.Offset = Info->Length;
@@ -423,28 +489,23 @@ RingProcessChecksum(
             Embedded = IpHeader->Version4.Checksum;
 
             Calculated = ChecksumIpVersion4Header(StartVa, Info);
-            Ring->OffloadStatistics.IpVersion4HeaderChecksumCalculated++;
 
-            if (ChecksumVerify(Calculated, Embedded)) {
+            if (ChecksumVerify(Calculated, Embedded))
                 Packet->Flags.IpChecksumSucceeded = 1;
-                Ring->OffloadStatistics.IpVersion4HeaderChecksumSucceeded++;
-            } else {
+            else
                 Packet->Flags.IpChecksumFailed = 1;
-                Ring->OffloadStatistics.IpVersion4HeaderChecksumFailed++;
-            }
         }
 
         if (!OffloadChecksum ||
             Ring->OffloadOptions.NeedChecksumValue ||
             Receiver->CalculateChecksums) { // Checksum must be present
             Packet->Flags.IpChecksumPresent = 1;
-            Ring->OffloadStatistics.IpVersion4HeaderChecksumPresent++;
         } else {
             IpHeader->Version4.Checksum = 0;
         }
     }
 
-    if (Info->TcpHeader.Length != 0 && !Info->Flags.IsAFragment) {
+    if (Info->TcpHeader.Length != 0 && !Info->IsAFragment) {
         PTCP_HEADER     TcpHeader;
         BOOLEAN         OffloadChecksum;
 
@@ -460,12 +521,6 @@ RingProcessChecksum(
         if (OffloadChecksum) {
             if (flags & NETRXF_data_validated) {    // Checksum may not be present but it is validated
                 Packet->Flags.TcpChecksumSucceeded = 1;
-
-                if (IpHeader->Version == 4)
-                    Ring->OffloadStatistics.IpVersion4TcpChecksumSucceeded++;
-                else
-                    Ring->OffloadStatistics.IpVersion6TcpChecksumSucceeded++;
-
             } else {                                // Checksum is present but is not validated
                 USHORT  Embedded;
                 USHORT  Calculated;
@@ -478,29 +533,15 @@ RingProcessChecksum(
                 Calculated = ChecksumTcpPacket(StartVa, Info, Calculated, &Payload);
 
                 if (IpHeader->Version == 4) {
-                    Ring->OffloadStatistics.IpVersion4TcpChecksumCalculated++;
-
-                    if (ChecksumVerify(Calculated, Embedded)) {
+                    if (ChecksumVerify(Calculated, Embedded))
                         Packet->Flags.TcpChecksumSucceeded = 1;
-
-                        Ring->OffloadStatistics.IpVersion4TcpChecksumSucceeded++;
-                    } else {
+                    else
                         Packet->Flags.TcpChecksumFailed = 1;
-
-                        Ring->OffloadStatistics.IpVersion4TcpChecksumFailed++;
-                    }
                 } else {
-                    Ring->OffloadStatistics.IpVersion6TcpChecksumCalculated++;
-
-                    if (ChecksumVerify(Calculated, Embedded)) {
+                    if (ChecksumVerify(Calculated, Embedded))
                         Packet->Flags.TcpChecksumSucceeded = 1;
-
-                        Ring->OffloadStatistics.IpVersion6TcpChecksumSucceeded++;
-                    } else {
+                    else
                         Packet->Flags.TcpChecksumFailed = 1;
-
-                        Ring->OffloadStatistics.IpVersion6TcpChecksumFailed++;
-                    }
                 }
             }
         }
@@ -514,22 +555,12 @@ RingProcessChecksum(
                 Calculated = ChecksumPseudoHeader(StartVa, Info);
                 Calculated = ChecksumTcpPacket(StartVa, Info, Calculated, &Payload);
 
-                if (IpHeader->Version == 4)
-                    Ring->OffloadStatistics.IpVersion4TcpChecksumCalculated++;
-                else
-                    Ring->OffloadStatistics.IpVersion6TcpChecksumCalculated++;
-
                 TcpHeader->Checksum = Calculated;
             }
 
             Packet->Flags.TcpChecksumPresent = 1;
-
-            if (IpHeader->Version == 4)
-                Ring->OffloadStatistics.IpVersion4TcpChecksumPresent++;
-            else
-                Ring->OffloadStatistics.IpVersion6TcpChecksumPresent++;
         }
-    } else if (Info->UdpHeader.Length != 0 && !Info->Flags.IsAFragment) {
+    } else if (Info->UdpHeader.Length != 0 && !Info->IsAFragment) {
         PUDP_HEADER     UdpHeader;
         BOOLEAN         OffloadChecksum;
 
@@ -545,12 +576,6 @@ RingProcessChecksum(
         if (OffloadChecksum) {
             if (flags & NETRXF_data_validated) {    // Checksum may not be present but it is validated
                 Packet->Flags.UdpChecksumSucceeded = 1;
-
-                if (IpHeader->Version == 4)
-                    Ring->OffloadStatistics.IpVersion4UdpChecksumSucceeded++;
-                else
-                    Ring->OffloadStatistics.IpVersion6UdpChecksumSucceeded++;
-
             } else {                                // Checksum is present but is not validated
                 USHORT  Embedded;
                 USHORT  Calculated;
@@ -563,35 +588,19 @@ RingProcessChecksum(
                 Calculated = ChecksumUdpPacket(StartVa, Info, Calculated, &Payload);
 
                 if (IpHeader->Version == 4) {
-                    Ring->OffloadStatistics.IpVersion4UdpChecksumCalculated++;
-
                     if (Embedded == 0) {    // Tolarate zero checksum for IPv4/UDP
                         Packet->Flags.UdpChecksumSucceeded = 1;
-
-                        Ring->OffloadStatistics.IpVersion4UdpChecksumSucceeded++;
                     } else {
-                        if (ChecksumVerify(Calculated, Embedded)) {
+                        if (ChecksumVerify(Calculated, Embedded))
                             Packet->Flags.UdpChecksumSucceeded = 1;
-
-                            Ring->OffloadStatistics.IpVersion4UdpChecksumSucceeded++;
-                        } else {
+                        else
                             Packet->Flags.UdpChecksumFailed = 1;
-
-                            Ring->OffloadStatistics.IpVersion4UdpChecksumFailed++;
-                        }
                     }
                 } else {
-                    Ring->OffloadStatistics.IpVersion6UdpChecksumCalculated++;
-
-                    if (ChecksumVerify(Calculated, Embedded)) {
+                    if (ChecksumVerify(Calculated, Embedded))
                         Packet->Flags.UdpChecksumSucceeded = 1;
-
-                        Ring->OffloadStatistics.IpVersion6UdpChecksumSucceeded++;
-                    } else {
+                    else
                         Packet->Flags.UdpChecksumFailed = 1;
-
-                        Ring->OffloadStatistics.IpVersion6UdpChecksumFailed++;
-                    }
                 }
             }
         }
@@ -605,26 +614,16 @@ RingProcessChecksum(
                 Calculated = ChecksumPseudoHeader(StartVa, Info);
                 Calculated = ChecksumUdpPacket(StartVa, Info, Calculated, &Payload);
 
-                if (IpHeader->Version == 4)
-                    Ring->OffloadStatistics.IpVersion4UdpChecksumCalculated++;
-                else
-                    Ring->OffloadStatistics.IpVersion6UdpChecksumCalculated++;
-
                 UdpHeader->Checksum = Calculated;
             }
 
             Packet->Flags.UdpChecksumPresent = 1;
-
-            if (IpHeader->Version == 4)
-                Ring->OffloadStatistics.IpVersion4UdpChecksumPresent++;
-            else
-                Ring->OffloadStatistics.IpVersion6UdpChecksumPresent++;
         }
     }
 }
 
 static BOOLEAN
-ReceiverPullup(
+ReceiverRingPullup(
     IN      PVOID                   Argument,
     IN      PUCHAR                  DestinationVa,
     IN OUT  PXENVIF_PACKET_PAYLOAD  Payload,
@@ -660,13 +659,13 @@ ReceiverPullup(
 
         Mdl->ByteCount -= CopyLength;
         if (Mdl->ByteCount == 0) {
-            PRECEIVER_RING  Ring = Argument;
-            PMDL            Next;
+            PXENVIF_RECEIVER_RING   Ring = Argument;
+            PMDL                    Next;
 
             Next = Mdl->Next;
             Mdl->Next = NULL;
 
-            __RingPutMdl(Ring, Mdl, TRUE);
+            __ReceiverRingPutMdl(Ring, Mdl, TRUE);
 
             Mdl = Next;
         }
@@ -683,8 +682,8 @@ fail1:
 }
 
 static FORCEINLINE VOID
-__RingPullupPacket(
-    IN  PRECEIVER_RING          Ring,
+__ReceiverRingPullupPacket(
+    IN  PXENVIF_RECEIVER_RING   Ring,
     IN  PXENVIF_RECEIVER_PACKET Packet
     )
 {
@@ -703,7 +702,7 @@ __RingPullupPacket(
 
     Packet->Mdl.Next = NULL;
 
-    (VOID) ReceiverPullup(Ring, StartVa + Packet->Mdl.ByteCount, &Payload, Length);
+    (VOID) ReceiverRingPullup(Ring, StartVa + Packet->Mdl.ByteCount, &Payload, Length);
     Packet->Mdl.ByteCount += Length;
 
     if (Payload.Length != 0) {
@@ -713,8 +712,8 @@ __RingPullupPacket(
 }
 
 static FORCEINLINE PXENVIF_RECEIVER_PACKET
-__RingBuildSegment(
-    IN  PRECEIVER_RING          Ring,
+__ReceiverRingBuildSegment(
+    IN  PXENVIF_RECEIVER_RING   Ring,
     IN  PXENVIF_RECEIVER_PACKET Packet,
     IN  ULONG                   SegmentSize,
     IN  PXENVIF_PACKET_PAYLOAD  Payload
@@ -730,13 +729,13 @@ __RingBuildSegment(
     ULONG                       Seq;
     NTSTATUS                    status;
 
-    Info = &Packet->Info;
+    Info = Packet->Info;
 
     InfoVa = MmGetSystemAddressForMdlSafe(&Packet->Mdl, NormalPagePriority);
     ASSERT(InfoVa != NULL);
     InfoVa += Packet->Offset;
 
-    Segment = __RingGetPacket(Ring, TRUE);
+    Segment = __ReceiverRingGetPacket(Ring, TRUE);
 
     status = STATUS_NO_MEMORY;
     if (Segment == NULL)
@@ -799,8 +798,6 @@ __RingBuildSegment(
 
         IpHeader->Version4.PacketLength = HTONS((USHORT)PacketLength);
         IpHeader->Version4.Checksum = ChecksumIpVersion4Header(StartVa, Info);
-
-        Ring->OffloadStatistics.IpVersion4LargePacketSegment++;
     } else {
         ULONG   PayloadLength;
 
@@ -812,8 +809,6 @@ __RingBuildSegment(
                         SegmentSize;
 
         IpHeader->Version6.PayloadLength = HTONS((USHORT)PayloadLength);
-
-        Ring->OffloadStatistics.IpVersion6LargePacketSegment++;
     }
 
     // Adjust the segment TCP header
@@ -825,7 +820,7 @@ __RingBuildSegment(
     for (;;) {
         ULONG   Length;
 
-        Mdl->Next = __RingGetMdl(Ring, TRUE);
+        Mdl->Next = __ReceiverRingGetMdl(Ring, TRUE);
             
         status = STATUS_NO_MEMORY;
         if (Mdl->Next == NULL)
@@ -838,7 +833,7 @@ __RingBuildSegment(
         Length = __min(SegmentSize - Segment->Length, PAGE_SIZE);
         ASSERT(Length != 0);
 
-        (VOID) ReceiverPullup(Ring, StartVa, Payload, Length);
+        (VOID) ReceiverRingPullup(Ring, StartVa, Payload, Length);
         Mdl->ByteCount += Length;
         Segment->Length += Length;
 
@@ -856,13 +851,6 @@ __RingBuildSegment(
 fail2:
     Error("fail2\n");
 
-    if (IpHeader->Version == 4) {
-        --Ring->OffloadStatistics.IpVersion4LargePacketSegment;
-    } else {
-        ASSERT3U(IpHeader->Version, ==, 6);
-        --Ring->OffloadStatistics.IpVersion6LargePacketSegment;
-    }
-
     Mdl = Segment->Mdl.Next;
     Segment->Mdl.Next = NULL;
 
@@ -872,12 +860,12 @@ fail2:
         Next = Mdl->Next;
         Mdl->Next = NULL;
 
-        __RingPutMdl(Ring, Mdl, TRUE);
+        __ReceiverRingPutMdl(Ring, Mdl, TRUE);
 
         Mdl = Next;
     }
 
-    __RingPutPacket(Ring, Segment, TRUE);
+    __ReceiverRingPutPacket(Ring, Segment, TRUE);
 
 fail1:
     Error("fail1 (%08x)\n", status);
@@ -885,14 +873,15 @@ fail1:
     return NULL;
 }
 
-static FORCEINLINE VOID
-__RingProcessLargePacket(
-    IN  PRECEIVER_RING          Ring,
+static VOID
+ReceiverRingProcessLargePacket(
+    IN  PXENVIF_RECEIVER_RING   Ring,
     IN  PXENVIF_RECEIVER_PACKET Packet,
     OUT PLIST_ENTRY             List
     )
 {
     PXENVIF_RECEIVER            Receiver;
+    PXENVIF_FRONTEND            Frontend;
     BOOLEAN                     Offload;
     PXENVIF_PACKET_INFO         Info;
     uint16_t                    flags;
@@ -903,8 +892,9 @@ __RingProcessLargePacket(
     NTSTATUS                    status;
 
     Receiver = Ring->Receiver;
+    Frontend = Receiver->Frontend;
 
-    Info = &Packet->Info;
+    Info = Packet->Info;
     ASSERT(Info->IpHeader.Offset != 0);
     ASSERT(Info->TcpHeader.Offset != 0);
     
@@ -941,8 +931,6 @@ __RingProcessLargePacket(
                  Info->TcpHeader.Length -
                  Info->IpOptions.Length - 
                  Info->IpHeader.Length;
-
-        Ring->OffloadStatistics.IpVersion4LargePacket++;
     } else {
         USHORT  PayloadLength;
 
@@ -954,8 +942,6 @@ __RingProcessLargePacket(
                  Info->TcpOptions.Length -
                  Info->TcpHeader.Length -
                  Info->IpOptions.Length;
-
-        Ring->OffloadStatistics.IpVersion6LargePacket++;
     }
 
     while (Length > 0) {
@@ -968,7 +954,7 @@ __RingProcessLargePacket(
 
         SegmentSize = __min(Length, Packet->MaximumSegmentSize);
 
-        Segment = __RingBuildSegment(Ring, Packet, SegmentSize, &Payload);
+        Segment = __ReceiverRingBuildSegment(Ring, Packet, SegmentSize, &Payload);
 
         status = STATUS_NO_MEMORY;
         if (Segment == NULL)
@@ -1003,8 +989,6 @@ __RingProcessLargePacket(
                      Info->IpHeader.Length);
 
             IpHeader->Version4.Checksum = ChecksumIpVersion4Header(InfoVa, Info);
-
-            Ring->OffloadStatistics.IpVersion4LargePacketSegment++;
         } else {
             USHORT  PayloadLength;
 
@@ -1018,8 +1002,6 @@ __RingProcessLargePacket(
                      Info->TcpOptions.Length -
                      Info->TcpHeader.Length -
                      Info->IpOptions.Length);
-
-            Ring->OffloadStatistics.IpVersion6LargePacketSegment++;
         }
 
         Packet->Mdl.Next = Payload.Mdl;
@@ -1029,12 +1011,12 @@ __RingProcessLargePacket(
             Packet->MaximumSegmentSize = 0;
 
         if (Receiver->AlwaysPullup != 0)
-            __RingPullupPacket(Ring, Packet);
+            __ReceiverRingPullupPacket(Ring, Packet);
 
         ASSERT(IsZeroMemory(&Packet->ListEntry, sizeof (LIST_ENTRY)));
         InsertTailList(List, &Packet->ListEntry);
     } else {
-        __RingPutPacket(Ring, Packet, TRUE);
+        __ReceiverRingPutPacket(Ring, Packet, TRUE);
     }
 
     return;
@@ -1053,20 +1035,22 @@ fail1:
             Next = Mdl->Next;
             Mdl->Next = NULL;
 
-            __RingPutMdl(Ring, Mdl, TRUE);
+            __ReceiverRingPutMdl(Ring, Mdl, TRUE);
 
             Mdl = Next;
         }
     }
 
-    __RingPutPacket(Ring, Packet, TRUE);
-        
-    Ring->PacketStatistics.Drop++;
+    __ReceiverRingPutPacket(Ring, Packet, TRUE);
+
+    FrontendIncrementStatistic(Frontend,
+                               XENVIF_RECEIVER_PACKETS_DROPPED,
+                               1);
 }
 
-static FORCEINLINE VOID
-__RingProcessPacket(
-    IN  PRECEIVER_RING          Ring,
+static VOID
+ReceiverRingProcessPacket(
+    IN  PXENVIF_RECEIVER_RING   Ring,
     IN  PXENVIF_RECEIVER_PACKET Packet,
     OUT PLIST_ENTRY             List
     )
@@ -1094,19 +1078,18 @@ __RingProcessPacket(
     MaximumSegmentSize = Packet->MaximumSegmentSize;
     Cookie = Packet->Cookie;
 
-    // Clean the packet metadata since this structure now becomes payload
-    RtlZeroMemory(Packet, FIELD_OFFSET(XENVIF_RECEIVER_PACKET, Mdl));
-
     Payload.Mdl = &Packet->Mdl;
     Payload.Offset = 0;
     Payload.Length = Length;
 
     // Get a new packet structure that will just contain the header after parsing
-    Packet = __RingGetPacket(Ring, TRUE);
+    Packet = __ReceiverRingGetPacket(Ring, TRUE);
 
     status = STATUS_NO_MEMORY;
     if (Packet == NULL) {
-        Ring->PacketStatistics.FrontendError++;
+        FrontendIncrementStatistic(Frontend,
+                                   XENVIF_RECEIVER_FRONTEND_ERRORS,
+                                   1);
         goto fail1;
     }
 
@@ -1122,11 +1105,13 @@ __RingProcessPacket(
 
     Packet->Mdl.ByteCount = Packet->Offset;
 
-    Info = &Packet->Info;
+    Info = Packet->Info;
 
-    status = ParsePacket(StartVa, ReceiverPullup, Ring, &Ring->HeaderStatistics, &Payload, Info);
+    status = ParsePacket(StartVa, ReceiverRingPullup, Ring, &Payload, Info);
     if (!NT_SUCCESS(status)) {
-        Ring->PacketStatistics.FrontendError++;
+        FrontendIncrementStatistic(Frontend,
+                                   XENVIF_RECEIVER_FRONTEND_ERRORS,
+                                   1);
         goto fail2;
     }
 
@@ -1153,18 +1138,30 @@ __RingProcessPacket(
 
     switch (Type) {
     case ETHERNET_ADDRESS_UNICAST:
-        Ring->PacketStatistics.Unicast++;
-        Ring->PacketStatistics.UnicastBytes += Packet->Length;
+        FrontendIncrementStatistic(Frontend,
+                                   XENVIF_RECEIVER_UNICAST_PACKETS,
+                                   1);
+        FrontendIncrementStatistic(Frontend,
+                                   XENVIF_RECEIVER_UNICAST_OCTETS,
+                                   Packet->Length);
         break;
             
     case ETHERNET_ADDRESS_MULTICAST:
-        Ring->PacketStatistics.Multicast++;
-        Ring->PacketStatistics.MulticastBytes += Packet->Length;
+        FrontendIncrementStatistic(Frontend,
+                                   XENVIF_RECEIVER_MULTICAST_PACKETS,
+                                   1);
+        FrontendIncrementStatistic(Frontend,
+                                   XENVIF_RECEIVER_MULTICAST_OCTETS,
+                                   Packet->Length);
         break;
 
     case ETHERNET_ADDRESS_BROADCAST:
-        Ring->PacketStatistics.Broadcast++;
-        Ring->PacketStatistics.BroadcastBytes += Packet->Length;
+        FrontendIncrementStatistic(Frontend,
+                                   XENVIF_RECEIVER_BROADCAST_PACKETS,
+                                   1);
+        FrontendIncrementStatistic(Frontend,
+                                   XENVIF_RECEIVER_BROADCAST_OCTETS,
+                                   Packet->Length);
         break;
 
     default:
@@ -1173,11 +1170,11 @@ __RingProcessPacket(
     }
 
     if (Packet->MaximumSegmentSize != 0) {
-        __RingProcessLargePacket(Ring, Packet, List);
+        ReceiverRingProcessLargePacket(Ring, Packet, List);
     } else {
         ULONG   MaximumFrameSize;
 
-        MaximumFrameSize = MacGetMaximumFrameSize(Mac);
+        MacQueryMaximumFrameSize(Mac, &MaximumFrameSize);
 
         if (Packet->Length > MaximumFrameSize)
             goto fail4;
@@ -1190,7 +1187,7 @@ __RingProcessPacket(
         // packets into a single fragment.
         if (Info->LLCSnapHeader.Length != 0 ||
             Receiver->AlwaysPullup != 0)
-            __RingPullupPacket(Ring, Packet);
+            __ReceiverRingPullupPacket(Ring, Packet);
 
         ASSERT(IsZeroMemory(&Packet->ListEntry, sizeof (LIST_ENTRY)));
         InsertTailList(List, &Packet->ListEntry);
@@ -1201,7 +1198,7 @@ __RingProcessPacket(
 fail4:
 fail3:
     Packet->Mdl.Next = NULL;
-    __RingPutPacket(Ring, Packet, TRUE);
+    __ReceiverRingPutPacket(Ring, Packet, TRUE);
 
 fail2:
 fail1:
@@ -1216,23 +1213,25 @@ fail1:
             Next = Mdl->Next;
             Mdl->Next = NULL;
 
-            __RingPutMdl(Ring, Mdl, TRUE);
+            __ReceiverRingPutMdl(Ring, Mdl, TRUE);
 
             Mdl = Next;
         }
     }
-        
-    Ring->PacketStatistics.Drop++;
+
+    FrontendIncrementStatistic(Frontend,
+                               XENVIF_RECEIVER_PACKETS_DROPPED,
+                               1);
 }
 
 static VOID
-RingProcessPackets(
-    IN      PRECEIVER_RING  Ring,
-    OUT     PLIST_ENTRY     List,
-    OUT     PULONG          Count
+ReceiverRingProcessPackets(
+    IN      PXENVIF_RECEIVER_RING   Ring,
+    OUT     PLIST_ENTRY             List,
+    OUT     PULONG                  Count
     )
 {
-    PLIST_ENTRY             ListEntry;
+    PLIST_ENTRY                     ListEntry;
 
     while (!IsListEmpty(&Ring->PacketList)) {
         PXENVIF_RECEIVER_PACKET Packet;
@@ -1243,7 +1242,7 @@ RingProcessPackets(
         RtlZeroMemory(ListEntry, sizeof (LIST_ENTRY));
 
         Packet = CONTAINING_RECORD(ListEntry, XENVIF_RECEIVER_PACKET, ListEntry);
-        __RingProcessPacket(Ring, Packet, List);
+        ReceiverRingProcessPacket(Ring, Packet, List);
     }
 
     for (ListEntry = List->Flink;
@@ -1253,8 +1252,8 @@ RingProcessPackets(
 
         Packet = CONTAINING_RECORD(ListEntry, XENVIF_RECEIVER_PACKET, ListEntry);
 
-        RingProcessTag(Ring, Packet);
-        RingProcessChecksum(Ring, Packet);
+        ReceiverRingProcessTag(Ring, Packet);
+        ReceiverRingProcessChecksum(Ring, Packet);
 
         Packet->Cookie = Ring;
 
@@ -1264,8 +1263,8 @@ RingProcessPackets(
 
 static FORCEINLINE VOID
 __drv_requiresIRQL(DISPATCH_LEVEL)
-__RingAcquireLock(
-    IN  PRECEIVER_RING  Ring
+__ReceiverRingAcquireLock(
+    IN  PXENVIF_RECEIVER_RING   Ring
     )
 {
     ASSERT3U(KeGetCurrentIrql(), ==, DISPATCH_LEVEL);
@@ -1274,33 +1273,31 @@ __RingAcquireLock(
 }
 
 static DECLSPEC_NOINLINE VOID
-RingAcquireLock(
-    IN  PRECEIVER_RING  Ring
+ReceiverRingAcquireLock(
+    IN  PXENVIF_RECEIVER_RING   Ring
     )
 {
-    __RingAcquireLock(Ring);
+    __ReceiverRingAcquireLock(Ring);
 }
 
 static FORCEINLINE VOID
 __drv_requiresIRQL(DISPATCH_LEVEL)
-__RingReleaseLock(
-    IN  PRECEIVER_RING  Ring
+__ReceiverRingReleaseLock(
+    IN  PXENVIF_RECEIVER_RING   Ring
     )
 {
-    PXENVIF_RECEIVER    Receiver;
-    PXENVIF_FRONTEND    Frontend;
-    LIST_ENTRY          List;
-    ULONG               Count;
+    PXENVIF_RECEIVER            Receiver;
+    LIST_ENTRY                  List;
+    ULONG                       Count;
 
     ASSERT3U(KeGetCurrentIrql(), ==, DISPATCH_LEVEL);
 
     Receiver = Ring->Receiver;
-    Frontend = Receiver->Frontend;
 
     InitializeListHead(&List);
     Count = 0;
 
-    RingProcessPackets(Ring, &List, &Count);
+    ReceiverRingProcessPackets(Ring, &List, &Count);
     ASSERT(EQUIV(IsListEmpty(&List), Count == 0));
     ASSERT(IsListEmpty(&Ring->PacketList));
 
@@ -1312,49 +1309,53 @@ __RingReleaseLock(
 #pragma prefast(disable:26110)
     KeReleaseSpinLockFromDpcLevel(&Ring->Lock);
 
-    if (!IsListEmpty(&List))
-        VifReceivePackets(Receiver->VifInterface, &List);
+    if (!IsListEmpty(&List)) {
+        PXENVIF_FRONTEND    Frontend;
+
+        Frontend = Receiver->Frontend;
+
+        VifReceiverQueuePackets(PdoGetVifContext(FrontendGetPdo(Frontend)),
+                                &List);
+    }
 
     ASSERT(IsListEmpty(&List));
 }
 
 static DECLSPEC_NOINLINE VOID
-RingReleaseLock(
-    IN  PRECEIVER_RING  Ring
+ReceiverRingReleaseLock(
+    IN  PXENVIF_RECEIVER_RING   Ring
     )
 {
-    __RingReleaseLock(Ring);
+    __ReceiverRingReleaseLock(Ring);
 }
 
 static FORCEINLINE VOID
-__RingStop(
-    IN  PRECEIVER_RING  Ring
+__ReceiverRingStop(
+    IN  PXENVIF_RECEIVER_RING   Ring
     )
 {
-    Info("<===>\n");
-
     Ring->Stopped = TRUE;
 }
 
 static FORCEINLINE VOID
-__RingStart(
-    IN  PRECEIVER_RING  Ring
+__ReceiverRingStart(
+    IN  PXENVIF_RECEIVER_RING   Ring
     )
 {
     Ring->Stopped = FALSE;
 }
 
 static FORCEINLINE BOOLEAN
-__RingIsStopped(
-    IN  PRECEIVER_RING  Ring
+__ReceiverRingIsStopped(
+    IN  PXENVIF_RECEIVER_RING   Ring
     )
 {
     return Ring->Stopped;
 }
 
 static FORCEINLINE VOID
-__RingReturnPacket(
-    IN  PRECEIVER_RING          Ring,
+__ReceiverRingReturnPacket(
+    IN  PXENVIF_RECEIVER_RING   Ring,
     IN  PXENVIF_RECEIVER_PACKET Packet,
     IN  BOOLEAN                 Locked
     )
@@ -1369,24 +1370,24 @@ __RingReturnPacket(
         Next = Mdl->Next;
         Mdl->Next = NULL;
 
-        __RingPutMdl(Ring, Mdl, Locked);
+        __ReceiverRingPutMdl(Ring, Mdl, Locked);
 
         Mdl = Next;
     }
 
-    if (__RingIsStopped(Ring)) {
+    if (__ReceiverRingIsStopped(Ring)) {
         KIRQL   Irql;
 
         KeRaiseIrql(DISPATCH_LEVEL, &Irql);
 
         if (!Locked)
-            __RingAcquireLock(Ring);
+            __ReceiverRingAcquireLock(Ring);
 
-        if (__RingIsStopped(Ring)) {
+        if (__ReceiverRingIsStopped(Ring)) {
             PXENVIF_RECEIVER    Receiver;
             PXENVIF_FRONTEND    Frontend;
 
-            __RingStart(Ring);
+            __ReceiverRingStart(Ring);
 
             Receiver = Ring->Receiver;
             Frontend = Receiver->Frontend;
@@ -1395,111 +1396,63 @@ __RingReturnPacket(
         }
 
         if (!Locked)
-            __RingReleaseLock(Ring);
+            __ReceiverRingReleaseLock(Ring);
 
         KeLowerIrql(Irql);
     }
 }
 
-static FORCEINLINE PRECEIVER_TAG
-__RingGetTag(
-    IN  PRECEIVER_RING  Ring
+static FORCEINLINE PXENVIF_RECEIVER_FRAGMENT
+__ReceiverRingPreparePacket(
+    IN  PXENVIF_RECEIVER_RING   Ring,
+    IN  PXENVIF_RECEIVER_PACKET Packet
     )
 {
-    ULONG               Index;
-    PRECEIVER_TAG       Tag;
-
-    Index = Ring->HeadFreeTag;
-    ASSERT3U(Index, <, MAXIMUM_TAG_COUNT);
-
-    Tag = &Ring->Tag[Index];
-    Ring->HeadFreeTag = Tag->Next;
-    Tag->Next = TAG_INDEX_INVALID;
-
-    return Tag;
-}
-
-static FORCEINLINE
-__RingPutTag(
-    IN  PRECEIVER_RING  Ring,
-    IN  PRECEIVER_TAG   Tag
-    )
-{
-    ULONG               Index;
-
-    ASSERT3P(Tag->Context, ==, NULL);
-
-    Index = (ULONG)(Tag - &Ring->Tag[0]);
-    ASSERT3U(Index, <, MAXIMUM_TAG_COUNT);
-
-    ASSERT3U(Tag->Next, ==, TAG_INDEX_INVALID);
-    Tag->Next = Ring->HeadFreeTag;
-    Ring->HeadFreeTag = Index;
-}
-
-static FORCEINLINE PRECEIVER_TAG
-__RingPreparePacket(
-    IN  PRECEIVER_RING  Ring,
-    IN  PMDL            Mdl
-    )
-{
-    PXENVIF_RECEIVER    Receiver;
-    PXENVIF_FRONTEND    Frontend;
-    PRECEIVER_TAG       Tag;
-    NTSTATUS            status;
+    PXENVIF_RECEIVER            Receiver;
+    PXENVIF_FRONTEND            Frontend;
+    PXENVIF_RECEIVER_FRAGMENT   Fragment;
+    PMDL                        Mdl;
+    NTSTATUS                    status;
 
     Receiver = Ring->Receiver;
     Frontend = Receiver->Frontend;
 
-    Tag = __RingGetTag(Ring);
+    Fragment = __ReceiverRingGetFragment(Ring);
 
-    Tag->Context = Mdl;
+    status = STATUS_NO_MEMORY;
+    if (Fragment == NULL)
+        goto fail1;
+
+    Mdl = &Packet->Mdl;
 
     status = GranterPermitAccess(FrontendGetGranter(Frontend),
                                  MmGetMdlPfnArray(Mdl)[0],
                                  FALSE,
-                                 &Tag->Handle);
+                                 &Fragment->Handle);
     if (!NT_SUCCESS(status))
-        goto fail1;
+        goto fail2;
 
-    return Tag;
+    Fragment->Context = Mdl;
+
+    return Fragment;
+
+fail2:
+    Error("fail2\n");
 
 fail1:
-    if (status != STATUS_INSUFFICIENT_RESOURCES)
-        Error("fail1 (%08x)\n", status);
+    Error("fail1 (%08x)\n", status);
 
-    Tag->Context = NULL;
-
-    __RingPutTag(Ring, Tag);
+    __ReceiverRingPutFragment(Ring, Fragment);
     
     return NULL;
 }
 
-static VOID
-RingReleaseTag(
-    IN  PRECEIVER_RING  Ring,
-    IN  PRECEIVER_TAG   Tag
-    )
-{
-    PXENVIF_RECEIVER    Receiver;
-    PXENVIF_FRONTEND    Frontend;
-
-    Receiver = Ring->Receiver;
-    Frontend = Receiver->Frontend;
-
-    GranterRevokeAccess(FrontendGetGranter(Frontend),
-                        Tag->Handle);
-    Tag->Handle = NULL;
-
-    __RingPutTag(Ring, Tag);
-}
-
 static FORCEINLINE VOID
-__RingPushRequests(
-    IN  PRECEIVER_RING  Ring
+__ReceiverRingPushRequests(
+    IN  PXENVIF_RECEIVER_RING   Ring
     )
 {
-    BOOLEAN             Notify;
+    BOOLEAN                     Notify;
 
     if (Ring->RequestsPosted == Ring->RequestsPushed)
         return;
@@ -1526,14 +1479,14 @@ __RingPushRequests(
 }
 
 static VOID
-RingFill(
-    IN  PRECEIVER_RING  Ring
+ReceiverRingFill(
+    IN  PXENVIF_RECEIVER_RING   Ring
     )
 {
-    PXENVIF_RECEIVER    Receiver;
-    PXENVIF_FRONTEND    Frontend;
-    RING_IDX            req_prod;
-    RING_IDX            rsp_cons;
+    PXENVIF_RECEIVER            Receiver;
+    PXENVIF_FRONTEND            Frontend;
+    RING_IDX                    req_prod;
+    RING_IDX                    rsp_cons;
 
     Receiver = Ring->Receiver;
     Frontend = Receiver->Frontend;
@@ -1546,535 +1499,148 @@ RingFill(
     KeMemoryBarrier();
 
     while (req_prod - rsp_cons < RING_SIZE(&Ring->Front)) {
-        PXENVIF_RECEIVER_PACKET Packet;
-        PRECEIVER_TAG           Tag;
-        netif_rx_request_t      *req;
-        uint16_t                id;
+        PXENVIF_RECEIVER_PACKET     Packet;
+        PXENVIF_RECEIVER_FRAGMENT   Fragment;
+        netif_rx_request_t          *req;
+        uint16_t                    id;
 
-        Packet = __RingGetPacket(Ring, TRUE);
+        Packet = __ReceiverRingGetPacket(Ring, TRUE);
 
         if (Packet == NULL) {
-            __RingStop(Ring);
+            __ReceiverRingStop(Ring);
             break;
         }
 
-        Tag = __RingPreparePacket(Ring, &Packet->Mdl);
+        Fragment = __ReceiverRingPreparePacket(Ring, Packet);
         
-        if (Tag == NULL) {
-            __RingPutPacket(Ring, Packet, TRUE);
+        if (Fragment == NULL) {
+            __ReceiverRingPutPacket(Ring, Packet, TRUE);
             break;
         }
 
         req = RING_GET_REQUEST(&Ring->Front, req_prod);
+        id = (uint16_t)(req_prod & (RING_SIZE(&Ring->Front) - 1));
+
         req_prod++;
         Ring->RequestsPosted++;
 
-        id = (USHORT)(Tag - &Ring->Tag[0]);
-        ASSERT3U(id, <, MAXIMUM_TAG_COUNT);
-
-        req->id = id | REQ_ID_INTEGRITY_CHECK;
+        req->id = id;
         req->gref = GranterGetReference(FrontendGetGranter(Frontend),
-                                        Tag->Handle);
+                                        Fragment->Handle);
 
-        // Store a copy of the request in case we need to fake a response ourselves
-        ASSERT(IsZeroMemory(&Ring->Pending[id], sizeof (netif_rx_request_t)));
-        Ring->Pending[id] = *req;
+        ASSERT3U(id, <=, XENVIF_RECEIVER_MAXIMUM_FRAGMENT_ID);
+        ASSERT3P(Ring->Pending[id], ==, NULL);
+        Ring->Pending[id] = Fragment;
     }
 
     KeMemoryBarrier();
 
     Ring->Front.req_prod_pvt = req_prod;
 
-    __RingPushRequests(Ring);
+    __ReceiverRingPushRequests(Ring);
 }
 
 static FORCEINLINE VOID
-__RingEmpty(
-    IN  PRECEIVER_RING  Ring
+__ReceiverRingEmpty(
+    IN  PXENVIF_RECEIVER_RING   Ring
     )
 {
-    RING_IDX            rsp_cons;
-    RING_IDX            rsp_prod;
-    uint16_t            id;
+    PXENVIF_RECEIVER            Receiver;
+    PXENVIF_FRONTEND            Frontend;
+    uint16_t                    id;
 
-    KeMemoryBarrier();
+    Receiver = Ring->Receiver;
+    Frontend = Receiver->Frontend;
 
-    // Clean up any unprocessed responses
-    rsp_prod = Ring->Shared->rsp_prod;
-    rsp_cons = Ring->Front.rsp_cons;
+    for (id = 0; id <= XENVIF_RECEIVER_MAXIMUM_FRAGMENT_ID; id++) {
+        netif_rx_request_t          *req;
+        PXENVIF_RECEIVER_FRAGMENT   Fragment;
+        PMDL                        Mdl;
 
-    KeMemoryBarrier();
+        Fragment = Ring->Pending[id];
+        Ring->Pending[id] = NULL;
 
-    while (rsp_cons != rsp_prod) {
-        netif_rx_response_t *rsp;
-        netif_rx_request_t  *req;
-        PRECEIVER_TAG       Tag;
-        PMDL                Mdl;
-
-        rsp = RING_GET_RESPONSE(&Ring->Front, rsp_cons);
-        rsp_cons++;
-        Ring->ResponsesProcessed++;
-
-        ASSERT3U((rsp->id & REQ_ID_INTEGRITY_CHECK), ==, REQ_ID_INTEGRITY_CHECK);
-        id = rsp->id & ~REQ_ID_INTEGRITY_CHECK;
-
-        ASSERT3U(id, <, MAXIMUM_TAG_COUNT);
-        req = &Ring->Pending[id];
-
-        ASSERT3U(req->id, ==, rsp->id);
-        RtlZeroMemory(req, sizeof (netif_rx_request_t));
-
-        Tag = &Ring->Tag[id];
-
-        Mdl = Tag->Context;
-        Tag->Context = NULL;
-
-        RingReleaseTag(Ring, Tag);
-
-        __RingPutMdl(Ring, Mdl, TRUE);
-
-        RtlZeroMemory(rsp, sizeof (netif_rx_response_t));
-    }
-
-    Ring->Front.rsp_cons = rsp_cons;
-
-    // Clean up any pending requests
-    for (id = 0; id < MAXIMUM_TAG_COUNT; id++) {
-        netif_rx_request_t  *req;
-        PRECEIVER_TAG       Tag;
-        PMDL                Mdl;
-
-        req = &Ring->Pending[id];
-        if (req->id == 0)
+        if (Fragment == NULL)
             continue;
 
         --Ring->RequestsPosted;
         --Ring->RequestsPushed;
 
-        ASSERT3U((req->id & REQ_ID_INTEGRITY_CHECK), ==, REQ_ID_INTEGRITY_CHECK);
-        ASSERT3U((req->id & ~REQ_ID_INTEGRITY_CHECK), ==, id);
+        req = RING_GET_REQUEST(&Ring->Front, id);
+        ASSERT3U(req->id, ==, id);
 
         RtlZeroMemory(req, sizeof (netif_rx_request_t));
 
-        Tag = &Ring->Tag[id];
+        Mdl = Fragment->Context;
+        Fragment->Context = NULL;
 
-        Mdl = Tag->Context;
-        Tag->Context = NULL;
+        GranterRevokeAccess(FrontendGetGranter(Frontend),
+                            Fragment->Handle);
+        Fragment->Handle = NULL;
 
-        RingReleaseTag(Ring, Tag);
+        __ReceiverRingPutFragment(Ring, Fragment);
 
-        __RingPutMdl(Ring, Mdl, TRUE);
+        __ReceiverRingPutMdl(Ring, Mdl, TRUE);
 
         RtlZeroMemory(req, sizeof (netif_rx_request_t));
     }
 }
 
-static FORCEINLINE VOID
-__RingDebugCallback(
-    IN  PRECEIVER_RING  Ring
+static VOID
+ReceiverRingDebugCallback(
+    IN  PVOID                   Argument,
+    IN  BOOLEAN                 Crashing
     )
 {
-    PXENVIF_RECEIVER    Receiver;
-    ULONG               Allocated;
-    ULONG               MaximumAllocated;
-    ULONG               Count;
-    ULONG               MinimumCount;
+    PXENVIF_RECEIVER_RING       Ring = Argument;
+    PXENVIF_RECEIVER            Receiver;
+
+    UNREFERENCED_PARAMETER(Crashing);
 
     Receiver = Ring->Receiver;
 
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "0x%p [%s][%s]\n",
-          Ring,
-          (Ring->Enabled) ? "ENABLED" : "DISABLED",
-          (__RingIsStopped(Ring)) ? "STOPPED" : "RUNNING");
-
-    PoolGetStatistics(Ring->PacketPool,
-                      &Allocated,
-                      &MaximumAllocated,
-                      &Count,
-                      &MinimumCount);
-
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "PACKET POOL: Allocated = %u (Maximum = %u)\n",
-          Allocated,
-          MaximumAllocated);
-
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "PACKET POOL: Count = %u (Minimum = %u)\n",
-          Count,
-          MinimumCount);
+    XENBUS_DEBUG(Printf,
+                 &Receiver->DebugInterface,
+                 "0x%p [%s][%s]\n",
+                 Ring,
+                 (Ring->Enabled) ? "ENABLED" : "DISABLED",
+                 (__ReceiverRingIsStopped(Ring)) ? "STOPPED" : "RUNNING");
 
     // Dump front ring
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "FRONT: req_prod_pvt = %u rsp_cons = %u nr_ents = %u sring = %p\n",
-          Ring->Front.req_prod_pvt,
-          Ring->Front.rsp_cons,
-          Ring->Front.nr_ents,
-          Ring->Front.sring);
+    XENBUS_DEBUG(Printf,
+                 &Receiver->DebugInterface,
+                 "FRONT: req_prod_pvt = %u rsp_cons = %u nr_ents = %u sring = %p\n",
+                 Ring->Front.req_prod_pvt,
+                 Ring->Front.rsp_cons,
+                 Ring->Front.nr_ents,
+                 Ring->Front.sring);
 
     // Dump shared ring
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "SHARED: req_prod = %u req_event = %u rsp_prod = %u rsp_event = %u\n",
-          Ring->Shared->req_prod,
-          Ring->Shared->req_event,
-          Ring->Shared->rsp_prod,
-          Ring->Shared->rsp_event);
+    XENBUS_DEBUG(Printf,
+                 &Receiver->DebugInterface,
+                 "SHARED: req_prod = %u req_event = %u rsp_prod = %u rsp_event = %u\n",
+                 Ring->Shared->req_prod,
+                 Ring->Shared->req_event,
+                 Ring->Shared->rsp_prod,
+                 Ring->Shared->rsp_event);
 
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "RequestsPosted = %u RequestsPushed = %u ResponsesProcessed = %u\n",
-          Ring->RequestsPosted,
-          Ring->RequestsPushed,
-          Ring->ResponsesProcessed);
-
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "OffloadOptions = %02x\n",
-          Ring->OffloadOptions.Value);
-
-    if (Ring->OffloadOptions.OffloadTagManipulation)
-        DEBUG(Printf,
-              Receiver->DebugInterface,
-              Receiver->DebugCallback,
-              "- TAG MANIPULATION\n");
-
-    if (Ring->OffloadOptions.OffloadIpVersion4LargePacket)
-        DEBUG(Printf,
-              Receiver->DebugInterface,
-              Receiver->DebugCallback,
-              "- IPV4 LARGE PACKET\n");
-
-    if (Ring->OffloadOptions.OffloadIpVersion6LargePacket)
-        DEBUG(Printf,
-              Receiver->DebugInterface,
-              Receiver->DebugCallback,
-              "- IPV6 LARGE PACKET\n");
-
-    if (Ring->OffloadOptions.OffloadIpVersion4HeaderChecksum)
-        DEBUG(Printf,
-              Receiver->DebugInterface,
-              Receiver->DebugCallback,
-              "- IPV4 HEADER CHECKSUM\n");
-
-    if (Ring->OffloadOptions.OffloadIpVersion4TcpChecksum)
-        DEBUG(Printf,
-              Receiver->DebugInterface,
-              Receiver->DebugCallback,
-              "- IPV4 TCP CHECKSUM\n");
-
-    if (Ring->OffloadOptions.OffloadIpVersion4UdpChecksum)
-        DEBUG(Printf,
-              Receiver->DebugInterface,
-              Receiver->DebugCallback,
-              "- IPV4 UDP CHECKSUM\n");
-
-    if (Ring->OffloadOptions.OffloadIpVersion6TcpChecksum)
-        DEBUG(Printf,
-              Receiver->DebugInterface,
-              Receiver->DebugCallback,
-              "- IPV6 TCP CHECKSUM\n");
-
-    if (Ring->OffloadOptions.OffloadIpVersion6UdpChecksum)
-        DEBUG(Printf,
-              Receiver->DebugInterface,
-              Receiver->DebugCallback,
-              "- IPV6 UDP CHECKSUM\n");
-
-    if (Ring->OffloadOptions.NeedChecksumValue)
-        DEBUG(Printf,
-              Receiver->DebugInterface,
-              Receiver->DebugCallback,
-              "- NEED CHECKSUM VALUE\n");
-
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "PacketStatistics:\n");
-
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "- Drop = %u\n",
-          Ring->PacketStatistics.Drop);
-
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "- BackendError = %u\n",
-          Ring->PacketStatistics.BackendError);
-
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "- FrontendError = %u\n",
-          Ring->PacketStatistics.FrontendError);
-
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "- Unicast = %u\n",
-          Ring->PacketStatistics.Unicast);
-
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "- UnicastBytes = %u\n",
-          Ring->PacketStatistics.UnicastBytes);
-
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "- Multicast = %u\n",
-          Ring->PacketStatistics.Multicast);
-
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "- MulticastBytes = %u\n",
-          Ring->PacketStatistics.MulticastBytes);
-
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "- Broadcast = %u\n",
-          Ring->PacketStatistics.Broadcast);
-
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "- BroadcastBytes = %u\n",
-          Ring->PacketStatistics.BroadcastBytes);
-
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "HeaderStatistics:\n");
-
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "- Tagged = %u\n",
-          Ring->HeaderStatistics.Tagged);
-
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "- LLC = %u\n",
-          Ring->HeaderStatistics.LLC);
-
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "- Ip Version4 = %u\n",
-          Ring->HeaderStatistics.IpVersion4);
-
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "- Ip Version6 = %u\n",
-          Ring->HeaderStatistics.IpVersion6);
-
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "- Ip Options = %u\n",
-          Ring->HeaderStatistics.IpOptions);
-
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "- Tcp = %u\n",
-          Ring->HeaderStatistics.Tcp);
-
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "- Tcp Options = %u\n",
-          Ring->HeaderStatistics.TcpOptions);
-
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "- Udp = %u\n",
-          Ring->HeaderStatistics.Udp);
-
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "OffloadStatistics:\n");
-
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "- IpVersion4LargePacket = %u\n",
-          Ring->OffloadStatistics.IpVersion4LargePacket);
-
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "- IpVersion6LargePacket = %u\n",
-          Ring->OffloadStatistics.IpVersion6LargePacket);
-
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "- IpVersion4LargePacketSegment = %u\n",
-          Ring->OffloadStatistics.IpVersion4LargePacketSegment);
-
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "- IpVersion6LargePacketSegment = %u\n",
-          Ring->OffloadStatistics.IpVersion6LargePacketSegment);
-
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "- IpVersion4HeaderChecksumCalculated = %u\n",
-          Ring->OffloadStatistics.IpVersion4HeaderChecksumCalculated);
-
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "- IpVersion4HeaderChecksumSucceeded = %u\n",
-          Ring->OffloadStatistics.IpVersion4HeaderChecksumSucceeded);
-
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "- IpVersion4HeaderChecksumFailed = %u\n",
-          Ring->OffloadStatistics.IpVersion4HeaderChecksumFailed);
-
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "- IpVersion4HeaderChecksumPresent = %u\n",
-          Ring->OffloadStatistics.IpVersion4HeaderChecksumPresent);
-
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "- IpVersion4TcpChecksumCalculated = %u\n",
-          Ring->OffloadStatistics.IpVersion4TcpChecksumCalculated);
-
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "- IpVersion4TcpChecksumSucceeded = %u\n",
-          Ring->OffloadStatistics.IpVersion4TcpChecksumSucceeded);
-
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "- IpVersion4TcpChecksumFailed = %u\n",
-          Ring->OffloadStatistics.IpVersion4TcpChecksumFailed);
-
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "- IpVersion4TcpChecksumPresent = %u\n",
-          Ring->OffloadStatistics.IpVersion4TcpChecksumPresent);
-
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "- IpVersion6TcpChecksumCalculated = %u\n",
-          Ring->OffloadStatistics.IpVersion6TcpChecksumCalculated);
-
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "- IpVersion6TcpChecksumSucceeded = %u\n",
-          Ring->OffloadStatistics.IpVersion6TcpChecksumSucceeded);
-
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "- IpVersion6TcpChecksumFailed = %u\n",
-          Ring->OffloadStatistics.IpVersion6TcpChecksumFailed);
-
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "- IpVersion6TcpChecksumPresent = %u\n",
-          Ring->OffloadStatistics.IpVersion6TcpChecksumPresent);
-
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "- IpVersion4UdpChecksumCalculated = %u\n",
-          Ring->OffloadStatistics.IpVersion4UdpChecksumCalculated);
-
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "- IpVersion4UdpChecksumSucceeded = %u\n",
-          Ring->OffloadStatistics.IpVersion4UdpChecksumSucceeded);
-
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "- IpVersion4UdpChecksumFailed = %u\n",
-          Ring->OffloadStatistics.IpVersion4UdpChecksumFailed);
-
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "- IpVersion4UdpChecksumPresent = %u\n",
-          Ring->OffloadStatistics.IpVersion4UdpChecksumPresent);
-
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "- IpVersion6UdpChecksumCalculated = %u\n",
-          Ring->OffloadStatistics.IpVersion6UdpChecksumCalculated);
-
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "- IpVersion6UdpChecksumSucceeded = %u\n",
-          Ring->OffloadStatistics.IpVersion6UdpChecksumSucceeded);
-
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "- IpVersion6UdpChecksumFailed = %u\n",
-          Ring->OffloadStatistics.IpVersion6UdpChecksumFailed);
-
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "- IpVersion6UdpChecksumPresent = %u\n",
-          Ring->OffloadStatistics.IpVersion6UdpChecksumPresent);
-
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "- TagRemoved = %u\n",
-          Ring->OffloadStatistics.TagRemoved);
+    XENBUS_DEBUG(Printf,
+                 &Receiver->DebugInterface,
+                 "RequestsPosted = %u RequestsPushed = %u ResponsesProcessed = %u\n",
+                 Ring->RequestsPosted,
+                 Ring->RequestsPushed,
+                 Ring->ResponsesProcessed);
 }
 
 static DECLSPEC_NOINLINE VOID
-RingPoll(
-    IN  PRECEIVER_RING  Ring
+ReceiverRingPoll(
+    IN  PXENVIF_RECEIVER_RING   Ring
     )
 {
-#define RING_BATCH(_Ring) (RING_SIZE(&(_Ring)->Front) / 4)
+#define XENVIF_RECEIVER_BATCH(_Ring) (RING_SIZE(&(_Ring)->Front) / 4)
 
-    PXENVIF_RECEIVER    Receiver;
-    PXENVIF_FRONTEND    Frontend;
+    PXENVIF_RECEIVER            Receiver;
+    PXENVIF_FRONTEND            Frontend;
 
     if (!(Ring->Enabled))
         return;
@@ -2108,33 +1674,36 @@ RingPoll(
             break;
 
         while (rsp_cons != rsp_prod) {
-            netif_rx_response_t *rsp;
-            uint16_t            id;
-            netif_rx_request_t  *req;
-            PRECEIVER_TAG       Tag;
-            PMDL                Mdl;
-            RING_IDX            req_prod;
+            netif_rx_response_t         *rsp;
+            uint16_t                    id;
+            PXENVIF_RECEIVER_FRAGMENT   Fragment;
+            PMDL                        Mdl;
+            RING_IDX                    req_prod;
 
             rsp = RING_GET_RESPONSE(&Ring->Front, rsp_cons);
+            id = (uint16_t)(rsp_cons & (RING_SIZE(&Ring->Front) - 1));
+
             rsp_cons++;
             Ring->ResponsesProcessed++;
 
-            ASSERT3U((rsp->id & REQ_ID_INTEGRITY_CHECK), ==, REQ_ID_INTEGRITY_CHECK);
-            id = rsp->id & ~REQ_ID_INTEGRITY_CHECK;
+            // netback is required to complete requests in order and place
+            // the response in the same fragment as the request.
+            ASSERT3U(rsp->id, ==, id);
 
-            ASSERT3U(id, <, MAXIMUM_TAG_COUNT);
-            req = &Ring->Pending[id];
+            ASSERT3U(id, <=, XENVIF_RECEIVER_MAXIMUM_FRAGMENT_ID);
+            Fragment = Ring->Pending[id];
+            Ring->Pending[id] = NULL;
 
-            ASSERT3U(req->id, ==, rsp->id);
-            RtlZeroMemory(req, sizeof (netif_rx_request_t));
+            ASSERT(Fragment != NULL);
 
-            Tag = &Ring->Tag[id];
+            Mdl = Fragment->Context;
+            Fragment->Context = NULL;
 
-            Mdl = Tag->Context;
-            Tag->Context = NULL;
+            GranterRevokeAccess(FrontendGetGranter(Frontend),
+                                Fragment->Handle);
+            Fragment->Handle = NULL;
 
-            RingReleaseTag(Ring, Tag);
-            Tag = NULL;
+            __ReceiverRingPutFragment(Ring, Fragment);
 
             ASSERT(Mdl != NULL);
 
@@ -2142,7 +1711,7 @@ RingPoll(
                 Error = TRUE;
 
             if (rsp->flags & NETRXF_gso_prefix) {
-                __RingPutMdl(Ring, Mdl, TRUE);
+                __ReceiverRingPutMdl(Ring, Mdl, TRUE);
 
                 flags = NETRXF_gso_prefix;
                 MaximumSegmentSize = rsp->offset;
@@ -2182,9 +1751,11 @@ RingPoll(
                 ASSERT3P(Packet->Cookie, ==, NULL);
 
                 if (Error) {
-                    Ring->PacketStatistics.BackendError++;
+                    FrontendIncrementStatistic(Frontend,
+                                               XENVIF_RECEIVER_BACKEND_ERRORS,
+                                               1);
 
-                    __RingReturnPacket(Ring, Packet, TRUE);
+                    __ReceiverRingReturnPacket(Ring, Packet, TRUE);
                 } else {
                     if (flags & NETRXF_gso_prefix) {
                         ASSERT(MaximumSegmentSize != 0);
@@ -2208,10 +1779,10 @@ RingPoll(
 
             req_prod = Ring->Front.req_prod_pvt;
 
-            if (req_prod - rsp_cons < RING_BATCH(Ring) &&
-                !__RingIsStopped(Ring)) {
+            if (req_prod - rsp_cons < XENVIF_RECEIVER_BATCH(Ring) &&
+                !__ReceiverRingIsStopped(Ring)) {
                 Ring->Front.rsp_cons = rsp_cons;
-                RingFill(Ring);
+                ReceiverRingFill(Ring);
             }
         }
         ASSERT(!Error);
@@ -2226,32 +1797,33 @@ RingPoll(
         Ring->Shared->rsp_event = rsp_cons + 1;
     }
 
-    if (!__RingIsStopped(Ring))
-        RingFill(Ring);
+    if (!__ReceiverRingIsStopped(Ring))
+        ReceiverRingFill(Ring);
 
-#undef  RING_BATCH
+#undef  XENVIF_RECEIVER_BATCH
 }
 
 #define TIME_US(_us)        ((_us) * 10)
 #define TIME_MS(_ms)        (TIME_US((_ms) * 1000))
+#define TIME_S(_s)          (TIME_MS((_s) * 1000))
 #define TIME_RELATIVE(_t)   (-(_t))
 
-#define RING_PERIOD         30000
+#define XENVIF_RECEIVER_WATCHDOG_PERIOD 30
 
 static NTSTATUS
-RingWatchdog(
-    IN  PXENVIF_THREAD  Self,
-    IN  PVOID           Context
+ReceiverRingWatchdog(
+    IN  PXENVIF_THREAD      Self,
+    IN  PVOID               Context
     )
 {
-    PRECEIVER_RING      Ring = Context;
-    LARGE_INTEGER       Timeout;
-    RING_IDX            rsp_prod;
-    RING_IDX            rsp_cons;
+    PXENVIF_RECEIVER_RING   Ring = Context;
+    LARGE_INTEGER           Timeout;
+    RING_IDX                rsp_prod;
+    RING_IDX                rsp_cons;
 
     Trace("====>\n");
 
-    Timeout.QuadPart = TIME_RELATIVE(TIME_MS(RING_PERIOD));
+    Timeout.QuadPart = TIME_RELATIVE(TIME_S(XENVIF_RECEIVER_WATCHDOG_PERIOD));
 
     rsp_prod = 0;
     rsp_cons = 0;
@@ -2273,7 +1845,7 @@ RingWatchdog(
             break;
 
         KeRaiseIrql(DISPATCH_LEVEL, &Irql);
-        __RingAcquireLock(Ring);
+        __ReceiverRingAcquireLock(Ring);
 
         if (Ring->Enabled) {
             KeMemoryBarrier();
@@ -2286,42 +1858,12 @@ RingWatchdog(
                 Receiver = Ring->Receiver;
                 Frontend = Receiver->Frontend;
 
-                DEBUG(Printf,
-                      Receiver->DebugInterface,
-                      Receiver->DebugCallback,
-                      "WATCHDOG: %s\n",
-                      FrontendGetPath(Frontend));
-
-                // Dump front ring
-                DEBUG(Printf,
-                      Receiver->DebugInterface,
-                      Receiver->DebugCallback,
-                      "FRONT: req_prod_pvt = %u rsp_cons = %u nr_ents = %u sring = %p\n",
-                      Ring->Front.req_prod_pvt,
-                      Ring->Front.rsp_cons,
-                      Ring->Front.nr_ents,
-                      Ring->Front.sring);
-
-                // Dump shared ring
-                DEBUG(Printf,
-                      Receiver->DebugInterface,
-                      Receiver->DebugCallback,
-                      "SHARED: req_prod = %u req_event = %u rsp_prod = %u rsp_event = %u\n",
-                      Ring->Shared->req_prod,
-                      Ring->Shared->req_event,
-                      Ring->Shared->rsp_prod,
-                      Ring->Shared->rsp_event);
-
-                DEBUG(Printf,
-                      Receiver->DebugInterface,
-                      Receiver->DebugCallback,
-                      "RequestsPosted = %u RequestsPushed = %u ResponsesProcessed = %u\n",
-                      Ring->RequestsPosted,
-                      Ring->RequestsPushed,
-                      Ring->ResponsesProcessed);
+                XENBUS_DEBUG(Trigger,
+                             &Receiver->DebugInterface,
+                             Ring->DebugCallback);
 
                 // Try to move things along
-                RingPoll(Ring);
+                ReceiverRingPoll(Ring);
                 NotifierSendRx(FrontendGetNotifier(Frontend));
             }
 
@@ -2331,7 +1873,7 @@ RingWatchdog(
             rsp_cons = Ring->Front.rsp_cons;
         }
 
-        __RingReleaseLock(Ring);
+        __ReceiverRingReleaseLock(Ring);
         KeLowerIrql(Irql);
     }
 
@@ -2341,14 +1883,19 @@ RingWatchdog(
 }
 
 static FORCEINLINE NTSTATUS
-__RingInitialize(
-    IN  PXENVIF_RECEIVER    Receiver,
-    OUT PRECEIVER_RING      *Ring
+__ReceiverRingInitialize(
+    IN  PXENVIF_RECEIVER        Receiver,
+    IN  ULONG                   Index,
+    OUT PXENVIF_RECEIVER_RING   *Ring
     )
 {
-    NTSTATUS                status;
+    PXENVIF_FRONTEND            Frontend;
+    CHAR                        Name[MAXNAMELEN];
+    NTSTATUS                    status;
 
-    *Ring = __ReceiverAllocate(sizeof (RECEIVER_RING));
+    Frontend = Receiver->Frontend;
+
+    *Ring = __ReceiverAllocate(sizeof (XENVIF_RECEIVER_RING));
 
     status = STATUS_NO_MEMORY;
     if (Ring == NULL)
@@ -2356,45 +1903,102 @@ __RingInitialize(
 
     KeInitializeSpinLock(&(*Ring)->Lock);
 
-    status = PoolInitialize("ReceiverPacket",
-                            sizeof (XENVIF_RECEIVER_PACKET),
-                            ReceiverPacketCtor,
-                            ReceiverPacketDtor,
-                            RingAcquireLock,
-                            RingReleaseLock,
-                            *Ring,
-                            &(*Ring)->PacketPool);
-    if (!NT_SUCCESS(status))
-        goto fail2;
+    (*Ring)->Receiver = Receiver;
+    (*Ring)->Index = Index;
 
     InitializeListHead(&(*Ring)->PacketList);
 
-    (*Ring)->Receiver = Receiver;
+    status = RtlStringCbPrintfA(Name,
+                                sizeof (Name),
+                                "%s_receiver_packet",
+                                FrontendGetPath(Frontend));
+    if (!NT_SUCCESS(status))
+        goto fail2;
 
-    status = ThreadCreate(RingWatchdog,
+    for (Index = 0; Name[Index] != '\0'; Index++)
+        if (Name[Index] == '/')
+            Name[Index] = '_';
+
+    status = XENBUS_CACHE(Create,
+                          &Receiver->CacheInterface,
+                          Name,
+                          sizeof (XENVIF_RECEIVER_PACKET),
+                          0,
+                          ReceiverPacketCtor,
+                          ReceiverPacketDtor,
+                          ReceiverRingAcquireLock,
+                          ReceiverRingReleaseLock,
                           *Ring,
-                          &(*Ring)->Thread);
+                          &(*Ring)->PacketCache);
     if (!NT_SUCCESS(status))
         goto fail3;
 
+    status = RtlStringCbPrintfA(Name,
+                                sizeof (Name),
+                                "%s_receiver_fragment",
+                                FrontendGetPath(Frontend));
+    if (!NT_SUCCESS(status))
+        goto fail4;
+
+    for (Index = 0; Name[Index] != '\0'; Index++)
+        if (Name[Index] == '/')
+            Name[Index] = '_';
+
+    status = XENBUS_CACHE(Create,
+                          &Receiver->CacheInterface,
+                          Name,
+                          sizeof (XENVIF_RECEIVER_FRAGMENT),
+                          0,
+                          ReceiverFragmentCtor,
+                          ReceiverFragmentDtor,
+                          ReceiverRingAcquireLock,
+                          ReceiverRingReleaseLock,
+                          *Ring,
+                          &(*Ring)->FragmentCache);
+    if (!NT_SUCCESS(status))
+        goto fail5;
+
+    status = ThreadCreate(ReceiverRingWatchdog,
+                          *Ring,
+                          &(*Ring)->WatchdogThread);
+    if (!NT_SUCCESS(status))
+        goto fail6;
+
     return STATUS_SUCCESS;
+
+fail6:
+    Error("fail6\n");
+
+    XENBUS_CACHE(Destroy,
+                 &Receiver->CacheInterface,
+                 (*Ring)->FragmentCache);
+    (*Ring)->FragmentCache = NULL;
+
+fail5:
+    Error("fail5\n");
+    
+fail4:
+    Error("fail4\n");
+
+    XENBUS_CACHE(Destroy,
+                 &Receiver->CacheInterface,
+                 (*Ring)->PacketCache);
+    (*Ring)->PacketCache = NULL;
 
 fail3:
     Error("fail3\n");
-
-    (*Ring)->Receiver = NULL;
-
-    RtlZeroMemory(&(*Ring)->PacketList, sizeof (LIST_ENTRY));
-
-    PoolTeardown((*Ring)->PacketPool);
-    (*Ring)->PacketPool = NULL;
-
+    
 fail2:
     Error("fail2\n");
 
+    RtlZeroMemory(&(*Ring)->PacketList, sizeof (LIST_ENTRY));
+
+    (*Ring)->Index = 0;
+    (*Ring)->Receiver = NULL;
+
     RtlZeroMemory(&(*Ring)->Lock, sizeof (KSPIN_LOCK));
 
-    ASSERT(IsZeroMemory(*Ring, sizeof (RECEIVER_RING)));
+    ASSERT(IsZeroMemory(*Ring, sizeof (XENVIF_RECEIVER_RING)));
     __ReceiverFree(*Ring);
     *Ring = NULL;
 
@@ -2405,15 +2009,15 @@ fail1:
 }
 
 static FORCEINLINE NTSTATUS
-__RingConnect(
-    IN  PRECEIVER_RING  Ring
+__ReceiverRingConnect(
+    IN  PXENVIF_RECEIVER_RING   Ring
     )
 {
-    PXENVIF_RECEIVER    Receiver;
-    PXENVIF_FRONTEND    Frontend;
-    ULONG               Index;
-    PFN_NUMBER          Pfn;
-    NTSTATUS            status;
+    PXENVIF_RECEIVER            Receiver;
+    PXENVIF_FRONTEND            Frontend;
+    PFN_NUMBER                  Pfn;
+    CHAR                        Name[MAXNAMELEN];
+    NTSTATUS                    status;
 
     Receiver = Ring->Receiver;
     Frontend = Receiver->Frontend;
@@ -2431,14 +2035,6 @@ __RingConnect(
     FRONT_RING_INIT(&Ring->Front, Ring->Shared, PAGE_SIZE);
     ASSERT3P(Ring->Front.sring, ==, Ring->Shared);
 
-    Ring->HeadFreeTag = TAG_INDEX_INVALID;
-    for (Index = 0; Index < MAXIMUM_TAG_COUNT; Index++) {
-        PRECEIVER_TAG   Tag = &Ring->Tag[Index];
-
-        Tag->Next = Ring->HeadFreeTag;
-        Ring->HeadFreeTag = Index;
-    }
-
     Pfn = MmGetMdlPfnArray(Ring->Mdl)[0];
     
     status = GranterPermitAccess(FrontendGetGranter(Frontend),
@@ -2448,24 +2044,41 @@ __RingConnect(
     if (!NT_SUCCESS(status))
         goto fail2;
 
+    status = RtlStringCbPrintfA(Name,
+                                sizeof (Name),
+                                __MODULE__ "|RECEIVER[%u]",
+                                Ring->Index);
+    if (!NT_SUCCESS(status))
+        goto fail3;
+
+    status = XENBUS_DEBUG(Register,
+                          &Receiver->DebugInterface,
+                          Name,
+                          ReceiverRingDebugCallback,
+                          Ring,
+                          &Ring->DebugCallback);
+    if (!NT_SUCCESS(status))
+        goto fail4;
+
     return STATUS_SUCCESS;
+
+fail4:
+    Error("fail4\n");
+
+fail3:
+    Error("fail3\n");
+
+    GranterRevokeAccess(FrontendGetGranter(Frontend),
+                        Ring->Handle);
+    Ring->Handle = NULL;
 
 fail2:
     Error("fail2\n");
-
-    while (Ring->HeadFreeTag != TAG_INDEX_INVALID) {
-        PRECEIVER_TAG   Tag = &Ring->Tag[Ring->HeadFreeTag];
-
-        Ring->HeadFreeTag = Tag->Next;
-        Tag->Next = 0;
-    }
-    Ring->HeadFreeTag = 0;
 
     RtlZeroMemory(&Ring->Front, sizeof (netif_rx_front_ring_t));
     RtlZeroMemory(Ring->Shared, PAGE_SIZE);
 
     Ring->Shared = NULL;
-
     __FreePage(Ring->Mdl);
     Ring->Mdl = NULL;
 
@@ -2476,8 +2089,8 @@ fail1:
 }
 
 static FORCEINLINE NTSTATUS
-__RingStoreWrite(
-    IN  PRECEIVER_RING              Ring,
+__ReceiverRingStoreWrite(
+    IN  PXENVIF_RECEIVER_RING       Ring,
     IN  PXENBUS_STORE_TRANSACTION   Transaction
     )
 {
@@ -2488,14 +2101,14 @@ __RingStoreWrite(
     Receiver = Ring->Receiver;
     Frontend = Receiver->Frontend;
 
-    status = STORE(Printf,
-                   Receiver->StoreInterface,
-                   Transaction,
-                   FrontendGetPath(Frontend),
-                   "rx-ring-ref",
-                   "%u",
-                   GranterGetReference(FrontendGetGranter(Frontend),
-                                       Ring->Handle));
+    status = XENBUS_STORE(Printf,
+                          &Receiver->StoreInterface,
+                          Transaction,
+                          FrontendGetPath(Frontend),
+                          "rx-ring-ref",
+                          "%u",
+                          GranterGetReference(FrontendGetGranter(Frontend),
+                                              Ring->Handle));
 
     if (!NT_SUCCESS(status))
         goto fail1;
@@ -2509,69 +2122,68 @@ fail1:
 }
 
 static FORCEINLINE NTSTATUS
-__RingEnable(
-    IN  PRECEIVER_RING  Ring
+__ReceiverRingEnable(
+    IN  PXENVIF_RECEIVER_RING   Ring
     )
 {
-    PXENVIF_RECEIVER    Receiver;
-    PXENVIF_FRONTEND    Frontend;
-    NTSTATUS            status;
+    PXENVIF_RECEIVER            Receiver;
+    PXENVIF_FRONTEND            Frontend;
+    NTSTATUS                    status;
 
     Receiver = Ring->Receiver;
     Frontend = Receiver->Frontend;
 
-    __RingAcquireLock(Ring);
+    __ReceiverRingAcquireLock(Ring);
 
     ASSERT(!Ring->Enabled);
 
-    RingFill(Ring);
+    ReceiverRingFill(Ring);
 
     status = STATUS_INSUFFICIENT_RESOURCES;
-    if (RING_FREE_REQUESTS(&Ring->Front) != 0)
+    if (!RING_FULL(&Ring->Front))
         goto fail1;
 
     Ring->Enabled = TRUE;
 
-    __RingReleaseLock(Ring);
+    __ReceiverRingReleaseLock(Ring);
 
     return STATUS_SUCCESS;
 
 fail1:
     Error("fail1 (%08x)\n", status);
 
-    __RingReleaseLock(Ring);
+    __ReceiverRingReleaseLock(Ring);
 
     return status;
 }
 
 static FORCEINLINE VOID
-__RingDisable(
-    IN  PRECEIVER_RING  Ring
+__ReceiverRingDisable(
+    IN  PXENVIF_RECEIVER_RING   Ring
     )
 {    
-    __RingAcquireLock(Ring);
+    __ReceiverRingAcquireLock(Ring);
 
     ASSERT(Ring->Enabled);
 
     Ring->Enabled = FALSE;
     Ring->Stopped = FALSE;
 
-    __RingReleaseLock(Ring);
+    __ReceiverRingReleaseLock(Ring);
 }
 
 static FORCEINLINE VOID
-__RingDisconnect(
-    IN  PRECEIVER_RING  Ring
+__ReceiverRingDisconnect(
+    IN  PXENVIF_RECEIVER_RING   Ring
     )
 {
-    PXENVIF_RECEIVER    Receiver;
-    PXENVIF_FRONTEND    Frontend;
-    ULONG               Count;
+    PXENVIF_RECEIVER            Receiver;
+    PXENVIF_FRONTEND            Frontend;
 
     Receiver = Ring->Receiver;
     Frontend = Receiver->Frontend;
 
-    __RingEmpty(Ring);
+    __ReceiverRingEmpty(Ring);
 
     ASSERT3U(Ring->ResponsesProcessed, ==, Ring->RequestsPushed);
     ASSERT3U(Ring->RequestsPushed, ==, Ring->RequestsPosted);
@@ -2580,108 +2192,85 @@ __RingDisconnect(
     Ring->RequestsPushed = 0;
     Ring->RequestsPosted = 0;
 
+    XENBUS_DEBUG(Deregister,
+                 &Receiver->DebugInterface,
+                 Ring->DebugCallback);
+    Ring->DebugCallback = NULL;
+
     GranterRevokeAccess(FrontendGetGranter(Frontend),
                         Ring->Handle);
     Ring->Handle = NULL;
-
-    Count = 0;
-    while (Ring->HeadFreeTag != TAG_INDEX_INVALID) {
-        ULONG           Index = Ring->HeadFreeTag;
-        PRECEIVER_TAG   Tag = &Ring->Tag[Index];
-
-        Ring->HeadFreeTag = Tag->Next;
-        Tag->Next = 0;
-
-        Count++;
-    }
-    ASSERT3U(Count, ==, MAXIMUM_TAG_COUNT);
-
-    Ring->HeadFreeTag = 0;
 
     RtlZeroMemory(&Ring->Front, sizeof (netif_rx_front_ring_t));
     RtlZeroMemory(Ring->Shared, PAGE_SIZE);
 
     Ring->Shared = NULL;
-
     __FreePage(Ring->Mdl);
     Ring->Mdl = NULL;
 }
 
 static FORCEINLINE VOID
-__RingTeardown(
-    IN  PRECEIVER_RING  Ring
+__ReceiverRingTeardown(
+    IN  PXENVIF_RECEIVER_RING   Ring
     )
 {
+    PXENVIF_RECEIVER            Receiver;
+
+    Receiver = Ring->Receiver;
+
     Ring->OffloadOptions.Value = 0;
 
-    RtlZeroMemory(&Ring->HeaderStatistics, sizeof (XENVIF_HEADER_STATISTICS));
-    RtlZeroMemory(&Ring->OffloadStatistics, sizeof (RECEIVER_OFFLOAD_STATISTICS));
-    RtlZeroMemory(&Ring->PacketStatistics, sizeof (XENVIF_RECEIVER_PACKET_STATISTICS));
+    ThreadAlert(Ring->WatchdogThread);
+    ThreadJoin(Ring->WatchdogThread);
+    Ring->WatchdogThread = NULL;
 
-    ThreadAlert(Ring->Thread);
-    ThreadJoin(Ring->Thread);
-    Ring->Thread = NULL;
+    XENBUS_CACHE(Destroy,
+                 &Receiver->CacheInterface,
+                 Ring->FragmentCache);
+    Ring->FragmentCache = NULL;
 
-    Ring->Receiver = NULL;
+    XENBUS_CACHE(Destroy,
+                 &Receiver->CacheInterface,
+                 Ring->PacketCache);
+    Ring->PacketCache = NULL;
 
     ASSERT(IsListEmpty(&Ring->PacketList));
     RtlZeroMemory(&Ring->PacketList, sizeof (LIST_ENTRY));
 
-    PoolTeardown(Ring->PacketPool);
-    Ring->PacketPool = NULL;
+    Ring->Index = 0;
+    Ring->Receiver = NULL;
 
     RtlZeroMemory(&Ring->Lock, sizeof (KSPIN_LOCK));
 
-    ASSERT(IsZeroMemory(Ring, sizeof (RECEIVER_RING)));
+    ASSERT(IsZeroMemory(Ring, sizeof (XENVIF_RECEIVER_RING)));
     __ReceiverFree(Ring);
 }
 
 static FORCEINLINE VOID
-__RingNotify(
-    IN  PRECEIVER_RING  Ring
+__ReceiverRingNotify(
+    IN  PXENVIF_RECEIVER_RING   Ring
     )
 {
-    __RingAcquireLock(Ring);
-
-    RingPoll(Ring);
-
-    __RingReleaseLock(Ring);
+    __ReceiverRingAcquireLock(Ring);
+    ReceiverRingPoll(Ring);
+    __ReceiverRingReleaseLock(Ring);
 }
 
 static FORCEINLINE VOID
-__RingSetOffloadOptions(
-    IN  PRECEIVER_RING          Ring,
-    IN  XENVIF_OFFLOAD_OPTIONS  Options
+__ReceiverRingSetOffloadOptions(
+    IN  PXENVIF_RECEIVER_RING       Ring,
+    IN  XENVIF_VIF_OFFLOAD_OPTIONS  Options
     )
 {
-    KIRQL                       Irql;
+    KIRQL                           Irql;
 
     KeRaiseIrql(DISPATCH_LEVEL, &Irql);
 
-    __RingAcquireLock(Ring);
+    __ReceiverRingAcquireLock(Ring);
     Ring->OffloadOptions = Options;
-    __RingReleaseLock(Ring);
+    __ReceiverRingReleaseLock(Ring);
 
     KeLowerIrql(Irql);
-}
-
-static FORCEINLINE VOID
-__RingAddPacketStatistics(
-    IN      PRECEIVER_RING                      Ring,
-    IN OUT  PXENVIF_RECEIVER_PACKET_STATISTICS  Statistics
-    )
-{
-    // Don't bother locking
-
-    Statistics->Drop += Ring->PacketStatistics.Drop;
-    Statistics->BackendError += Ring->PacketStatistics.BackendError;
-    Statistics->FrontendError += Ring->PacketStatistics.FrontendError;
-    Statistics->Unicast += Ring->PacketStatistics.Unicast;
-    Statistics->UnicastBytes += Ring->PacketStatistics.UnicastBytes;
-    Statistics->Multicast += Ring->PacketStatistics.Multicast;
-    Statistics->MulticastBytes += Ring->PacketStatistics.MulticastBytes;
-    Statistics->Broadcast += Ring->PacketStatistics.Broadcast;
-    Statistics->BroadcastBytes += Ring->PacketStatistics.BroadcastBytes;
 }
 
 static VOID
@@ -2691,26 +2280,14 @@ ReceiverDebugCallback(
     )
 {
     PXENVIF_RECEIVER    Receiver = Argument;
-    PLIST_ENTRY         ListEntry;
 
     UNREFERENCED_PARAMETER(Crashing);
 
-    for (ListEntry = Receiver->List.Flink;
-         ListEntry != &Receiver->List;
-         ListEntry = ListEntry->Flink) {
-        PRECEIVER_RING   Ring;
-
-        Ring = CONTAINING_RECORD(ListEntry, RECEIVER_RING, ListEntry);
-
-        __RingDebugCallback(Ring);
-    }    
-
-    DEBUG(Printf,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback,
-          "Loaned = %d Returned = %d\n",
-          Receiver->Loaned,
-          Receiver->Returned);
+    XENBUS_DEBUG(Printf,
+                 &Receiver->DebugInterface,
+                 "Loaned = %d Returned = %d\n",
+                 Receiver->Loaned,
+                 Receiver->Returned);
 }
 
 NTSTATUS
@@ -2721,7 +2298,7 @@ ReceiverInitialize(
     )
 {
     HANDLE                  ParametersKey;
-    ULONG                   Done;
+    ULONG                   Index;
     NTSTATUS                status;
 
     *Receiver = __ReceiverAllocate(sizeof (XENVIF_RECEIVER));
@@ -2787,41 +2364,70 @@ ReceiverInitialize(
     InitializeListHead(&(*Receiver)->List);
     KeInitializeEvent(&(*Receiver)->Event, NotificationEvent, FALSE);
 
-    Done = 0;
-    while (Done < Count) {
-        PRECEIVER_RING   Ring;
+    FdoGetDebugInterface(PdoGetFdo(FrontendGetPdo(Frontend)),
+                         &(*Receiver)->DebugInterface);
 
-        status = __RingInitialize(*Receiver, &Ring);
-        if (!NT_SUCCESS(status))
-            goto fail2;
+    FdoGetStoreInterface(PdoGetFdo(FrontendGetPdo(Frontend)),
+                         &(*Receiver)->StoreInterface);
 
-        InsertTailList(&(*Receiver)->List, &Ring->ListEntry);
-        Done++;
-    }
+    FdoGetCacheInterface(PdoGetFdo(FrontendGetPdo(Frontend)),
+                         &(*Receiver)->CacheInterface);
 
     (*Receiver)->Frontend = Frontend;
 
+    status = XENBUS_CACHE(Acquire, &(*Receiver)->CacheInterface);
+    if (!NT_SUCCESS(status))
+        goto fail2;
+
+    Index = 0;
+    while (Index < Count) {
+        PXENVIF_RECEIVER_RING   Ring;
+
+        status = __ReceiverRingInitialize(*Receiver, Index, &Ring);
+        if (!NT_SUCCESS(status))
+            goto fail3;
+
+        InsertTailList(&(*Receiver)->List, &Ring->ListEntry);
+        Index++;
+    }
+
     return STATUS_SUCCESS;
 
-fail2:
-    Error("fail2\n");
+fail3:
+    Error("fail3\n");
 
     while (!IsListEmpty(&(*Receiver)->List)) {
-        PLIST_ENTRY     ListEntry;
-        PRECEIVER_RING  Ring;
+        PLIST_ENTRY             ListEntry;
+        PXENVIF_RECEIVER_RING   Ring;
 
         ListEntry = RemoveTailList(&(*Receiver)->List);
         ASSERT3P(ListEntry, !=, &(*Receiver)->List);
 
         RtlZeroMemory(ListEntry, sizeof (LIST_ENTRY));
 
-        Ring = CONTAINING_RECORD(ListEntry, RECEIVER_RING, ListEntry);
+        Ring = CONTAINING_RECORD(ListEntry, XENVIF_RECEIVER_RING, ListEntry);
 
-        __RingTeardown(Ring);
+        __ReceiverRingTeardown(Ring);
 
-        --Done;
+        --Index;
     }
-    ASSERT3U(Done, ==, 0);
+    ASSERT3U(Index, ==, 0);
+
+    XENBUS_CACHE(Release, &(*Receiver)->CacheInterface);
+
+fail2:
+    Error("fail2\n");
+
+    (*Receiver)->Frontend = NULL;
+
+    RtlZeroMemory(&(*Receiver)->CacheInterface,
+                  sizeof (XENBUS_CACHE_INTERFACE));
+
+    RtlZeroMemory(&(*Receiver)->StoreInterface,
+                  sizeof (XENBUS_STORE_INTERFACE));
+
+    RtlZeroMemory(&(*Receiver)->DebugInterface,
+                  sizeof (XENBUS_DEBUG_INTERFACE));
 
     RtlZeroMemory(&(*Receiver)->Event, sizeof (KEVENT));
     RtlZeroMemory(&(*Receiver)->List, sizeof (LIST_ENTRY));
@@ -2853,63 +2459,67 @@ ReceiverConnect(
 
     Frontend = Receiver->Frontend;
 
-    Receiver->StoreInterface = FrontendGetStoreInterface(Frontend);
+    status = XENBUS_DEBUG(Acquire, &Receiver->DebugInterface);
+    if (!NT_SUCCESS(status))
+        goto fail1;
 
-    STORE(Acquire, Receiver->StoreInterface);
+    status = XENBUS_STORE(Acquire, &Receiver->StoreInterface);
+    if (!NT_SUCCESS(status))
+        goto fail2;
 
     for (ListEntry = Receiver->List.Flink;
          ListEntry != &Receiver->List;
          ListEntry = ListEntry->Flink) {
-        PRECEIVER_RING  Ring;
+        PXENVIF_RECEIVER_RING   Ring;
 
-        Ring = CONTAINING_RECORD(ListEntry, RECEIVER_RING, ListEntry);
+        Ring = CONTAINING_RECORD(ListEntry, XENVIF_RECEIVER_RING, ListEntry);
 
-        status = __RingConnect(Ring);
+        status = __ReceiverRingConnect(Ring);
         if (!NT_SUCCESS(status))
-            goto fail1;
+            goto fail3;
     }    
 
-    Receiver->DebugInterface = FrontendGetDebugInterface(Frontend);
-
-    DEBUG(Acquire, Receiver->DebugInterface);
-
-    status = DEBUG(Register,
-                   Receiver->DebugInterface,
-                   __MODULE__ "|RECEIVER",
-                   ReceiverDebugCallback,
-                   Receiver,
-                   &Receiver->DebugCallback);
+    status = XENBUS_DEBUG(Register,
+                          &Receiver->DebugInterface,
+                          __MODULE__ "|RECEIVER",
+                          ReceiverDebugCallback,
+                          Receiver,
+                          &Receiver->DebugCallback);
     if (!NT_SUCCESS(status))
-        goto fail2;
+        goto fail4;
 
     return STATUS_SUCCESS;
 
-fail2:
-    Error("fail2\n");
-
-    DEBUG(Release, Receiver->DebugInterface);
-    Receiver->DebugInterface = NULL;
+fail4:
+    Error("fail4\n");
 
     ListEntry = &Receiver->List;
 
-fail1:
-    Error("fail1 (%08x)\n", status);
+fail3:
+    Error("fail3\n");
 
     ListEntry = ListEntry->Blink;
 
     while (ListEntry != &Receiver->List) {
-        PLIST_ENTRY      Prev = ListEntry->Blink;
-        PRECEIVER_RING   Ring;
+        PLIST_ENTRY             Prev = ListEntry->Blink;
+        PXENVIF_RECEIVER_RING   Ring;
 
-        Ring = CONTAINING_RECORD(ListEntry, RECEIVER_RING, ListEntry);
+        Ring = CONTAINING_RECORD(ListEntry, XENVIF_RECEIVER_RING, ListEntry);
 
-        __RingDisconnect(Ring);
+        __ReceiverRingDisconnect(Ring);
 
         ListEntry = Prev;
     }
 
-    STORE(Release, Receiver->StoreInterface);
-    Receiver->StoreInterface = NULL;
+    XENBUS_STORE(Release, &Receiver->StoreInterface);
+
+fail2:
+    Error("fail2\n");
+
+    XENBUS_DEBUG(Release, &Receiver->DebugInterface);
+
+fail1:
+    Error("fail1 (%08x)\n", status);
 
     return status;
 }
@@ -2925,24 +2535,23 @@ __ReceiverSetGsoFeatureFlag(
 
     Frontend = Receiver->Frontend;
 
-    status = STORE(Printf,
-                   Receiver->StoreInterface,
-                   Transaction,
-                   FrontendGetPath(Frontend),
-                   "feature-gso-tcpv4-prefix",
-                   "%u",
-                   (Receiver->DisableIpVersion4Gso == 0) ? TRUE : FALSE);
+    status = XENBUS_STORE(Printf,
+                          &Receiver->StoreInterface,
+                          Transaction,
+                          FrontendGetPath(Frontend),
+                          "feature-gso-tcpv4-prefix",
+                          "%u",
+                          (Receiver->DisableIpVersion4Gso == 0) ? TRUE : FALSE);
     if (!NT_SUCCESS(status))
         goto fail1;
 
-
-    status = STORE(Printf,
-                   Receiver->StoreInterface,
-                   Transaction,
-                   FrontendGetPath(Frontend),
-                   "feature-gso-tcpv6-prefix",
-                   "%u",
-                   (Receiver->DisableIpVersion6Gso == 0) ? TRUE : FALSE);
+    status = XENBUS_STORE(Printf,
+                          &Receiver->StoreInterface,
+                          Transaction,
+                          FrontendGetPath(Frontend),
+                          "feature-gso-tcpv6-prefix",
+                          "%u",
+                          (Receiver->DisableIpVersion6Gso == 0) ? TRUE : FALSE);
     if (!NT_SUCCESS(status))
         goto fail2;
 
@@ -2968,23 +2577,23 @@ __ReceiverSetChecksumFeatureFlag(
 
     Frontend = Receiver->Frontend;
 
-    status = STORE(Printf,
-                   Receiver->StoreInterface,
-                   Transaction,
-                   FrontendGetPath(Frontend),
-                   "feature-no-csum-offload",
-                   "%u",
-                   FALSE);
+    status = XENBUS_STORE(Printf,
+                          &Receiver->StoreInterface,
+                          Transaction,
+                          FrontendGetPath(Frontend),
+                          "feature-no-csum-offload",
+                          "%u",
+                          FALSE);
     if (!NT_SUCCESS(status))
         goto fail1;
 
-    status = STORE(Printf,
-                   Receiver->StoreInterface,
-                   Transaction,
-                   FrontendGetPath(Frontend),
-                   "feature-ipv6-csum-offload",
-                   "%u",
-                   TRUE);
+    status = XENBUS_STORE(Printf,
+                          &Receiver->StoreInterface,
+                          Transaction,
+                          FrontendGetPath(Frontend),
+                          "feature-ipv6-csum-offload",
+                          "%u",
+                          TRUE);
     if (!NT_SUCCESS(status))
         goto fail2;
 
@@ -3011,33 +2620,33 @@ ReceiverStoreWrite(
 
     Frontend = Receiver->Frontend;
 
-    status = STORE(Printf,
-                   Receiver->StoreInterface,
-                   Transaction,
-                   FrontendGetPath(Frontend),
-                   "request-rx-copy",
-                   "%u",
-                   TRUE);
+    status = XENBUS_STORE(Printf,
+                          &Receiver->StoreInterface,
+                          Transaction,
+                          FrontendGetPath(Frontend),
+                          "request-rx-copy",
+                          "%u",
+                          TRUE);
     if (!NT_SUCCESS(status))
         goto fail1;
 
-    status = STORE(Printf,
-                   Receiver->StoreInterface,
-                   Transaction,
-                   FrontendGetPath(Frontend),
-                   "feature-sg",
-                   "%u",
-                   TRUE);
+    status = XENBUS_STORE(Printf,
+                          &Receiver->StoreInterface,
+                          Transaction,
+                          FrontendGetPath(Frontend),
+                          "feature-sg",
+                          "%u",
+                          TRUE);
     if (!NT_SUCCESS(status))
         goto fail2;
 
-    status = STORE(Printf,
-                   Receiver->StoreInterface,
-                   Transaction,
-                   FrontendGetPath(Frontend),
-                   "feature-rx-notify",
-                   "%u",
-                   TRUE);
+    status = XENBUS_STORE(Printf,
+                          &Receiver->StoreInterface,
+                          Transaction,
+                          FrontendGetPath(Frontend),
+                          "feature-rx-notify",
+                          "%u",
+                          TRUE);
     if (!NT_SUCCESS(status))
         goto fail3;
 
@@ -3052,11 +2661,11 @@ ReceiverStoreWrite(
     for (ListEntry = Receiver->List.Flink;
          ListEntry != &Receiver->List;
          ListEntry = ListEntry->Flink) {
-        PRECEIVER_RING   Ring;
+        PXENVIF_RECEIVER_RING   Ring;
 
-        Ring = CONTAINING_RECORD(ListEntry, RECEIVER_RING, ListEntry);
+        Ring = CONTAINING_RECORD(ListEntry, XENVIF_RECEIVER_RING, ListEntry);
 
-        status = __RingStoreWrite(Ring, Transaction);
+        status = __ReceiverRingStoreWrite(Ring, Transaction);
         if (!NT_SUCCESS(status))
             goto fail6;
     }    
@@ -3095,16 +2704,14 @@ ReceiverEnable(
 
     Frontend = Receiver->Frontend;
 
-    Receiver->VifInterface = FrontendGetVifInterface(Frontend);
-
     for (ListEntry = Receiver->List.Flink;
          ListEntry != &Receiver->List;
          ListEntry = ListEntry->Flink) {
-        PRECEIVER_RING   Ring;
+        PXENVIF_RECEIVER_RING   Ring;
 
-        Ring = CONTAINING_RECORD(ListEntry, RECEIVER_RING, ListEntry);
+        Ring = CONTAINING_RECORD(ListEntry, XENVIF_RECEIVER_RING, ListEntry);
 
-        status = __RingEnable(Ring);
+        status = __ReceiverRingEnable(Ring);
         if (!NT_SUCCESS(status))
             goto fail1;
     }    
@@ -3117,14 +2724,12 @@ fail1:
     ListEntry = ListEntry->Blink;
 
     while (ListEntry != &Receiver->List) {
-        PRECEIVER_RING   Ring;
+        PXENVIF_RECEIVER_RING   Ring;
 
-        Ring = CONTAINING_RECORD(ListEntry, RECEIVER_RING, ListEntry);
+        Ring = CONTAINING_RECORD(ListEntry, XENVIF_RECEIVER_RING, ListEntry);
 
-        __RingDisable(Ring);
+        __ReceiverRingDisable(Ring);
     }
-
-    Receiver->VifInterface = NULL;
 
     return status;
 }
@@ -3139,14 +2744,12 @@ ReceiverDisable(
     for (ListEntry = Receiver->List.Blink;
          ListEntry != &Receiver->List;
          ListEntry = ListEntry->Blink) {
-        PRECEIVER_RING   Ring;
+        PXENVIF_RECEIVER_RING   Ring;
 
-        Ring = CONTAINING_RECORD(ListEntry, RECEIVER_RING, ListEntry);
+        Ring = CONTAINING_RECORD(ListEntry, XENVIF_RECEIVER_RING, ListEntry);
 
-        __RingDisable(Ring);
+        __ReceiverRingDisable(Ring);
     }
-
-    Receiver->VifInterface = NULL;
 }
 
 VOID
@@ -3154,26 +2757,29 @@ ReceiverDisconnect(
     IN  PXENVIF_RECEIVER    Receiver
     )
 {
+    PXENVIF_FRONTEND        Frontend;
     PLIST_ENTRY             ListEntry;
 
-    DEBUG(Deregister,
-          Receiver->DebugInterface,
-          Receiver->DebugCallback);
+    Frontend = Receiver->Frontend;
+
+    XENBUS_DEBUG(Deregister,
+                 &Receiver->DebugInterface,
+                 Receiver->DebugCallback);
     Receiver->DebugCallback = NULL;
 
-    DEBUG(Release, Receiver->DebugInterface);
-    Receiver->DebugInterface = NULL;
+    for (ListEntry = Receiver->List.Blink;
+         ListEntry != &Receiver->List;
+         ListEntry = ListEntry->Blink) {
+        PXENVIF_RECEIVER_RING   Ring;
 
-    for (ListEntry = Receiver->List.Blink; ListEntry != &Receiver->List; ListEntry = ListEntry->Blink) {
-        PRECEIVER_RING   Ring;
+        Ring = CONTAINING_RECORD(ListEntry, XENVIF_RECEIVER_RING, ListEntry);
 
-        Ring = CONTAINING_RECORD(ListEntry, RECEIVER_RING, ListEntry);
-
-        __RingDisconnect(Ring);
+        __ReceiverRingDisconnect(Ring);
     }
 
-    STORE(Release, Receiver->StoreInterface);
-    Receiver->StoreInterface = NULL;
+    XENBUS_STORE(Release, &Receiver->StoreInterface);
+
+    XENBUS_DEBUG(Release, &Receiver->DebugInterface);
 }
 
 VOID
@@ -3185,20 +2791,31 @@ ReceiverTeardown(
     Receiver->Loaned = 0;
     Receiver->Returned = 0;
 
-    Receiver->Frontend = NULL;
-
     while (!IsListEmpty(&Receiver->List)) {
-        PLIST_ENTRY     ListEntry;
-        PRECEIVER_RING  Ring;
+        PLIST_ENTRY             ListEntry;
+        PXENVIF_RECEIVER_RING   Ring;
 
         ListEntry = RemoveTailList(&Receiver->List);
         ASSERT3P(ListEntry, !=, &Receiver->List);
         RtlZeroMemory(ListEntry, sizeof (LIST_ENTRY));
 
-        Ring = CONTAINING_RECORD(ListEntry, RECEIVER_RING, ListEntry);
+        Ring = CONTAINING_RECORD(ListEntry, XENVIF_RECEIVER_RING, ListEntry);
 
-        __RingTeardown(Ring);
+        __ReceiverRingTeardown(Ring);
     }
+
+    XENBUS_CACHE(Release, &Receiver->CacheInterface);
+
+    Receiver->Frontend = NULL;
+
+    RtlZeroMemory(&Receiver->CacheInterface,
+                  sizeof (XENBUS_CACHE_INTERFACE));
+
+    RtlZeroMemory(&Receiver->StoreInterface,
+                  sizeof (XENBUS_STORE_INTERFACE));
+
+    RtlZeroMemory(&Receiver->DebugInterface,
+                  sizeof (XENBUS_DEBUG_INTERFACE));
 
     RtlZeroMemory(&Receiver->Event, sizeof (KEVENT));
     RtlZeroMemory(&Receiver->List, sizeof (LIST_ENTRY));
@@ -3214,13 +2831,13 @@ ReceiverTeardown(
     __ReceiverFree(Receiver);
 }
 
-NTSTATUS
+VOID
 ReceiverSetOffloadOptions(
-    IN  PXENVIF_RECEIVER        Receiver,
-    IN  XENVIF_OFFLOAD_OPTIONS  Options
+    IN  PXENVIF_RECEIVER            Receiver,
+    IN  XENVIF_VIF_OFFLOAD_OPTIONS  Options
     )
 {
-    PLIST_ENTRY                 ListEntry;
+    PLIST_ENTRY                     ListEntry;
 
     if (Receiver->AllowGsoPackets == 0) {
         Warning("RECEIVER GSO DISALLOWED\n");
@@ -3231,63 +2848,55 @@ ReceiverSetOffloadOptions(
     for (ListEntry = Receiver->List.Flink;
          ListEntry != &Receiver->List;
          ListEntry = ListEntry->Flink) {
-        PRECEIVER_RING   Ring;
+        PXENVIF_RECEIVER_RING   Ring;
 
-        Ring = CONTAINING_RECORD(ListEntry, RECEIVER_RING, ListEntry);
+        Ring = CONTAINING_RECORD(ListEntry, XENVIF_RECEIVER_RING, ListEntry);
 
-        __RingSetOffloadOptions(Ring, Options);
+        __ReceiverRingSetOffloadOptions(Ring, Options);
     }    
-
-    return STATUS_SUCCESS;
 }
 
 VOID
-ReceiverGetPacketStatistics(
-    IN  PXENVIF_RECEIVER                    Receiver,
-    OUT PXENVIF_RECEIVER_PACKET_STATISTICS  Statistics
-    )
-{
-    PLIST_ENTRY                             ListEntry;
-
-    RtlZeroMemory(Statistics, sizeof (XENVIF_RECEIVER_PACKET_STATISTICS));
-
-    for (ListEntry = Receiver->List.Flink;
-         ListEntry != &Receiver->List;
-         ListEntry = ListEntry->Flink) {
-        PRECEIVER_RING   Ring;
-
-        Ring = CONTAINING_RECORD(ListEntry, RECEIVER_RING, ListEntry);
-
-        __RingAddPacketStatistics(Ring, Statistics);
-    }    
-}
-
-ULONG
-ReceiverGetRingSize(
-    IN  PXENVIF_RECEIVER    Receiver
+ReceiverQueryRingSize(
+    IN  PXENVIF_RECEIVER    Receiver,
+    OUT PULONG              Size
     )
 {
     UNREFERENCED_PARAMETER(Receiver);
 
-    return RECEIVER_RING_SIZE;
+    *Size = XENVIF_RECEIVER_RING_SIZE;
 }
 
 VOID
-ReceiverReturnPacket(
-    IN  PXENVIF_RECEIVER        Receiver,
-    IN  PXENVIF_RECEIVER_PACKET Packet
+ReceiverReturnPackets(
+    IN  PXENVIF_RECEIVER    Receiver,
+    IN  PLIST_ENTRY         List
     )
 {
-    PRECEIVER_RING              Ring;
-    LONG                        Loaned;
-    LONG                        Returned;
+    ULONG                   Count;
+    LONG                    Loaned;
+    LONG                    Returned;
 
-    Ring = Packet->Cookie;
-    Packet->Cookie = NULL;
+    Count = 0;
+    while (!IsListEmpty(List)) {
+        PLIST_ENTRY             ListEntry;
+        PXENVIF_RECEIVER_PACKET Packet;
+        PXENVIF_RECEIVER_RING   Ring;
 
-    __RingReturnPacket(Ring, Packet, FALSE);
+        ListEntry = RemoveHeadList(List);
+        ASSERT3P(ListEntry, !=, List);
 
-    Returned = InterlockedIncrement(&Receiver->Returned);
+        RtlZeroMemory(ListEntry, sizeof (LIST_ENTRY));
+
+        Packet = CONTAINING_RECORD(ListEntry, XENVIF_RECEIVER_PACKET, ListEntry);
+
+        Ring = Packet->Cookie;
+
+        __ReceiverRingReturnPacket(Ring, Packet, FALSE);
+        Count++;
+    }
+
+    Returned = __InterlockedAdd(&Receiver->Returned, Count);
 
     // Make sure Loaned is not sampled before Returned
     KeMemoryBarrier();
@@ -3336,10 +2945,10 @@ ReceiverNotify(
     for (ListEntry = Receiver->List.Flink;
          ListEntry != &Receiver->List;
          ListEntry = ListEntry->Flink) {
-        PRECEIVER_RING   Ring;
+        PXENVIF_RECEIVER_RING   Ring;
 
-        Ring = CONTAINING_RECORD(ListEntry, RECEIVER_RING, ListEntry);
+        Ring = CONTAINING_RECORD(ListEntry, XENVIF_RECEIVER_RING, ListEntry);
 
-        __RingNotify(Ring);
+        __ReceiverRingNotify(Ring);
     }    
 }

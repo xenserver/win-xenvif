@@ -29,88 +29,146 @@
  * SUCH DAMAGE.
  */
 
+/*! \file debug_interface.h
+    \brief XENBUS DEBUG Interface
+
+    This interface provides to register and invoke debug callbacks
+*/
+
 #ifndef _XENBUS_DEBUG_INTERFACE_H
 #define _XENBUS_DEBUG_INTERFACE_H
 
+#ifndef _WINDLL
+
+/*! \typedef XENBUS_DEBUG_CALLBACK
+    \brief Debug callback handle
+*/
 typedef struct _XENBUS_DEBUG_CALLBACK   XENBUS_DEBUG_CALLBACK, *PXENBUS_DEBUG_CALLBACK;
 
-#define DEFINE_DEBUG_OPERATIONS                                                 \
-        DEBUG_OPERATION(VOID,                                                   \
-                        Acquire,                                                \
-                        (                                                       \
-                        IN  PXENBUS_DEBUG_CONTEXT  Context                      \
-                        )                                                       \
-                        )                                                       \
-        DEBUG_OPERATION(VOID,                                                   \
-                        Release,                                                \
-                        (                                                       \
-                        IN  PXENBUS_DEBUG_CONTEXT  Context                      \
-                        )                                                       \
-                        )                                                       \
-        DEBUG_OPERATION(NTSTATUS,                                               \
-                        Register,                                               \
-                        (                                                       \
-                        IN  PXENBUS_DEBUG_CONTEXT  Context,                     \
-                        IN  const CHAR             *Prefix,                     \
-                        IN  VOID                   (*Function)(PVOID, BOOLEAN), \
-                        IN  PVOID                  Argument OPTIONAL,           \
-                        OUT PXENBUS_DEBUG_CALLBACK *Callback                    \
-                        )                                                       \
-                        )                                                       \
-        DEBUG_OPERATION(VOID,                                                   \
-                        Printf,                                                 \
-                        (                                                       \
-                        IN  PXENBUS_DEBUG_CONTEXT  Context,                     \
-                        IN  PXENBUS_DEBUG_CALLBACK Callback,                    \
-                        IN  const CHAR             *Format,                     \
-                        ...                                                     \
-                        )                                                       \
-                        )                                                       \
-        DEBUG_OPERATION(VOID,                                                   \
-                        Deregister,                                             \
-                        (                                                       \
-                        IN  PXENBUS_DEBUG_CONTEXT  Context,                     \
-                        IN  PXENBUS_DEBUG_CALLBACK Callback                     \
-                        )                                                       \
-                        )
+/*! \typedef XENBUS_DEBUG_ACQUIRE
+    \brief Acquire a reference to the DEBUG interface
 
-typedef struct _XENBUS_DEBUG_CONTEXT    XENBUS_DEBUG_CONTEXT, *PXENBUS_DEBUG_CONTEXT;
+    \param Interface The interface header
+*/  
+typedef NTSTATUS
+(*XENBUS_DEBUG_ACQUIRE)(
+    IN  PINTERFACE  Interface
+    );
 
-#define DEBUG_OPERATION(_Type, _Name, _Arguments) \
-        _Type (*DEBUG_ ## _Name) _Arguments;
+/*! \typedef XENBUS_DEBUG_RELEASE
+    \brief Release a reference to the DEBUG interface
 
-typedef struct _XENBUS_DEBUG_OPERATIONS {
-    DEFINE_DEBUG_OPERATIONS
-} XENBUS_DEBUG_OPERATIONS, *PXENBUS_DEBUG_OPERATIONS;
+    \param Interface The interface header
+*/  
+typedef VOID
+(*XENBUS_DEBUG_RELEASE)(
+    IN  PINTERFACE  Interface
+    );
 
-#undef DEBUG_OPERATION
+/*! \typedef XENBUS_DEBUG_FUNCTION
+    \brief Debug callback function
 
-typedef struct _XENBUS_DEBUG_INTERFACE   XENBUS_DEBUG_INTERFACE, *PXENBUS_DEBUG_INTERFACE;
+    \param Argument Context \a Argument supplied to \a XENBUS_DEBUG_REGISTER
+    \param Crashing This is set to TRUE if the function is invoked as
+    part of pre-crash logging
 
-// {54AAE52C-1838-49d3-AA43-9DDDD891603B}
-DEFINE_GUID(GUID_DEBUG_INTERFACE, 
-            0x54aae52c,
-            0x1838,
-            0x49d3,
-            0xaa,
-            0x43,
-            0x9d,
-            0xdd,
-            0xd8,
-            0x91,
-            0x60,
-            0x3b);
+    Debug callback functions are always invoked with IRQL == HIGH_LEVEL
+*/  
+typedef VOID
+(*XENBUS_DEBUG_FUNCTION)(
+    IN  PVOID   Argument,
+    IN  BOOLEAN Crashing
+    );
 
-#define DEBUG_INTERFACE_VERSION    4
+/*! \typedef XENBUS_DEBUG_REGISTER
+    \brief Register a debug callback function
 
-#define DEBUG_OPERATIONS(_Interface) \
-        (PXENBUS_DEBUG_OPERATIONS *)((ULONG_PTR)(_Interface))
+    \param Interface The interface header
+    \param Prefix A prefix applied to each line logged by \a XENBUS_DEBUG_PRINTF
+    \param Function The callback function
+    \param Argument An optional context argument passed to the callback
+    \param Callback A pointer to a callback handle to be initialized
+*/  
+typedef NTSTATUS
+(*XENBUS_DEBUG_REGISTER)(
+    IN  PINTERFACE              Interface,
+    IN  PCHAR                   Prefix,
+    IN  XENBUS_DEBUG_FUNCTION   Function,
+    IN  PVOID                   Argument OPTIONAL,
+    OUT PXENBUS_DEBUG_CALLBACK  *Callback
+    );
 
-#define DEBUG_CONTEXT(_Interface) \
-        (PXENBUS_DEBUG_CONTEXT *)((ULONG_PTR)(_Interface) + sizeof (PVOID))
+/*! \typedef XENBUS_DEBUG_PRINTF
+    \brief Print a debug message in to the log
 
-#define DEBUG(_Operation, _Interface, ...) \
-        (*DEBUG_OPERATIONS(_Interface))->DEBUG_ ## _Operation((*DEBUG_CONTEXT(_Interface)), __VA_ARGS__)
+    \param Interface The interface header
+    \param Format A format specifier
+    \param ... Additional parameters required by \a Format
+
+    This method must only be invoked from the context of a debug
+    callback
+*/  
+typedef VOID
+(*XENBUS_DEBUG_PRINTF)(
+    IN  PINTERFACE              Interface,
+    IN  const CHAR              *Format,
+    ...
+    );
+
+/*! \typedef XENBUS_DEBUG_DEREGISTER
+    \brief Deregister a debug callback function
+
+    \param Interface The interface header
+    \param Callback The callback handle
+*/
+typedef VOID
+(*XENBUS_DEBUG_DEREGISTER)(
+    IN  PINTERFACE              Interface,
+    IN  PXENBUS_DEBUG_CALLBACK  Callback
+    );
+
+/*! \typedef XENBUS_DEBUG_TRIGGER
+    \brief Invoke debug callback functions
+
+    \param Interface The interface header
+    \param Callback Optional argument to restrict invocation to a singe
+    debug callback (NULL invokes all debug callbacks)
+*/
+typedef VOID
+(*XENBUS_DEBUG_TRIGGER)(
+    IN  PINTERFACE              Interface,
+    IN  PXENBUS_DEBUG_CALLBACK  Callback OPTIONAL
+    );
+
+// {0DF600AE-6B20-4227-BF94-03DA9A26A114}
+DEFINE_GUID(GUID_XENBUS_DEBUG_INTERFACE, 
+0xdf600ae, 0x6b20, 0x4227, 0xbf, 0x94, 0x3, 0xda, 0x9a, 0x26, 0xa1, 0x14);
+
+/*! \struct _XENBUS_DEBUG_INTERFACE_V1
+    \brief DEBUG interface version 1
+*/
+struct _XENBUS_DEBUG_INTERFACE_V1 {
+    INTERFACE               Interface;
+    XENBUS_DEBUG_ACQUIRE    DebugAcquire;
+    XENBUS_DEBUG_RELEASE    DebugRelease;
+    XENBUS_DEBUG_REGISTER   DebugRegister;
+    XENBUS_DEBUG_PRINTF     DebugPrintf;
+    XENBUS_DEBUG_TRIGGER    DebugTrigger;
+    XENBUS_DEBUG_DEREGISTER DebugDeregister;
+};
+
+typedef struct _XENBUS_DEBUG_INTERFACE_V1 XENBUS_DEBUG_INTERFACE, *PXENBUS_DEBUG_INTERFACE;
+
+/*! \def XENBUS_DEBUG
+    \brief Macro at assist in method invocation
+*/
+#define XENBUS_DEBUG(_Method, _Interface, ...)    \
+    (_Interface)->Debug ## _Method((PINTERFACE)(_Interface), __VA_ARGS__)
+
+#endif  // _WINDLL
+
+#define XENBUS_DEBUG_INTERFACE_VERSION_MIN  1
+#define XENBUS_DEBUG_INTERFACE_VERSION_MAX  1
 
 #endif  // _XENBUS_DEBUG_INTERFACE_H
 

@@ -29,50 +29,14 @@
  * SUCH DAMAGE.
  */
 
-#ifndef _XENVIF_POOL_H
-#define _XENVIF_POOL_H
-
-#include <ntddk.h>
-
-typedef struct _XENVIF_POOL XENVIF_POOL, *PXENVIF_POOL;
+#ifndef _XENVIF_LINK_H
+#define _XENVIF_LINK_H
 
 extern NTSTATUS
-PoolInitialize(
-    IN  const CHAR      *Name,
-    IN  ULONG           Size,
-    IN  NTSTATUS        (*Ctor)(PVOID, PVOID),
-    IN  VOID            (*Dtor)(PVOID, PVOID),
-    IN  VOID            (*AcquireLock)(PVOID),
-    IN  VOID            (*ReleaseLock)(PVOID),
-    IN  PVOID           Argument,
-    OUT PXENVIF_POOL    *Pool
-    );
+LinkGetRoutineAddress(
+    IN  const CHAR  *ModuleName,
+    IN  const CHAR  *FunctionName,
+    OUT PVOID       *Address
+     );
 
-extern VOID
-PoolTeardown(
-    IN  PXENVIF_POOL    Pool
-    );
-
-extern PVOID
-PoolGet(
-    IN  PXENVIF_POOL    Pool,
-    IN  BOOLEAN         Locked
-    );
-
-extern VOID
-PoolPut(
-    IN  PXENVIF_POOL    Pool,
-    IN  PVOID           Object,
-    IN  BOOLEAN         Locked
-    );
-
-extern VOID
-PoolGetStatistics(
-    IN  PXENVIF_POOL    Pool,
-    OUT PULONG          Allocated,
-    OUT PULONG          MaximumAllocated,
-    OUT PULONG          Count,
-    OUT PULONG          MinimumCount
-    );
-
-#endif  // _XENVIF_POOL_H
+#endif  // _XENVIF_LINK_H

@@ -33,10 +33,10 @@
 #define _XENVIF_TRANSMITTER_H
 
 #include <ntddk.h>
+#include <netioapi.h>
 #include <vif_interface.h>
 
 #include "frontend.h"
-#include "netio.h"
 
 typedef struct _XENVIF_TRANSMITTER XENVIF_TRANSMITTER, *PXENVIF_TRANSMITTER;
 
@@ -89,32 +89,21 @@ TransmitterAbortPackets(
     );
 
 extern VOID
-TransmitterGetPacketStatistics(
-    IN  PXENVIF_TRANSMITTER                     Transmitter,
-    OUT PXENVIF_TRANSMITTER_PACKET_STATISTICS   Statistics
-    );
-
-extern ULONG
-TransmitterGetRingSize(
-    IN  PXENVIF_TRANSMITTER Transmitter
+TransmitterQueryRingSize(
+    IN  PXENVIF_TRANSMITTER Transmitter,
+    OUT PULONG              Size
     );
 
 extern VOID
 TransmitterUpdateAddressTable(
     IN  PXENVIF_TRANSMITTER Transmitter,
-    IN  SOCKADDR_INET       Table[],
+    IN  PSOCKADDR_INET      Table,
     IN  ULONG               Count
     );
 
 extern VOID
-TransmitterAdvertizeAddresses(
+TransmitterAdvertiseAddresses(
     IN  PXENVIF_TRANSMITTER Transmitter
-    );
-
-extern VOID
-TransmitterSetPacketMetadata(
-    IN  PXENVIF_TRANSMITTER                 Transmitter,
-    IN  XENVIF_TRANSMITTER_PACKET_METADATA  Metadata
     );
 
 extern VOID
@@ -124,15 +113,23 @@ TransmitterQueuePackets(
     );
 
 extern VOID
-TransmitterGetOffloadOptions(
-    IN  PXENVIF_TRANSMITTER     Transmitter,
-    OUT PXENVIF_OFFLOAD_OPTIONS Options
+TransmitterQueryOffloadOptions(
+    IN  PXENVIF_TRANSMITTER         Transmitter,
+    OUT PXENVIF_VIF_OFFLOAD_OPTIONS Options
     );
 
-extern ULONG
-TransmitterGetLargePacketSize(
+extern VOID
+TransmitterQueryLargePacketSize(
     IN  PXENVIF_TRANSMITTER     Transmitter,
-    IN  UCHAR                   Version
+    IN  UCHAR                   Version,
+    OUT PULONG                  Size
+    );
+
+extern NTSTATUS
+TransmitterSetPacketOffset(
+    IN  PXENVIF_TRANSMITTER                 Transmitter,
+    IN  XENVIF_TRANSMITTER_PACKET_OFFSET    Type,
+    IN  LONG_PTR                            Value
     );
 
 #endif  // _XENVIF_TRANSMITTER_H
