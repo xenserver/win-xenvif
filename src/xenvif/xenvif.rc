@@ -38,10 +38,10 @@
 #undef VER_PRODUCTVERSION
 #undef VER_PRODUCTVERSION_STR
 
-#define	VER_COMPANYNAME_STR         "Citrix Systems Inc."
-#define VER_LEGALCOPYRIGHT_STR      "Copyright " YEAR_STR VER_COMPANYNAME_STR
-
 #include <version.h>
+
+#define	VER_COMPANYNAME_STR         COMPANY_NAME_STR
+#define VER_LEGALCOPYRIGHT_STR      "Copyright (c) Citrix Systems Inc."
 
 #define VER_PRODUCTNAME_STR         "XENVIF"
 #define VER_PRODUCTVERSION          MAJOR_VERSION,MINOR_VERSION,MICRO_VERSION,BUILD_NUMBER

@@ -28,6 +28,11 @@ def make_header():
     now = datetime.datetime.now()
 
     file = open('include\\version.h', 'w')
+
+    file.write('#define COMPANY_NAME_STR\t"' + os.environ['COMPANY_NAME'] + '"\n')
+    file.write('#define PRODUCT_NAME_STR\t"' + os.environ['PRODUCT_NAME'] + '"\n')
+    file.write('\n')
+
     file.write('#define MAJOR_VERSION\t' + os.environ['MAJOR_VERSION'] + '\n')
     file.write('#define MAJOR_VERSION_STR\t"' + os.environ['MAJOR_VERSION'] + '"\n')
     file.write('\n')
@@ -46,12 +51,15 @@ def make_header():
 
     file.write('#define YEAR\t' + str(now.year) + '\n')
     file.write('#define YEAR_STR\t"' + str(now.year) + '"\n')
+    file.write('\n')
 
     file.write('#define MONTH\t' + str(now.month) + '\n')
     file.write('#define MONTH_STR\t"' + str(now.month) + '"\n')
+    file.write('\n')
 
     file.write('#define DAY\t' + str(now.day) + '\n')
     file.write('#define DAY_STR\t"' + str(now.day) + '"\n')
+    file.write('\n')
 
     file.close()
 
@@ -65,6 +73,8 @@ def copy_inf(name):
         line = re.sub('@MINOR_VERSION@', os.environ['MINOR_VERSION'], line)
         line = re.sub('@MICRO_VERSION@', os.environ['MICRO_VERSION'], line)
         line = re.sub('@BUILD_NUMBER@', os.environ['BUILD_NUMBER'], line)
+        line = re.sub('@COMPANY_NAME@', os.environ['COMPANY_NAME'], line)
+        line = re.sub('@PRODUCT_NAME@', os.environ['PRODUCT_NAME'], line)
         dst.write(line)
 
     dst.close()
@@ -361,8 +371,14 @@ if __name__ == '__main__':
     sdv = { 'nosdv': False, None: True }
     driver = 'xenvif'
 
-    os.environ['MAJOR_VERSION'] = '7'
-    os.environ['MINOR_VERSION'] = '3'
+    if 'COMPANY_NAME' not in os.environ.keys():
+        os.environ['COMPANY_NAME'] = 'Xen Project'
+
+    if 'PRODUCT_NAME' not in os.environ.keys():
+        os.environ['PRODUCT_NAME'] = 'Xen'
+
+    os.environ['MAJOR_VERSION'] = '8'
+    os.environ['MINOR_VERSION'] = '0'
     os.environ['MICRO_VERSION'] = '0'
 
     if 'BUILD_NUMBER' not in os.environ.keys():

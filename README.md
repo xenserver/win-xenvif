@@ -1,12 +1,11 @@
-XenVif - The XenServer Paravitual Network Class Driver for Windows
-==================================================================
+XenVif - The Xen Paravitual Network Class Driver for Windows
+============================================================
 
 The XenVif package consists of a single device driver:
 
 *    xenvif.sys is a bus driver which attaches to a virtual device created
-     by XenBus (see https://github.com/xenserver/win-xenbus) and creates a
-     child device for each VIF for XenNet
-     (see https://github.com/xenserver/win-xennet) attach to.
+     by XenBus and creates a child device for each VIF for XenNet to attach
+     to.
      It is also a protocol driver for the netif wire protocol (see
      include\\xen\\io\\netif.h).
 

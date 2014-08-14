@@ -33,7 +33,7 @@
 Signature="$Windows NT$" 
 Class=System
 ClassGUID={4d36e97d-e325-11ce-bfc1-08002be10318}
-Provider=%Citrix% 
+Provider=%Company% 
 CatalogFile=xenvif.cat
 DriverVer=01/01/1900,0.0.0.0
 
@@ -52,9 +52,9 @@ xenvif_coinst.dll=0,,
 xenvif_coinst_@MAJOR_VERSION@_@MINOR_VERSION@_@MICRO_VERSION@_@BUILD_NUMBER@.dll,xenvif_coinst.dll
 
 [Manufacturer] 
-%Citrix%=Citrix,NT$ARCH$
+%Company%=Inst,NT$ARCH$
 
-[Citrix.NT$ARCH$]
+[Inst.NT$ARCH$]
 ; DisplayName		Section		DeviceID
 ; -----------		-------		--------
 
@@ -97,9 +97,9 @@ HKR,,CoInstallers32,0x00010000,"xenvif_coinst_@MAJOR_VERSION@_@MINOR_VERSION@_@M
 
 [Strings] 
 
-Citrix="Citrix Systems Inc." 
-DiskDesc="XenServer Tools for Virtual Machines" 
-XenVifDesc="XenServer PV Network Class"
+Company="@COMPANY_NAME@"
+DiskDesc="@PRODUCT_NAME@ PV Network Class Package"
+XenVifDesc="@PRODUCT_NAME@ PV Network Class"
 
 SERVICE_BOOT_START=0x0 
 SERVICE_SYSTEM_START=0x1 
