@@ -73,7 +73,7 @@ AddService=xenvif,0x02,XenVif_Service,
 
 [XenVif_Service] 
 ServiceType=%SERVICE_KERNEL_DRIVER% 
-StartType=%SERVICE_DEMAND_START% 
+StartType=%SERVICE_BOOT_START%
 ErrorControl=%SERVICE_ERROR_NORMAL% 
 ServiceBinary=%12%\xenvif.sys 
 LoadOrderGroup="NDIS"
