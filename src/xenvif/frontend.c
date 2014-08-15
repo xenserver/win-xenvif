@@ -1009,12 +1009,38 @@ __FrontendPrepare(
     if (!NT_SUCCESS(status))
         goto fail2;
 
+    while (State == XenbusStateConnected) {
+        (VOID) STORE(Printf,
+                     Frontend->StoreInterface,
+                     NULL,
+                     __FrontendGetPath(Frontend),
+                     "state",
+                     "%u",
+                     XenbusStateClosing);
+        status = __FrontendWaitForStateChange(Frontend, Path, &State);
+        if (!NT_SUCCESS(status))
+            goto fail3;
+    }
+
+    while (State == XenbusStateClosing) {
+        (VOID) STORE(Printf,
+                     Frontend->StoreInterface,
+                     NULL,
+                     __FrontendGetPath(Frontend),
+                     "state",
+                     "%u",
+                     XenbusStateClosed);
+        status = __FrontendWaitForStateChange(Frontend, Path, &State);
+        if (!NT_SUCCESS(status))
+            goto fail4;
+    }
+
     while (State != XenbusStateClosed &&
            State != XenbusStateInitialising &&
            State != XenbusStateInitWait) {
         status = __FrontendWaitForStateChange(Frontend, Path, &State);
         if (!NT_SUCCESS(status))
-            goto fail3;
+            goto fail5;
     }
 
     status = STORE(Printf,
@@ -1025,18 +1051,18 @@ __FrontendPrepare(
                    "%u",
                    XenbusStateInitialising);
     if (!NT_SUCCESS(status))
-        goto fail4;
+        goto fail6;
 
     while (State == XenbusStateClosed ||
            State == XenbusStateInitialising) {
         status = __FrontendWaitForStateChange(Frontend, Path, &State);
         if (!NT_SUCCESS(status))
-            goto fail5;
+            goto fail7;
     }
 
     status = STATUS_UNSUCCESSFUL;
     if (State != XenbusStateInitWait)
-        goto fail6;
+        goto fail8;
 
     Frontend->BackendPath = Path;
 
@@ -1063,16 +1089,22 @@ __FrontendPrepare(
                    ThreadGetEvent(Frontend->EjectThread),
                    &Frontend->Watch);
     if (!NT_SUCCESS(status))
-        goto fail7;
+        goto fail9;
 
     Trace("<====\n");
     return STATUS_SUCCESS;
 
-fail7:
-    Error("fail7\n");
+fail9:
+    Error("fail8\n");
 
     Frontend->BackendDomain = DOMID_INVALID;
     Frontend->BackendPath = NULL;
+
+fail8:
+    Error("fail8\n");
+
+fail7:
+    Error("fail7\n");
 
 fail6:
     Error("fail6\n");
