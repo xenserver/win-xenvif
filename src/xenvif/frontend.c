@@ -535,60 +535,6 @@ abort:
 }
 
 static FORCEINLINE NTSTATUS
-__FrontendInsertAddress(
-    IN OUT  PSOCKADDR_INET      *AddressTable,
-    IN      const SOCKADDR_INET *Address,
-    IN OUT  PULONG              AddressCount
-    )
-{
-    ULONG                       Index;
-    PSOCKADDR_INET              Table;
-    NTSTATUS                    status;
-
-    for (Index = 0; Index < *AddressCount; Index++) {
-        if ((*AddressTable)[Index].si_family != Address->si_family)
-            continue;
-
-        if (Address->si_family == AF_INET) {
-            if (RtlCompareMemory(&Address->Ipv4.sin_addr.s_addr,
-                                 &(*AddressTable)[Index].Ipv4.sin_addr.s_addr,
-                                 IPV4_ADDRESS_LENGTH) == IPV4_ADDRESS_LENGTH)
-                goto done;
-        } else {
-            ASSERT3U(Address->si_family, ==, AF_INET6);
-
-            if (RtlCompareMemory(&Address->Ipv6.sin6_addr.s6_addr,
-                                 &(*AddressTable)[Index].Ipv6.sin6_addr.s6_addr,
-                                 IPV6_ADDRESS_LENGTH) == IPV6_ADDRESS_LENGTH)
-                goto done;
-        }
-    }
-
-    // We have an address we've not seen before so grow the table
-    Table = __FrontendAllocate(sizeof (SOCKADDR_INET) * (*AddressCount + 1));
-
-    status = STATUS_NO_MEMORY;
-    if (Table == NULL)
-        goto fail1;
-
-    RtlCopyMemory(Table, *AddressTable, sizeof (SOCKADDR_INET) * *AddressCount);
-    Table[(*AddressCount)++] = *Address;
-
-    if (*AddressTable != NULL)
-        __FrontendFree(*AddressTable);
-
-    *AddressTable = Table;
-
-done:
-    return STATUS_SUCCESS;
-
-fail1:
-    Error("fail1 (%08x)\n", status);
-
-    return status;
-}
-
-static FORCEINLINE NTSTATUS
 __FrontendGetAddressTable(
     IN  PXENVIF_FRONTEND            Frontend,
     OUT PSOCKADDR_INET              *AddressTable,
@@ -599,6 +545,7 @@ __FrontendGetAddressTable(
     ULONG                           Index;
     PMIB_UNICASTIPADDRESS_TABLE     Table;
     KIRQL                           Irql;
+    ULONG                           Count;
     NTSTATUS                        status;
 
     status = GetUnicastIpAddressTable(AF_UNSPEC, &Table);
@@ -617,6 +564,7 @@ __FrontendGetAddressTable(
 
     NetLuid = __FrontendGetNetLuid(Frontend);
 
+    Count = 0;
     for (Index = 0; Index < Table->NumEntries; Index++) {
         PMIB_UNICASTIPADDRESS_ROW   Row = &Table->Table[Index];
 
@@ -630,10 +578,35 @@ __FrontendGetAddressTable(
             Row->Address.si_family != AF_INET6)
             continue;
 
-        status = __FrontendInsertAddress(AddressTable, &Row->Address, AddressCount);
-        if (!NT_SUCCESS(status))
-            goto fail2;
+        Count++;
     }
+
+    if (Count == 0)
+        goto done;
+
+    *AddressTable = __FrontendAllocate(sizeof (SOCKADDR_INET) * Count);
+
+    status = STATUS_NO_MEMORY;
+    if (*AddressTable == NULL)
+        goto fail2;
+
+    for (Index = 0; Index < Table->NumEntries; Index++) {
+        PMIB_UNICASTIPADDRESS_ROW   Row = &Table->Table[Index];
+
+        if (Row->InterfaceLuid.Info.IfType != NetLuid->Info.IfType)
+            continue;
+
+        if (Row->InterfaceLuid.Info.NetLuidIndex != NetLuid->Info.NetLuidIndex)
+            continue;
+
+        if (Row->Address.si_family != AF_INET &&
+            Row->Address.si_family != AF_INET6)
+            continue;
+
+        (*AddressTable)[(*AddressCount)++] = Row->Address;
+    }
+
+    ASSERT3U(*AddressCount, ==, Count);
 
 done:
     KeReleaseSpinLock(&Frontend->Lock, Irql);
@@ -645,15 +618,198 @@ done:
 fail2:
     Error("fail2\n");
 
-    if (*AddressTable != NULL)
-        __FrontendFree(*AddressTable);
-
     KeReleaseSpinLock(&Frontend->Lock, Irql);
 
     (VOID) FreeMibTable(Table);
 
 fail1:
     Error("fail1 (%08x)\n", status);
+
+    return status;
+}
+
+static NTSTATUS
+FrontendDumpAddressTable(
+    IN  PXENVIF_FRONTEND        Frontend,
+    IN  PSOCKADDR_INET          Table,
+    IN  ULONG                   Count
+    )
+{
+    PXENBUS_STORE_TRANSACTION   Transaction;
+    ULONG                       Index;
+    ULONG                       IpVersion4Count;
+    ULONG                       IpVersion6Count;
+    KIRQL                       Irql;
+    NTSTATUS                    status;
+
+    KeAcquireSpinLock(&Frontend->Lock, &Irql);
+
+    status = STATUS_SUCCESS;
+    if (Frontend->State == FRONTEND_CLOSED)
+        goto done;
+
+    STORE(Acquire, Frontend->StoreInterface);
+
+    status = STORE(TransactionStart,
+                   Frontend->StoreInterface,
+                   &Transaction);
+    if (!NT_SUCCESS(status))
+        goto fail1;
+
+    status = STORE(Remove,
+                   Frontend->StoreInterface,
+                   Transaction,
+                   FrontendGetPrefix(Frontend),
+                   "ip");
+    if (!NT_SUCCESS(status) &&
+        status != STATUS_OBJECT_NAME_NOT_FOUND)
+        goto fail2;
+
+    status = STORE(Remove,
+                   Frontend->StoreInterface,
+                   Transaction,
+                   FrontendGetPrefix(Frontend),
+                   "ipv4");
+    if (!NT_SUCCESS(status) &&
+        status != STATUS_OBJECT_NAME_NOT_FOUND)
+        goto fail3;
+
+    status = STORE(Remove,
+                   Frontend->StoreInterface,
+                   Transaction,
+                   FrontendGetPrefix(Frontend),
+                   "ipv6");
+    if (!NT_SUCCESS(status) &&
+        status != STATUS_OBJECT_NAME_NOT_FOUND)
+        goto fail4;
+
+    IpVersion4Count = 0;
+    IpVersion6Count = 0;
+
+    for (Index = 0; Index < Count; Index++) {
+        switch (Table[Index].si_family) {
+        case AF_INET: {
+            IPV4_ADDRESS    Address;
+            CHAR            Node[sizeof ("ipv4/XXXXXXXX/addr")];
+
+            RtlCopyMemory(Address.Byte,
+                          &Table[Index].Ipv4.sin_addr.s_addr,
+                          IPV4_ADDRESS_LENGTH);
+
+            status = RtlStringCbPrintfA(Node,
+                                        sizeof (Node),
+                                        "ipv4/%u/addr",
+                                        IpVersion4Count);
+            ASSERT(NT_SUCCESS(status));
+
+            status = STORE(Printf,
+                           Frontend->StoreInterface,
+                           Transaction,
+                           FrontendGetPrefix(Frontend),
+                           Node,
+                           "%u.%u.%u.%u",
+                           Address.Byte[0],
+                           Address.Byte[1],
+                           Address.Byte[2],
+                           Address.Byte[3]);
+            if (!NT_SUCCESS(status))
+                goto fail5;
+
+            if (IpVersion4Count == 0) {
+                status = STORE(Printf,
+                               Frontend->StoreInterface,
+                               Transaction,
+                               FrontendGetPrefix(Frontend),
+                               "ip",
+                               "%u.%u.%u.%u",
+                               Address.Byte[0],
+                               Address.Byte[1],
+                               Address.Byte[2],
+                               Address.Byte[3]);
+                if (!NT_SUCCESS(status))
+                    goto fail6;
+            }
+
+            IpVersion4Count++;
+            break;
+        }
+        case AF_INET6: {
+            IPV6_ADDRESS    Address;
+            CHAR            Node[sizeof ("ipv6/XXXXXXXX/addr")];
+
+            RtlCopyMemory(Address.Byte,
+                          &Table[Index].Ipv6.sin6_addr.s6_addr,
+                          IPV6_ADDRESS_LENGTH);
+
+            status = RtlStringCbPrintfA(Node,
+                                        sizeof (Node),
+                                        "ipv6/%u/addr",
+                                        IpVersion6Count);
+            ASSERT(NT_SUCCESS(status));
+
+            status = STORE(Printf,
+                           Frontend->StoreInterface,
+                           Transaction,
+                           FrontendGetPrefix(Frontend),
+                           Node,
+                           "%04x:%04x:%04x:%04x:%04x:%04x:%04x:%04x",
+                           NTOHS(Address.Word[0]),
+                           NTOHS(Address.Word[1]),
+                           NTOHS(Address.Word[2]),
+                           NTOHS(Address.Word[3]),
+                           NTOHS(Address.Word[4]),
+                           NTOHS(Address.Word[5]),
+                           NTOHS(Address.Word[6]),
+                           NTOHS(Address.Word[7]));
+            if (!NT_SUCCESS(status))
+                goto fail5;
+
+            IpVersion6Count++;
+            break;
+        }
+        default:
+            break;
+        }
+    }
+
+    status = STORE(TransactionEnd,
+                   Frontend->StoreInterface,
+                   Transaction,
+                   TRUE);
+
+    STORE(Release, Frontend->StoreInterface);
+
+done:
+    KeReleaseSpinLock(&Frontend->Lock, Irql);
+
+    return status;
+
+fail6:
+    Error("fail6\n");
+
+fail5:
+    Error("fail5\n");
+
+fail4:
+    Error("fail4\n");
+
+fail3:
+    Error("fail3\n");
+
+fail2:
+    Error("fail2\n");
+
+    (VOID) STORE(TransactionEnd,
+                 Frontend->StoreInterface,
+                 Transaction,
+                 FALSE);
+
+fail1:
+    Error("fail1 (%08x)\n", status);
+
+    STORE(Release, Frontend->StoreInterface);
+
+    KeReleaseSpinLock(&Frontend->Lock, Irql);
 
     return status;
 }
@@ -728,6 +884,9 @@ again:
     for (;;) { 
         PSOCKADDR_INET  Table;
         ULONG           Count;
+        ULONG           Attempt;
+
+        Trace("waiting...\n");
 
         (VOID) KeWaitForSingleObject(Event,
                                      Executive,
@@ -735,6 +894,8 @@ again:
                                      FALSE,
                                      NULL);
         KeClearEvent(Event);
+
+        Trace("awake\n");
 
         if (ThreadIsAlerted(Self))
             break;
@@ -748,6 +909,13 @@ again:
         TransmitterUpdateAddressTable(__FrontendGetTransmitter(Frontend),
                                       Table,
                                       Count);
+
+        Attempt = 0;
+        do {
+            status = FrontendDumpAddressTable(Frontend,
+                                              Table,
+                                              Count);
+        } while (status == STATUS_RETRY && ++Attempt <= 10);
 
         if (Count != 0)
             __FrontendFree(Table);
