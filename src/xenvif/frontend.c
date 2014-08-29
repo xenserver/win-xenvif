@@ -842,7 +842,9 @@ FrontendMib(
 {
     PXENVIF_FRONTEND    Frontend = Context;
     PKEVENT             Event;
+    LARGE_INTEGER       Timeout;
     HANDLE              Handle;
+    LARGE_INTEGER       LastWake;
     NTSTATUS            status;
 
     Trace("====>\n");
@@ -856,8 +858,6 @@ again:
     status = NetioInitialize();
     if (!NT_SUCCESS(status)) {
         if (status == STATUS_RETRY) {
-            LARGE_INTEGER  Timeout;
-
             // The IP helper has not shown up yet so sleep for a while and
             // try again.
             Warning("waiting for IP helper\n");
@@ -881,19 +881,50 @@ again:
     if (!NT_SUCCESS(status))
         goto fail2;
 
+    KeQuerySystemTime(&LastWake);
+    LastWake.QuadPart -= TIME_S(5);
+
+    Timeout.QuadPart = 0;
+
     for (;;) { 
+        LARGE_INTEGER   Now;
+        LONGLONG        Delta;
         PSOCKADDR_INET  Table;
         ULONG           Count;
         ULONG           Attempt;
 
         Trace("waiting...\n");
 
-        (VOID) KeWaitForSingleObject(Event,
-                                     Executive,
-                                     KernelMode,
-                                     FALSE,
-                                     NULL);
-        KeClearEvent(Event);
+        status = KeWaitForSingleObject(Event,
+                                       Executive,
+                                       KernelMode,
+                                       FALSE,
+                                       (Timeout.QuadPart != 0) ?
+                                       &Timeout :
+                                       NULL);
+
+        KeQuerySystemTime(&Now);
+
+        Delta = Now.QuadPart - LastWake.QuadPart;
+
+        if (status == STATUS_SUCCESS) { // Event was triggered
+            KeClearEvent(Event);
+
+            //
+            // The thread was last awake less than 5s ago so sleep
+            // for the remainder of the 5s and then process the MIB
+            // update.
+            //
+            if (Delta < TIME_S(5)) {
+                Timeout.QuadPart = TIME_RELATIVE(TIME_S(5) - Delta);
+                continue;
+            }
+        }
+
+        ASSERT3S(Delta, >=, TIME_S(5));
+
+        LastWake = Now;
+        Timeout.QuadPart = 0;
 
         Trace("awake\n");
 
