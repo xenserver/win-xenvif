@@ -62,6 +62,7 @@ struct _XENVIF_FRONTEND {
     XENVIF_FRONTEND_STATE       State;
     KSPIN_LOCK                  Lock;
     PXENVIF_THREAD              MibThread;
+    LONG                        MibNotifications;
     PXENVIF_THREAD              EjectThread;
     PXENBUS_STORE_WATCH         Watch;
     PCHAR                       BackendPath;
@@ -534,6 +535,8 @@ abort:
     return STATUS_SUCCESS;
 }
 
+#define MAXIMUM_ADDRESS_COUNT   64
+
 static FORCEINLINE NTSTATUS
 __FrontendGetAddressTable(
     IN  PXENVIF_FRONTEND            Frontend,
@@ -584,6 +587,10 @@ __FrontendGetAddressTable(
     if (Count == 0)
         goto done;
 
+    // Limit the size of the table we are willing to handle
+    if (Count > MAXIMUM_ADDRESS_COUNT)
+        Count = MAXIMUM_ADDRESS_COUNT;
+
     *AddressTable = __FrontendAllocate(sizeof (SOCKADDR_INET) * Count);
 
     status = STATUS_NO_MEMORY;
@@ -604,6 +611,9 @@ __FrontendGetAddressTable(
             continue;
 
         (*AddressTable)[(*AddressCount)++] = Row->Address;
+
+        if (*AddressCount == MAXIMUM_ADDRESS_COUNT)
+            break;
     }
 
     ASSERT3U(*AddressCount, ==, Count);
@@ -817,16 +827,44 @@ fail1:
 static VOID
 FrontendIpAddressChange(
     IN  PVOID                       Context,
-    IN  PMIB_UNICASTIPADDRESS_ROW   _Row OPTIONAL,
-    IN  MIB_NOTIFICATION_TYPE       NotificationType
+    IN  PMIB_UNICASTIPADDRESS_ROW   Row OPTIONAL,
+    IN  MIB_NOTIFICATION_TYPE       Type
     )
 {
     PXENVIF_FRONTEND                Frontend = Context;
+    PNET_LUID                       NetLuid;
+    KIRQL                           Irql;
 
-    UNREFERENCED_PARAMETER(_Row);
-    UNREFERENCED_PARAMETER(NotificationType);
+    KeAcquireSpinLock(&Frontend->Lock, &Irql);
 
+    if (Type == MibInitialNotification)
+        goto notify;
+
+    ASSERT(Row != NULL);
+
+    // The NetLuid is not valid until we are in at least the connected state
+    if (Frontend->State != FRONTEND_CONNECTED &&
+        Frontend->State != FRONTEND_ENABLED)
+        goto done;
+
+    NetLuid = __FrontendGetNetLuid(Frontend);
+
+    if (Row->InterfaceLuid.Info.IfType != NetLuid->Info.IfType)
+        goto done;
+
+    if (Row->InterfaceLuid.Info.NetLuidIndex != NetLuid->Info.NetLuidIndex)
+        goto done;
+
+    if (Row->Address.si_family != AF_INET &&
+        Row->Address.si_family != AF_INET6)
+        goto done;
+
+notify:
+    InterlockedIncrement(&Frontend->MibNotifications);
     ThreadWake(Frontend->MibThread);
+
+done:
+    KeReleaseSpinLock(&Frontend->Lock, Irql);
 }
 
 #define TIME_US(_us)            ((_us) * 10)
@@ -893,15 +931,23 @@ again:
         ULONG           Count;
         ULONG           Attempt;
 
-        Trace("waiting...\n");
+        if (Timeout.QuadPart == 0) {
+            Trace("waiting...\n");
 
-        status = KeWaitForSingleObject(Event,
-                                       Executive,
-                                       KernelMode,
-                                       FALSE,
-                                       (Timeout.QuadPart != 0) ?
-                                       &Timeout :
-                                       NULL);
+            status = KeWaitForSingleObject(Event,
+                                           Executive,
+                                           KernelMode,
+                                           FALSE,
+                                           NULL);
+        } else {
+            Trace("waiting %ums...\n", -Timeout.QuadPart / 10000ull);
+
+            status = KeWaitForSingleObject(Event,
+                                           Executive,
+                                           KernelMode,
+                                           FALSE,
+                                           &Timeout);
+        }
 
         KeQuerySystemTime(&Now);
 
@@ -931,11 +977,17 @@ again:
         if (ThreadIsAlerted(Self))
             break;
 
+        Count = InterlockedExchange(&Frontend->MibNotifications, 0);
+
+        Trace("%d notification(s)\n", Count);
+
         status = __FrontendGetAddressTable(Frontend,
                                            &Table,
                                            &Count);
         if (!NT_SUCCESS(status))
             continue;
+
+        Trace("%d address(es)\n", Count);
 
         TransmitterUpdateAddressTable(__FrontendGetTransmitter(Frontend),
                                       Table,
@@ -943,10 +995,14 @@ again:
 
         Attempt = 0;
         do {
+            Attempt++;
+
             status = FrontendDumpAddressTable(Frontend,
                                               Table,
                                               Count);
-        } while (status == STATUS_RETRY && ++Attempt <= 10);
+        } while (status == STATUS_RETRY && Attempt <= 10);
+
+        Trace("%d attempt(s)\n", Attempt);
 
         if (Count != 0)
             __FrontendFree(Table);
@@ -2107,6 +2163,8 @@ FrontendTeardown(
     ThreadAlert(Frontend->MibThread);
     ThreadJoin(Frontend->MibThread);
     Frontend->MibThread = NULL;
+
+    Frontend->MibNotifications = 0;
 
     TransmitterTeardown(__FrontendGetTransmitter(Frontend));
     Frontend->Transmitter = NULL;
