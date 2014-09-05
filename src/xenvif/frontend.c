@@ -787,6 +787,15 @@ FrontendDumpAddressTable(
                    Transaction,
                    TRUE);
 
+    if (NT_SUCCESS(status))
+        (VOID) STORE(Printf,
+                     Frontend->StoreInterface,
+                     NULL,
+                     "data",
+                     "updated",
+                     "%u",
+                     1);
+
     STORE(Release, Frontend->StoreInterface);
 
 done:
