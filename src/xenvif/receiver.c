@@ -384,7 +384,7 @@ RingProcessChecksum(
     Info = &Packet->Info;
 
     Payload.Mdl = &Packet->Mdl;
-    Payload.Offset = Info->Length;
+    Payload.Offset = Packet->Offset + Info->Length;
     Payload.Length = Packet->Length - Info->Length;
 
     ASSERT3U(Payload.Offset, <=, Payload.Mdl->ByteCount);

@@ -53,7 +53,7 @@ __AccumulateChecksum(
     Current = *Accumulator;
 
     while (ByteCount > 1) {
-        Current += *((PUSHORT)MappedSystemVa);
+        Current += (*((PUSHORT)MappedSystemVa)&0x0000FFFF);
         if (Current & (1 << 31))
             Current = (Current & 0xFFFF) + (Current >> 16);
         MappedSystemVa += 2;
