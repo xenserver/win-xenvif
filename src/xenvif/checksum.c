@@ -86,6 +86,7 @@ ChecksumVerify(
     )
 {
     ULONG       Accumulator = ~Calculated;
+    Accumulator &= 0x0000FFFF; // Protect against unwanted sign extension
 
     // See RFC 1624, section 5
     __AccumulateChecksum(&Accumulator, (PUCHAR)&Embedded, sizeof (USHORT));
