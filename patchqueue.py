@@ -30,7 +30,7 @@
 
 baserepo = "git://hg.uk.xensource.com/closed/windows/xenbits/win-xenvif.git"
 
-basetag = "a52f02ae237bd470dfe9e0fd912099b60622cb28"
+basetag = "aa070e59334bfc551050c7756c3d165ad6a3d825"
 
 package = "xenvif"
 
