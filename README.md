@@ -1,4 +1,4 @@
-XenVif - The XenServer Paravitual Network Class Driver for Windows
+XenVif - The XenServer Paravirtual Network Class Driver for Windows
 ==================================================================
 
 The XenVif package consists of a single device driver:
